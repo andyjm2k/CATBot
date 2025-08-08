@@ -6,6 +6,11 @@
     <title>Speech to Text and Text to Speech with OpenAI</title>
     <!-- Add this in the <head> section -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    
+    <!-- Favicon: inline SVG to avoid 404 requests to /favicon.ico and provide a visible tab icon -->
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23007BFF'/%3E%3Ctext x='50%25' y='54%25' font-size='34' text-anchor='middle' fill='white' font-family='Segoe UI, Roboto, sans-serif'%3EE%3C/text%3E%3C/svg%3E">
+    <!-- Legacy shortcut icon for broader compatibility -->
+    <link rel="shortcut icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23007BFF'/%3E%3Ctext x='50%25' y='54%25' font-size='34' text-anchor='middle' fill='white' font-family='Segoe UI, Roboto, sans-serif'%3EE%3C/text%3E%3C/svg%3E">
     <style>
         /* Base Styles */
         body {
@@ -321,6 +326,25 @@
             margin-bottom: 15px;
         }
 
+        /* Pulse effect on response window while awaiting API response */
+        #response-output.responding {
+            border-color: #007BFF;
+            animation: responsePulse 1.2s ease-in-out infinite;
+            box-shadow: 0 0 0 0 rgba(0, 123, 255, 0.25);
+        }
+
+        @keyframes responsePulse {
+            0% {
+                box-shadow: 0 0 0 0 rgba(0, 123, 255, 0.25);
+            }
+            50% {
+                box-shadow: 0 0 0 6px rgba(0, 123, 255, 0.12);
+            }
+            100% {
+                box-shadow: 0 0 0 0 rgba(0, 123, 255, 0.25);
+            }
+        }
+
         #user-input {
             margin-bottom: 10px;
         }
@@ -451,11 +475,23 @@
                         <video id="webcam-preview" style="width: 100%; border-radius: 10px;" autoplay playsinline></video>
                     </div>
 
+                    <label for="base-model-dropdown">Base Chat Model:</label>
+                    <select id="base-model-dropdown">
+                        <option value="">Loading models...</option>
+                    </select>
+                    <span class="helper-text">Model used for regular chat (default model)</span>
+
                     <label for="tool-model-dropdown">Tool Processing Model:</label>
                     <select id="tool-model-dropdown">
                         <option value="">Loading models...</option>
                     </select>
                     <span class="helper-text">Model used for processing tool requests (e.g., website navigation)</span>
+
+                    <label for="vision-model-dropdown">Vision Model (Clipboard/Webcam):</label>
+                    <select id="vision-model-dropdown">
+                        <option value="">Loading models...</option>
+                    </select>
+                    <span class="helper-text">Model used when webcam mode or clipboard image mode is enabled</span>
                 </div>
             </div>
         </div>
@@ -497,14 +533,31 @@
         const apiKeyInput = document.getElementById('api-key');
         const systemPromptInput = document.getElementById('system-prompt');
         const voiceDropdown = document.getElementById('voice-dropdown');
+        const SELECTED_VOICE_STORAGE_KEY = 'selectedVoiceURI'; // Persist selected voice for this browser session
         let voices = [];
+
+        // Persist voice selection when the user changes the dropdown
+        if (voiceDropdown) {
+            voiceDropdown.addEventListener('change', function() {
+                const selectedVoiceIndex = parseInt(voiceDropdown.value);
+                if (!isNaN(selectedVoiceIndex) && voices[selectedVoiceIndex]) {
+                    try {
+                        sessionStorage.setItem(SELECTED_VOICE_STORAGE_KEY, voices[selectedVoiceIndex].voiceURI);
+                    } catch (persistError) {
+                        console.warn('Could not persist selected voice in sessionStorage:', persistError);
+                    }
+                }
+            });
+        }
         let audioContext;
         let mediaStreamSource;
         let recorderNode;
         let audioData = [];
         let live2dModel;
         // update this with any model you want to use
-        let modelPath = './model_avatar/045mega/045mega.model3.json';
+        //let modelPath = './model_avatar/KITU17/KITU17.model3.json';
+        //let modelPath = './model_avatar/NVPU-demo/NVPU.model3.json';
+        let modelPath = './model_avatar/RACOON01/RACOON01.model3.json';
         // Add these variables at the top of your script section
         let clipboardData = null;
         let clipboardType = null;
@@ -527,14 +580,64 @@
 
         // Add these variables at the top of your script section
         let availableModels = [];
+
+        // Base chat model selection
+        const baseModelDropdown = document.getElementById('base-model-dropdown');
+        let baseModel = 'qwen/qwen3-4b';   // Default base model
+        let defaultBaseModel = 'qwen/qwen3-4b';
+
+        // Tool processing model selection
         const toolModelDropdown = document.getElementById('tool-model-dropdown');
-        let toolModel = 'qwen2.5-coder-7b-instruct'; // Default tool model
-        let defaultToolModel = 'qwen2.5-coder-7b-instruct'; // Store default model
+        let toolModel = 'qwen/qwen3-4b'; // Default tool model
+        let defaultToolModel = 'qwen/qwen3-4b'; // Store default model
+
+        // Vision model selection (used for clipboard image mode and webcam mode)
+        const visionModelDropdown = document.getElementById('vision-model-dropdown');
+        let visionModel = 'qwen/qwen2.5-vl-7b'; // Default vision model
+        let defaultVisionModel = 'qwen/qwen2.5-vl-7b';
         // Set the default value for the dropdown
+                if (baseModelDropdown) {
+            baseModelDropdown.value = defaultBaseModel;
+            baseModel = defaultBaseModel;
+
+            // Update base model when user selects a new one
+            baseModelDropdown.addEventListener('change', function() {
+                baseModel = this.value;
+                if (currentModelSpan) {
+                    currentModelSpan.textContent = `Current Model: ${getCurrentModel()}`;
+                }
+            });
+        }
+
         if (toolModelDropdown) {
             toolModelDropdown.value = defaultToolModel;
             toolModel = defaultToolModel;
+
+            // Update tool model when user selects a new one
+            toolModelDropdown.addEventListener('change', function() {
+                toolModel = this.value;
+                if (currentModelSpan) {
+                    currentModelSpan.textContent = `Current Model: ${getCurrentModel()}`;
+                }
+            });
         }
+
+        if (visionModelDropdown) {
+            visionModelDropdown.value = defaultVisionModel;
+            visionModel = defaultVisionModel;
+
+            // Update vision model when user selects a new one
+            visionModelDropdown.addEventListener('change', function() {
+                visionModel = this.value;
+                if (currentModelSpan) {
+                    currentModelSpan.textContent = `Current Model: ${getCurrentModel()}`;
+                }
+            });
+        }
+
+        // Refresh available models when API key or endpoint changes
+        apiKeyInput.addEventListener('change', fetchAvailableModels);
+        endpointInput.addEventListener('change', fetchAvailableModels);
 
         // Add this function to fetch available models
         async function fetchAvailableModels() {
@@ -552,33 +655,67 @@
                 const data = await response.json();
                 availableModels = data.data || [];
                 
-                // Update dropdown options
-                toolModelDropdown.innerHTML = availableModels
-                    .map(model => `<option value="${model.id}" ${model.id === defaultToolModel ? 'selected' : ''}>${model.id}</option>`)
-                    .join('');
-                    
-                // Set default tool model if not already set
-                if (!toolModelDropdown.value) {
-                    toolModelDropdown.value = defaultToolModel;
-                    toolModel = defaultToolModel;
+                // Update tool model dropdown
+                if (toolModelDropdown) {
+                    toolModelDropdown.innerHTML = availableModels
+                        .map(model => `<option value="${model.id}" ${model.id === defaultToolModel ? 'selected' : ''}>${model.id}</option>`)
+                        .join('');
+                    if (!toolModelDropdown.value) {
+                        toolModelDropdown.value = defaultToolModel;
+                        toolModel = defaultToolModel;
+                    }
+                }
+
+                // Update base model dropdown
+                if (baseModelDropdown) {
+                    baseModelDropdown.innerHTML = availableModels
+                        .map(model => `<option value="${model.id}" ${model.id === defaultBaseModel ? 'selected' : ''}>${model.id}</option>`)
+                        .join('');
+                    if (!baseModelDropdown.value) {
+                        baseModelDropdown.value = defaultBaseModel;
+                        baseModel = defaultBaseModel;
+                    }
+                }
+
+                // Update vision model dropdown (filter to models that look multimodal if desired)
+                if (visionModelDropdown) {
+                    visionModelDropdown.innerHTML = availableModels
+                        .map(model => `<option value="${model.id}" ${model.id === defaultVisionModel ? 'selected' : ''}>${model.id}</option>`)
+                        .join('');
+                    if (!visionModelDropdown.value) {
+                        visionModelDropdown.value = defaultVisionModel;
+                        visionModel = defaultVisionModel;
+                    }
                 }
             } catch (error) {
                 console.error('Error fetching models:', error);
-                toolModelDropdown.innerHTML = `<option value="${defaultToolModel}" selected>${defaultToolModel}</option>`;
-                toolModel = defaultToolModel;
+                if (toolModelDropdown) {
+                    toolModelDropdown.innerHTML = `<option value="${defaultToolModel}" selected>${defaultToolModel}</option>`;
+                    toolModel = defaultToolModel;
+                }
+                if (baseModelDropdown) {
+                    baseModelDropdown.innerHTML = `<option value="${defaultBaseModel}" selected>${defaultBaseModel}</option>`;
+                    baseModel = defaultBaseModel;
+                }
             }
         }
 
         // Add this event listener after your other initialization code
         clipboardToggle.addEventListener('change', function() {
             clipboardVisionEnabled = this.checked;
-            currentModelSpan.textContent = `Current Model: ${getCurrentModel()}`;
+            // Guard against missing span element
+            if (currentModelSpan) {
+                currentModelSpan.textContent = `Current Model: ${getCurrentModel()}`;
+            }
         });
 
         // Update the webcam toggle event listener
         webcamToggle.addEventListener('change', function() {
             webcamEnabled = this.checked;
-            currentModelSpan.textContent = `Current Model: ${getCurrentModel()}`;
+            // Guard against missing span element
+            if (currentModelSpan) {
+                currentModelSpan.textContent = `Current Model: ${getCurrentModel()}`;
+            }
             
             // Show/hide webcam preview
             const previewContainer = document.getElementById('webcam-preview-container');
@@ -605,21 +742,12 @@
             }
             // If webcam or clipboard vision is enabled, use the corresponding model
             if (webcamEnabled) {
-                return 'llava-v1.5-7b';
+                return visionModel || 'qwen/qwen2.5-vl-7b';
             }
             if (clipboardVisionEnabled && clipboardType === 'image') {
-                // Update endpoint URL when using GPT-4V
-                const currentEndpoint = endpointInput.value;
-                if (!currentEndpoint.includes('api.openai.com')) {
-                    endpointInput.value = 'https://api.openai.com/v1/chat/completions';
-                }
-                return 'gpt-4o'; // Use GPT-4V for clipboard images
+                return visionModel || 'qwen/qwen2.5-vl-7b';
             }
             if (clipboardVisionEnabled && clipboardType === 'text') {
-                const currentEndpoint = endpointInput.value;
-                if (currentEndpoint.includes('api.openai.com')) {
-                    endpointInput.value = 'http://localhost:1234/v1/chat/completions';
-                }
                 return toolModel;
             }
             
@@ -628,28 +756,37 @@
             if (currentEndpoint.includes('api.openai.com')) {
                 endpointInput.value = 'http://localhost:1234/v1/chat/completions';
             }
-            return 'qwen2.5-coder-3b-instruct';
+            return baseModel;
         }
 
         // Populate voice list for Text-to-Speech
         function loadVoices() {
+            // Fetch available voices and rebuild the dropdown without losing the user's selection
             voices = speechSynthesis.getVoices();
             voiceDropdown.innerHTML = '';
 
-            let defaultVoiceIndex = 0;  // Fallback default
-            
+            let defaultVoiceIndex = 0; // Fallback default
+
             if (voices.length === 0) {
                 console.warn('No voices available yet, waiting for voices to load');
                 return;
             }
-            
+
+            // Read any previously selected voice for this session
+            let storedVoiceURI = null;
+            try {
+                storedVoiceURI = sessionStorage.getItem(SELECTED_VOICE_STORAGE_KEY);
+            } catch (readError) {
+                console.warn('Could not read selected voice from sessionStorage:', readError);
+            }
+
             voices.forEach((voice, index) => {
                 const option = document.createElement('option');
                 option.value = index;
                 option.textContent = `${voice.name} (${voice.lang})`;
                 voiceDropdown.appendChild(option);
-                
-                // Look for Microsoft Ana Online or any English voice as fallback
+
+                // Prefer Microsoft Ana Online; otherwise choose first English voice as a reasonable default
                 if (voice.name === 'Microsoft Ana Online (Natural) - English (United States)') {
                     defaultVoiceIndex = index;
                 } else if (voice.lang.includes('en-') && defaultVoiceIndex === 0) {
@@ -657,9 +794,27 @@
                 }
             });
 
-            // Set the default voice
-            voiceDropdown.value = defaultVoiceIndex;
-            console.log('Voices loaded:', voices.length, 'Default voice:', voices[defaultVoiceIndex]?.name);
+            // Determine which voice should be selected after re-populating the list
+            let selectedIndex = defaultVoiceIndex;
+            if (storedVoiceURI) {
+                const idx = voices.findIndex(v => v.voiceURI === storedVoiceURI);
+                if (idx !== -1) {
+                    selectedIndex = idx;
+                }
+            }
+
+            voiceDropdown.value = String(selectedIndex);
+
+            // Ensure the chosen voice is persisted for the remainder of the session
+            try {
+                if (!storedVoiceURI && voices[selectedIndex]) {
+                    sessionStorage.setItem(SELECTED_VOICE_STORAGE_KEY, voices[selectedIndex].voiceURI);
+                }
+            } catch (persistError) {
+                console.warn('Could not persist default selected voice in sessionStorage:', persistError);
+            }
+
+            console.log('Voices loaded:', voices.length, 'Selected voice:', voices[selectedIndex]?.name);
         }
 
         // Initial load of voices
@@ -678,7 +833,13 @@
             console.log(`randomInRange: min=${min}, max=${max}, result=${result}`);
             return result;
         }
-
+	
+	// ─── Helper ───
+	// Removes everything between <think> … </think> (case-insensitive, multiline)
+	function stripThinkTags(text = '') {
+    		return text.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+	}
+	
         // Function to create smooth head movement
         async function animateHeadMovement(model, duration) {
             const targetX = randomInRange(-15, 15);
@@ -815,6 +976,9 @@
             if (typeof speechSynthesis !== 'undefined' && speechSynthesis.onvoiceschanged !== undefined) {
                 speechSynthesis.onvoiceschanged = loadVoices;
             }
+
+            // Fetch available models based on current tool settings
+            await fetchAvailableModels();
                 await initAudioRecording();
                 await initLive2D();
                 await initWebcam();
@@ -1414,7 +1578,7 @@ function saveWAVFile(wavBlob) {
         async function handleSaveToFile({ filename, content }) {
             try {
                 // Construct the full path
-                const savePath = `C:\\Users\\amitchell\\scratch\\${filename}`;
+                const savePath = `C:\\Users\\pc\\scratch\\${filename}`;
                 
                 // Create a Blob with the content
                 const blob = new Blob([content], { type: 'text/plain' });
@@ -1891,50 +2055,72 @@ function saveWAVFile(wavBlob) {
                 }
             }
 
-            // Try parsing as direct JSON
-            try {
-                // First try parsing the content as JSON
-                const jsonContent = typeof content === 'string' ? JSON.parse(content) : content;
-                console.log('Parsed JSON content:', jsonContent);
+            // Try parsing as direct JSON, but only if the content looks like JSON
+            if (typeof content === 'string') {
+                const trimmed = content.trim();
+                if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+                    try {
+                        const jsonContent = JSON.parse(trimmed);
+                        console.log('Parsed JSON content:', jsonContent);
 
-                // Handle Qwen-style format with action and contentPrompt
-                if (jsonContent.action && jsonContent.contentPrompt) {
-                    console.log('Found Qwen format with action and contentPrompt');
-                    return {
-                        function: {
-                            name: jsonContent.action,
-                            arguments: JSON.stringify({
-                                contentPrompt: jsonContent.contentPrompt
-                            })
+                        // Handle Qwen-style format with action and contentPrompt
+                        if (jsonContent.action && jsonContent.contentPrompt) {
+                            console.log('Found Qwen format with action and contentPrompt');
+                            return {
+                                function: {
+                                    name: jsonContent.action,
+                                    arguments: JSON.stringify({
+                                        contentPrompt: jsonContent.contentPrompt
+                                    })
+                                }
+                            };
                         }
-                    };
-                }
 
-                // Handle OpenAI-style function calling format
-                if (jsonContent.name && jsonContent.arguments) {
-                    console.log('Found OpenAI function calling format');
-                    return {
-                        function: {
-                            name: jsonContent.name,
-                            arguments: typeof jsonContent.arguments === 'string' 
-                                ? jsonContent.arguments 
-                                : JSON.stringify(jsonContent.arguments)
+                        // Handle OpenAI-style function calling format
+                        if (jsonContent.name && jsonContent.arguments) {
+                            console.log('Found OpenAI function calling format');
+                            return {
+                                function: {
+                                    name: jsonContent.name,
+                                    arguments: typeof jsonContent.arguments === 'string'
+                                        ? jsonContent.arguments
+                                        : JSON.stringify(jsonContent.arguments)
+                                }
+                            };
                         }
-                    };
-                }
-
-                // Handle case where the entire response is the parameters for a known tool name
-                if (content.includes('contentPrompt')) {
+                    } catch (error) {
+                        // Silently ignore if content is not valid JSON
+                        console.debug('Ignoring non-JSON tool response');
+                    }
+                } else if (trimmed.includes('contentPrompt')) {
+                    // Handle case where the entire response is the parameters for a known tool name
                     console.log('Found direct contentPrompt format');
                     return {
                         function: {
                             name: 'runWorkflow',
-                            arguments: typeof content === 'string' ? content : JSON.stringify(content)
+                            arguments: trimmed
                         }
                     };
                 }
-            } catch (error) {
-                console.error('Error parsing JSON tool response:', error);
+            } else if (content && typeof content === 'object') {
+                const jsonContent = content;
+                // Handle Qwen-style format with action and contentPrompt
+                if (jsonContent.action && jsonContent.contentPrompt) {
+                    return {
+                        function: {
+                            name: jsonContent.action,
+                            arguments: JSON.stringify({ contentPrompt: jsonContent.contentPrompt })
+                        }
+                    };
+                }
+                if (jsonContent.name && jsonContent.arguments) {
+                    return {
+                        function: {
+                            name: jsonContent.name,
+                            arguments: typeof jsonContent.arguments === 'string' ? jsonContent.arguments : JSON.stringify(jsonContent.arguments)
+                        }
+                    };
+                }
             }
 
             console.log('No valid tool response format found');
@@ -2401,8 +2587,6 @@ function saveWAVFile(wavBlob) {
     
             // Determine if we need to use OpenAI's endpoint
             if (clipboardVisionEnabled && clipboardType === 'image') {
-                endpoint = 'https://api.openai.com/v1/chat/completions';
-            } else {
                 endpoint = 'http://localhost:1234/v1/chat/completions';
             }
                 endpointInput.value = endpoint;
@@ -2595,11 +2779,13 @@ IMPORTANT REMINDER: Always wrap your tool responses in <tool> and <parameters> t
 
 Current memory cache contents:
 ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
-
+            
+            // Preserve existing system prompt by default; user input overrides it
+            const effectiveSystemPrompt = systemPromptInput.value.trim() || systemPrompt;
             const messages = [
                 { 
                     role: 'system', 
-                    content: systemPrompt
+                    content: effectiveSystemPrompt
                 },
                 ...(isToolRequest ? [] : chatHistory),
                 {
@@ -2635,10 +2821,15 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                 messages: messages,
                 max_tokens: 4096,
                 temperature: 0.7,
-                stream: false
+                stream: false,
+                // Provide tools per LM Studio tool-use docs
+                tools: tools,
+                tool_choice: 'auto'
             };
 
             try {
+                // Add pulsing effect to indicate we are waiting for the API
+                responseOutput.classList.add('responding');
                 console.log('Sending request:', {
                     endpoint,
                     model: getCurrentModel(),
@@ -2662,9 +2853,64 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                     const message = data.choices[0].message;
                     console.log('Processing message:', message);
 
-                    if (message.content) {
+                    // Handle LM Studio/OpenAI function/tool calling first
+                    if (message.tool_calls && Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
+                        try {
+                            // Add the assistant's tool call turn to messages
+                            messages.push({ role: 'assistant', tool_calls: message.tool_calls });
+
+                            // Execute each tool call and push results
+                            for (const tc of message.tool_calls) {
+                                const toolResult = await executeToolCall(tc, context);
+                                messages.push({
+                                    role: 'tool',
+                                    content: typeof toolResult === 'string' ? toolResult : JSON.stringify(toolResult),
+                                    tool_call_id: tc.id
+                                });
+                            }
+
+                            // Follow-up request to get the final assistant response after tool execution
+                            const followupResponse = await fetch(endpoint, {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                    'Authorization': `Bearer ${apiKey}`
+                                },
+                                body: JSON.stringify({
+                                    model: getCurrentModel(),
+                                    messages: messages,
+                                    max_tokens: 4096,
+                                    temperature: 0.7,
+                                    tools: tools,
+                                    tool_choice: 'auto'
+                                })
+                            });
+                            const followupData = await followupResponse.json();
+                            const finalMsg = followupData?.choices?.[0]?.message?.content || '';
+                            const finalContent = stripThinkTags(finalMsg);
+                            if (finalContent) {
+                                chatHistory.push({ role: 'assistant', content: finalContent });
+                                responseOutput.value = finalContent;
+                                textToSpeech(finalContent);
+                                const expressionFile = detectExpressionFromText(finalContent);
+                                if (expressionFile && live2dModel) {
+                                    await live2dModel.expression(expressionFile);
+                                }
+                            }
+                            // Remove pulsing effect after receiving the final response
+                            responseOutput.classList.remove('responding');
+                            return;
+                        } catch (toolErr) {
+                            console.error('Error handling tool calls via LM Studio/OpenAI format:', toolErr);
+                            // Fall back to legacy handling below
+                        }
+                    }
+		   
+    		    const rawContent   = message.content || '';
+         	    const cleanContent = stripThinkTags(rawContent);
+                    if (cleanContent) {
                         // Check for tool calls in Qwen's XML format
-                        const toolCall = parseToolResponse(message.content);
+                        const toolCall = parseToolResponse(cleanContent);
                         if (toolCall) {
                             console.log('Tool call detected:', toolCall);
                             try {
@@ -2674,34 +2920,39 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                                 // Add the assistant's message to chat history
                                 chatHistory.push({
                                     role: 'assistant',
-                                    content: message.content
+                                    content: cleanContent
                                 });
                                 
                                 if (result.success) {
                                     responseOutput.value = result.message;
                                     textToSpeech(result.message);
                                 }
+                                // Remove pulsing effect after tool execution
+                                responseOutput.classList.remove('responding');
                             } catch (error) {
                                 console.error('Tool execution error:', error);
                                 responseOutput.value = `Error executing tool: ${error.message}`;
+                                responseOutput.classList.remove('responding');
                             }
                         } else {
                             // Handle regular message response
-                        chatHistory.push({ role: 'assistant', content: message.content });
-                        responseOutput.value = message.content;
-                            textToSpeech(message.content);
+                        chatHistory.push({ role: 'assistant', content: cleanContent });
+                        responseOutput.value = cleanContent;
+                            textToSpeech(cleanContent);
                         
                             // Update Live2D expression
-                        const expressionFile = detectExpressionFromText(message.content);
+                        const expressionFile = detectExpressionFromText(cleanContent);
                         if (expressionFile && live2dModel) {
                             await live2dModel.expression(expressionFile);
                         }
+                        responseOutput.classList.remove('responding');
                     }
                 }
                 }
             } catch (error) {
                 console.error('Error:', error);
                 responseOutput.value = `Error: ${error.message}. Please try again.`;
+                responseOutput.classList.remove('responding');
             }
         }
 
@@ -2760,7 +3011,7 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                     model.scale.set(scale);
                     model.x = container.clientWidth / 2;
                     // Move the model up to focus on upper body
-                    model.y = container.clientHeight / 2.2;  // Changed from /2 to /1.2
+                    model.y = container.clientHeight / 1.4;  // Changed from /2 to /1.2
                 };
 
                 // Center the model
@@ -2903,7 +3154,9 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                 // If webcam fails to initialize, turn off webcam mode
                 webcamToggle.checked = false;
                 webcamEnabled = false;
-                currentModelSpan.textContent = 'Current Model: qwen2.5-coder-3b-instruct';
+                if (currentModelSpan) {
+                    currentModelSpan.textContent = 'Current Model: qwen2.5-coder-3b-instruct';
+                }
                 document.getElementById('webcam-preview-container').style.display = 'none';
                 alert('Failed to initialize webcam. Webcam mode has been disabled.');
             }
@@ -2977,7 +3230,7 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
 
                 const data = await response.json();
                 if (data.choices && data.choices.length > 0) {
-                    const message = data.choices[0].message.content.trim();
+                    const message = data.choices[0].cleanContent.trim();
                     
                     // Update response output
                     responseOutput.value = message;
@@ -3107,6 +3360,18 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
 
                 console.log('Enhanced query with context:', enhancedQuery);
 
+                // Build initial messages for this sub-request
+                const subMessages = [
+                    {
+                        role: 'system',
+                        content: 'You are a helpful assistant. When responding to queries that reference previous results, use that context to provide accurate answers. If the query references calculations or numeric results, incorporate those numbers in your response.'
+                    },
+                    {
+                        role: 'user',
+                        content: enhancedQuery
+                    }
+                ];
+
                 const response = await fetch(endpoint, {
                     method: 'POST',
                     headers: {
@@ -3115,27 +3380,60 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                     },
                     body: JSON.stringify({
                         model: getCurrentModel(),
-                        messages: [
-                            {
-                                role: 'system',
-                                content: 'You are a helpful assistant. When responding to queries that reference previous results, use that context to provide accurate answers. If the query references calculations or numeric results, incorporate those numbers in your response.'
-                            },
-                            {
-                                role: 'user',
-                                content: enhancedQuery
-                            }
-                        ],
-                        temperature: 0.7
+                        messages: subMessages,
+                        temperature: 0.7,
+                        // Provide tools so the model can decide to call them here as well
+                        tools: tools,
+                        tool_choice: 'auto'
                     })
                 });
 
                 const data = await response.json();
                 if (data.choices && data.choices.length > 0) {
-                    const response = data.choices[0].message.content.trim();
-                    console.log('LLM Response:', response);
+                    const msg = data.choices[0].message;
+                    // Handle potential tool calls using LM Studio/OpenAI format
+                    if (msg.tool_calls && Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
+                        try {
+                            // Add assistant tool calls
+                            subMessages.push({ role: 'assistant', tool_calls: msg.tool_calls });
+                            // Execute and add tool results
+                            for (const tc of msg.tool_calls) {
+                                const toolResult = await executeToolCall(tc, context);
+                                subMessages.push({
+                                    role: 'tool',
+                                    content: typeof toolResult === 'string' ? toolResult : JSON.stringify(toolResult),
+                                    tool_call_id: tc.id
+                                });
+                            }
+                            // Finalize with a follow-up call
+                            const follow = await fetch(endpoint, {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                    'Authorization': `Bearer ${apiKey}`
+                                },
+                                body: JSON.stringify({
+                                    model: getCurrentModel(),
+                                    messages: subMessages,
+                                    temperature: 0.7,
+                                    tools: tools,
+                                    tool_choice: 'auto'
+                                })
+                            });
+                            const followJson = await follow.json();
+                            const finalText = followJson?.choices?.[0]?.message?.content?.trim() || '';
+                            return { success: true, message: finalText };
+                        } catch (innerErr) {
+                            console.error('Error handling tool calls in handleLLMQuery:', innerErr);
+                            // Fall back to plain content if present
+                        }
+                    }
+
+                    const plain = (msg.content || '').trim();
+                    console.log('LLM Response:', plain);
                     return {
                         success: true,
-                        message: response
+                        message: plain
                     };
                 } else {
                     throw new Error('No response from LLM');
