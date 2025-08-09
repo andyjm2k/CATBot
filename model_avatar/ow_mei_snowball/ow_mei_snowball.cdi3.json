@@ -1,0 +1,259 @@
+{
+	"Version": 3,
+	"Parameters": [
+		{
+			"Id": "ParamAngleX",
+			"GroupId": "",
+			"Name": "角度 X"
+		},
+		{
+			"Id": "ParamAngleY",
+			"GroupId": "",
+			"Name": "角度 Y"
+		},
+		{
+			"Id": "ParamAngleZ",
+			"GroupId": "",
+			"Name": "角度 Z"
+		},
+		{
+			"Id": "ParamAngleX2",
+			"GroupId": "",
+			"Name": "角度 X ★"
+		},
+		{
+			"Id": "ParamAngleY2",
+			"GroupId": "",
+			"Name": "角度 Y ★"
+		},
+		{
+			"Id": "ParamAngleZ2",
+			"GroupId": "",
+			"Name": "角度 Z ★"
+		},
+		{
+			"Id": "ParamEyeLOpen",
+			"GroupId": "",
+			"Name": "左目　開閉"
+		},
+		{
+			"Id": "ParamEyeLSmile",
+			"GroupId": "",
+			"Name": "左目　笑顔"
+		},
+		{
+			"Id": "ParamEyeROpen",
+			"GroupId": "",
+			"Name": "右目　開閉"
+		},
+		{
+			"Id": "ParamEyeRSmile",
+			"GroupId": "",
+			"Name": "右目　笑顔"
+		},
+		{
+			"Id": "ParamEyeBallX",
+			"GroupId": "",
+			"Name": "目玉 X"
+		},
+		{
+			"Id": "ParamEyeBallY",
+			"GroupId": "",
+			"Name": "目玉 Y"
+		},
+		{
+			"Id": "ParamBreath",
+			"GroupId": "",
+			"Name": "呼吸"
+		},
+		{
+			"Id": "ParamBodyYure",
+			"GroupId": "",
+			"Name": "体のゆれ"
+		},
+		{
+			"Id": "ParamBodyFuwa",
+			"GroupId": "",
+			"Name": "体のふわ"
+		},
+		{
+			"Id": "ParamBodyDiagonal",
+			"GroupId": "",
+			"Name": "体の傾き"
+		},
+		{
+			"Id": "ParamFaceYure",
+			"GroupId": "",
+			"Name": "顔のゆれ"
+		},
+		{
+			"Id": "ParamFaceFuwa",
+			"GroupId": "",
+			"Name": "顔のふわ"
+		},
+		{
+			"Id": "ParamFast1",
+			"GroupId": "",
+			"Name": "初速1"
+		},
+		{
+			"Id": "ParamFast2",
+			"GroupId": "",
+			"Name": "初速2"
+		},
+		{
+			"Id": "ParamEffect",
+			"GroupId": "",
+			"Name": "回転振り子"
+		}
+	],
+	"ParameterGroups": [],
+	"Parts": [
+		{
+			"Id": "Root",
+			"Name": "Root"
+		},
+		{
+			"Id": "Part30",
+			"Name": "耳_左"
+		},
+		{
+			"Id": "Part3",
+			"Name": "耳_右"
+		},
+		{
+			"Id": "Part31",
+			"Name": "アーム_左"
+		},
+		{
+			"Id": "Part4",
+			"Name": "アーム_右"
+		},
+		{
+			"Id": "Part20",
+			"Name": "穴_左"
+		},
+		{
+			"Id": "Part5",
+			"Name": "穴_右"
+		},
+		{
+			"Id": "Part6",
+			"Name": "顔"
+		},
+		{
+			"Id": "Part8",
+			"Name": "ボディ_上"
+		},
+		{
+			"Id": "Part9",
+			"Name": "ボディ_下"
+		},
+		{
+			"Id": "Part10",
+			"Name": "飛行エフェクト"
+		},
+		{
+			"Id": "Part32",
+			"Name": "穴_左_中身"
+		},
+		{
+			"Id": "Part33",
+			"Name": "穴_左"
+		},
+		{
+			"Id": "Part34",
+			"Name": "穴_左_アーム用マスク"
+		},
+		{
+			"Id": "Part",
+			"Name": "穴_右_中身"
+		},
+		{
+			"Id": "Part12",
+			"Name": "穴_右"
+		},
+		{
+			"Id": "Part7",
+			"Name": "穴_右_アーム用マスク"
+		},
+		{
+			"Id": "Part35",
+			"Name": "顔_目_右"
+		},
+		{
+			"Id": "Part27",
+			"Name": "顔_目_左"
+		},
+		{
+			"Id": "Part15",
+			"Name": "ボディ_下_出っ張り_正面"
+		},
+		{
+			"Id": "Part24",
+			"Name": "ボディ_下_出っ張り_左"
+		},
+		{
+			"Id": "Part16",
+			"Name": "ボディ_下_出っ張り_右"
+		},
+		{
+			"Id": "Part21",
+			"Name": "ボディ_下_上部"
+		},
+		{
+			"Id": "Part22",
+			"Name": "ボディ_下_下部_ジェット_正面_マスク_左"
+		},
+		{
+			"Id": "Part13",
+			"Name": "ボディ_下_下部_ジェット_正面_マスク_右"
+		},
+		{
+			"Id": "Part14",
+			"Name": "ボディ_下_ジェット_正面"
+		},
+		{
+			"Id": "Part17",
+			"Name": "ボディ_下_下部"
+		},
+		{
+			"Id": "Part23",
+			"Name": "ボディ_下_左部"
+		},
+		{
+			"Id": "Part18",
+			"Name": "ボディ_下_右部"
+		},
+		{
+			"Id": "Part19",
+			"Name": "ボディ_下_底"
+		},
+		{
+			"Id": "Part28",
+			"Name": "ボディ_下_ジェット_左"
+		},
+		{
+			"Id": "Part2",
+			"Name": "ボディ_下_ジェット_右"
+		},
+		{
+			"Id": "Part25",
+			"Name": "ボディ_下_ジェット_正面_炎"
+		},
+		{
+			"Id": "Part29",
+			"Name": "ボディ_下_ジェット_左_炎"
+		},
+		{
+			"Id": "Part26",
+			"Name": "ボディ_下_ジェット_右_炎"
+		}
+	],
+	"CombinedParameters": [
+		[
+			"ParamAngleX2",
+			"ParamAngleY2"
+		]
+	]
+}

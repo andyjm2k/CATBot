@@ -492,6 +492,22 @@
                         <option value="">Loading models...</option>
                     </select>
                     <span class="helper-text">Model used when webcam mode or clipboard image mode is enabled</span>
+
+                    <label for="live2d-model-dropdown">Live2D Model:</label>
+                    <select id="live2d-model-dropdown">
+                        <option value="">Loading models...</option>
+                    </select>
+                    <span class="helper-text">Select which Live2D model to use (shows file name)</span>
+
+                    <label for="live2d-model-list">Live2D Model Paths (one per line):</label>
+                    <textarea id="live2d-model-list" rows="4" placeholder="./model_avatar/NAME/FILE.model3.json">./model_avatar/KITU17/KITU17.model3.json
+./model_avatar/NVPU-demo/NVPU.model3.json
+./model_avatar/RACOON01/RACOON01.model3.json</textarea>
+                    <span class="helper-text">Add new model paths on new lines to make them available in the selector</span>
+
+                    <label for="live2d-offset-range">Live2D Vertical Offset (px): <span id="live2d-offset-value">0</span></label>
+                    <input type="range" id="live2d-offset-range" min="-400" max="400" step="5" value="0" />
+                    <span class="helper-text">Fine-tune the model's vertical position in the view</span>
                 </div>
             </div>
         </div>
@@ -554,9 +570,9 @@
         let recorderNode;
         let audioData = [];
         let live2dModel;
-        // update this with any model you want to use
-        //let modelPath = './model_avatar/KITU17/KITU17.model3.json';
-        //let modelPath = './model_avatar/NVPU-demo/NVPU.model3.json';
+        let live2dTickerRegistered = false; // Ensures we only register the Live2D ticker once
+        let live2dOffsets = {}; // Persisted map of modelPath -> vertical offset in px
+        // Live2D model configuration (selector-driven)
         let modelPath = './model_avatar/RACOON01/RACOON01.model3.json';
         // Add these variables at the top of your script section
         let clipboardData = null;
@@ -569,6 +585,10 @@
         let webcamEnabled = false;
         const webcamToggle = document.getElementById('webcam-toggle');
         const currentModelSpan = document.getElementById('current-model');
+        // Storage keys for Live2D model list and selection persistence
+        const L2D_LIST_KEY = 'live2dModelList';
+        const L2D_SELECTED_KEY = 'live2dSelectedModelPath';
+        const L2D_OFFSETS_KEY = 'live2dVerticalOffsets'; // Map modelPath -> offset px
 
         // Add these variables at the top of your script section
         let clipboardVisionEnabled = false;
@@ -674,6 +694,138 @@
                     if (!baseModelDropdown.value) {
                         baseModelDropdown.value = defaultBaseModel;
                         baseModel = defaultBaseModel;
+                    }
+                }
+
+                // Populate Live2D model list dropdown from persisted storage or textarea
+                const live2dList = document.getElementById('live2d-model-list');
+                const live2dDropdown = document.getElementById('live2d-model-dropdown');
+                const live2dOffsetRange = document.getElementById('live2d-offset-range');
+                const live2dOffsetValue = document.getElementById('live2d-offset-value');
+                if (live2dList && live2dDropdown) {
+                    // Load any persisted list
+                    try {
+                        const savedList = localStorage.getItem(L2D_LIST_KEY);
+                        if (savedList) {
+                            live2dList.value = JSON.parse(savedList).join('\n');
+                        }
+                        const savedSelected = localStorage.getItem(L2D_SELECTED_KEY);
+                        if (savedSelected) {
+                            modelPath = savedSelected;
+                        }
+                        const savedOffsets = localStorage.getItem(L2D_OFFSETS_KEY);
+                        if (savedOffsets) {
+                            live2dOffsets = JSON.parse(savedOffsets);
+                        }
+                    } catch (e) {
+                        console.warn('Unable to read persisted Live2D model list/selection:', e);
+                    }
+
+                    const lines = live2dList.value
+                        .split(/\r?\n/)
+                        .map(l => l.trim())
+                        .filter(l => l.length > 0 && l.toLowerCase().endsWith('.model3.json'));
+
+                    // Build dropdown options showing only the file name
+                    live2dDropdown.innerHTML = lines
+                        .map(path => {
+                            const fileName = path.split('/').pop();
+                            const selected = path === modelPath ? 'selected' : '';
+                            return `<option value="${path}" ${selected}>${fileName}</option>`;
+                        })
+                        .join('');
+
+                    // If current modelPath is not in list, append it
+                    if (lines.indexOf(modelPath) === -1) {
+                        const fileName = modelPath.split('/').pop();
+                        const opt = document.createElement('option');
+                        opt.value = modelPath;
+                        opt.textContent = fileName;
+                        opt.selected = true;
+                        live2dDropdown.appendChild(opt);
+                    }
+
+                    // Update modelPath when user selects a new one and persist selection
+                    live2dDropdown.onchange = async () => {
+                        modelPath = live2dDropdown.value;
+                        try { localStorage.setItem(L2D_SELECTED_KEY, modelPath); } catch {}
+                        // Set the offset UI to stored value (default 0)
+                        const currentOffset = live2dOffsets[modelPath] ?? 0;
+                        if (live2dOffsetRange && live2dOffsetValue) {
+                            live2dOffsetRange.value = currentOffset;
+                            live2dOffsetValue.textContent = String(currentOffset);
+                        }
+                        // Optionally reinitialize Live2D with the new model
+                        try {
+                            cleanupLive2D();
+                        } catch (e) {
+                            console.warn('Error destroying previous Live2D model (safe to ignore):', e);
+                        }
+                        await initLive2D();
+                    };
+
+                    // Rebuild dropdown when the list changes (user adds new lines) and persist list
+                    live2dList.addEventListener('input', () => {
+                        const updated = live2dList.value
+                            .split(/\r?\n/)
+                            .map(l => l.trim())
+                            .filter(l => l.length > 0 && l.toLowerCase().endsWith('.model3.json'));
+                        try { localStorage.setItem(L2D_LIST_KEY, JSON.stringify(updated)); } catch {}
+
+                        // Keep current selection if still present, otherwise select the last added entry
+                        const selectedPath = updated.includes(modelPath)
+                            ? modelPath
+                            : (updated.length > 0 ? updated[updated.length - 1] : '');
+
+                        live2dDropdown.innerHTML = updated
+                            .map(path => {
+                                const fileName = path.split('/').pop();
+                                const selected = path === selectedPath ? 'selected' : '';
+                                return `<option value="${path}" ${selected}>${fileName}</option>`;
+                            })
+                            .join('');
+
+                        if (selectedPath && selectedPath !== modelPath) {
+                            modelPath = selectedPath;
+                            live2dDropdown.value = modelPath;
+                            try { localStorage.setItem(L2D_SELECTED_KEY, modelPath); } catch {}
+                            // Update offset UI to new model's stored offset
+                            const currentOffset = live2dOffsets[modelPath] ?? 0;
+                            if (live2dOffsetRange && live2dOffsetValue) {
+                                live2dOffsetRange.value = currentOffset;
+                                live2dOffsetValue.textContent = String(currentOffset);
+                            }
+                            // Reinitialize the model with the new selection
+                            try {
+                                cleanupLive2D();
+                            } catch (e) {
+                                console.warn('Error destroying previous Live2D model (safe to ignore):', e);
+                            }
+                            initLive2D();
+                        }
+                    });
+
+                    // Offset range change -> update persisted offset and apply immediately
+                    if (live2dOffsetRange && live2dOffsetValue) {
+                        const applyOffset = (offsetPx) => {
+                            if (live2dModel) {
+                                // Apply vertical offset to current model
+                                live2dModel.y += offsetPx - (live2dOffsets[modelPath] ?? 0);
+                            }
+                        };
+                        // Initialize UI with current offset
+                        const initialOffset = live2dOffsets[modelPath] ?? 0;
+                        live2dOffsetRange.value = initialOffset;
+                        live2dOffsetValue.textContent = String(initialOffset);
+                        live2dOffsetRange.addEventListener('input', () => {
+                            const newOffset = parseInt(live2dOffsetRange.value, 10) || 0;
+                            live2dOffsetValue.textContent = String(newOffset);
+                            // Apply delta offset
+                            applyOffset(newOffset);
+                            // Persist offset map
+                            live2dOffsets[modelPath] = newOffset;
+                            try { localStorage.setItem(L2D_OFFSETS_KEY, JSON.stringify(live2dOffsets)); } catch {}
+                        });
                     }
                 }
 
@@ -2976,8 +3128,12 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
 
                 const container = document.getElementById('live2d-container');
                 const canvas = document.getElementById('live2d-canvas');
+                if (!container || !canvas) {
+                    console.warn('Live2D container/canvas not found. Skipping init.');
+                    return;
+                }
                 
-                // Create PIXI Application with responsive dimensions
+                // Ensure the canvas stays in DOM; create PIXI Application with responsive dimensions
                 const app = new PIXI.Application({
                     view: canvas,
                     transparent: true,
@@ -2987,7 +3143,11 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                 });
 
                 // Initialize Live2D
-                await PIXI.live2d.Live2DModel.registerTicker(PIXI.Ticker);
+                // Register ticker only once to avoid duplicate RAF workloads
+                if (!live2dTickerRegistered) {
+                    await PIXI.live2d.Live2DModel.registerTicker(PIXI.Ticker);
+                    live2dTickerRegistered = true;
+                }
 
                 // Load model
                 const model = await PIXI.live2d.Live2DModel.from(modelPath, {
@@ -2995,7 +3155,8 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                     focus: false
                 });
                 
-                // Add model to stage
+                // Clear stage and add the fresh model to stage
+                app.stage.removeChildren();
                 app.stage.addChild(model);
 
                 // Function to resize model
@@ -3010,8 +3171,10 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                     
                     model.scale.set(scale);
                     model.x = container.clientWidth / 2;
-                    // Move the model up to focus on upper body
-                    model.y = container.clientHeight / 1.4;  // Changed from /2 to /1.2
+                    // Base vertical placement (upper body focus), then apply per-model offset (px)
+                    const baseY = container.clientHeight / 1.4;
+                    const offsetPx = live2dOffsets[modelPath] ?? 0;
+                    model.y = baseY + offsetPx;
                 };
 
                 // Center the model
@@ -3020,8 +3183,18 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                 // Initial resize
                 resizeModel();
 
-                // Add resize handler
-                window.addEventListener('resize', resizeModel);
+                // Add resize handler (debounced) and store app on model instance for cleanup
+                const debouncedResize = (() => {
+                    let raf = null;
+                    return () => {
+                        if (raf) cancelAnimationFrame(raf);
+                        raf = requestAnimationFrame(resizeModel);
+                    };
+                })();
+                window.addEventListener('resize', debouncedResize);
+                // Store references for proper cleanup when switching models
+                model.__app = app;
+                model.__resizeHandler = debouncedResize;
 
                 // Rest of your model setup...
                 model.draggable = false;
@@ -3046,6 +3219,35 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
 
             } catch (error) {
                 console.error('Failed to load Live2D model:', error);
+            }
+        }
+
+        // Helper to safely cleanup existing Live2D resources before switching models
+        function cleanupLive2D() {
+            try {
+                if (!live2dModel) return;
+                // Remove resize listener if present
+                if (live2dModel.__resizeHandler) {
+                    window.removeEventListener('resize', live2dModel.__resizeHandler);
+                }
+                // Destroy PIXI application if stored
+                if (live2dModel.__app) {
+                    // Guard against undefined destroy options inside PIXI
+                    try {
+                        // Do NOT remove the canvas view from the DOM; keep removeView=false
+                        live2dModel.__app.destroy(false, { children: true, texture: true, baseTexture: true });
+                    } catch {}
+                }
+                // Destroy Live2D model if possible
+                if (typeof live2dModel.destroy === 'function') {
+                    try {
+                        live2dModel.destroy({ children: true, texture: true, baseTexture: true });
+                    } catch {}
+                }
+            } catch (err) {
+                console.warn('cleanupLive2D encountered an issue:', err);
+            } finally {
+                live2dModel = null;
             }
         }
 
