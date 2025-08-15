@@ -418,6 +418,9 @@
     <script src="https://cdn.jsdelivr.net/npm/eventemitter3@4.0.7/umd/eventemitter3.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/index.min.js"></script>
     <script src="ai-autogen-call.js"></script>
+    <!-- Dependencies for PDF to PowerPoint conversion -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/pptxgenjs@3.12.0/dist/pptxgen.bundle.js"></script>
 </head>
 <body>
     <div class="container">
@@ -1573,21 +1576,58 @@ function saveWAVFile(wavBlob) {
             {
                 type: "function",
                 function: {
-                    name: "fetchRoboticsNews",
-                    description: "Fetches robotics news articles and saves them to a CSV file",
+                    name: "fetchNews",
+                    description: "Fetches news articles matching given keywords and saves them to a CSV file",
                     parameters: {
                         type: "object",
                         properties: {
                             searchTerm: {
                                 type: "string",
-                                description: "The search term for robotics news (e.g., 'robotics', 'AI robots', etc.)"
+                                description: "Keywords to search the news for (e.g., 'economy', 'climate change')"
                             },
                             filename: {
                                 type: "string",
-                                description: "The name of the CSV file to save the articles to (e.g., 'robotics_news.csv')"
+                                description: "CSV filename to save the articles to (e.g., 'news.csv')"
                             }
                         },
                         required: ["searchTerm", "filename"]
+                    }
+                }
+            },
+            {
+                type: "function",
+                function: {
+                    name: "pdfToPowerPoint",
+                    description: "Converts a PDF into an informative and presentable PowerPoint presentation (.pptx)",
+                    parameters: {
+                        type: "object",
+                        properties: {
+                            pdfUrl: {
+                                type: "string",
+                                description: "Optional: URL of the PDF to convert (http/https). If omitted, set promptUpload to true."
+                            },
+                            promptUpload: {
+                                type: "boolean",
+                                description: "If true, prompt the user to upload a local PDF file instead of using a URL"
+                            },
+                            title: {
+                                type: "string",
+                                description: "Presentation title to place on the title slide"
+                            },
+                            author: {
+                                type: "string",
+                                description: "Optional author name to show on the title slide"
+                            },
+                            maxSlides: {
+                                type: "number",
+                                description: "Optional maximum number of content slides to generate (default: 15)"
+                            },
+                            filename: {
+                                type: "string",
+                                description: "Output .pptx filename (e.g., 'presentation.pptx')"
+                            }
+                        },
+                        required: ["title", "filename"]
                     }
                 }
             },
@@ -1818,8 +1858,15 @@ function saveWAVFile(wavBlob) {
                     case "saveToFile":
                         result = await handleSaveToFile(args);
                         break;
+                    case "fetchNews":
+                        result = await handleNews(args);
+                        break;
+                    // Backward compatibility: route legacy name to the new handler
                     case "fetchRoboticsNews":
-                        result = await handleRoboticsNews(args);
+                        result = await handleNews(args);
+                        break;
+                    case "pdfToPowerPoint":
+                        result = await handlePdfToPowerPoint(args);
                         break;
                     case "uploadToGoogleDrive":
                         result = await handleGoogleDriveUpload(args);
@@ -2187,21 +2234,35 @@ function saveWAVFile(wavBlob) {
         function parseToolResponse(content) {
             console.log('Parsing tool response:', content);
 
-            // Try XML format first
-            const toolMatch = content.match(/<tool>(.*?)<\/tool>/);
-            const paramsMatch = content.match(/<parameters>([\s\S]*?)<\/parameters>/);
+            // Ignore any <tool> tags that occur inside fenced code blocks
+            // This prevents example snippets from being executed as real tool calls
+            const contentWithoutCode = typeof content === 'string'
+                ? content.replace(/```[\s\S]*?```/g, '')
+                : content;
+
+            // Try XML format first, but only if tags appear at top-level content
+            const toolMatch = contentWithoutCode.match(/<tool>(.*?)<\/tool>/);
+            const paramsMatch = contentWithoutCode.match(/<parameters>([\s\S]*?)<\/parameters>/);
             
             if (toolMatch && paramsMatch) {
                 try {
-                    const toolName = toolMatch[1].trim();
-                    const parameters = JSON.parse(paramsMatch[1].trim());
-                    console.log('Successfully parsed XML format:', { toolName, parameters });
-                    return {
-                        function: {
-                            name: toolName,
-                            arguments: JSON.stringify(parameters)
-                        }
-                    };
+                    const leading = contentWithoutCode.slice(0, toolMatch.index).trim();
+                    const trailing = contentWithoutCode.slice(paramsMatch.index + paramsMatch[0].length).trim();
+
+                    // Only treat as a real tool call if tags are top-level (no extra text around)
+                    if (leading || trailing) {
+                        console.log('Found tool tags but not at top-level; treating as plain text');
+                    } else {
+                        const toolName = toolMatch[1].trim();
+                        const parameters = JSON.parse(paramsMatch[1].trim());
+                        console.log('Successfully parsed XML format (top-level):', { toolName, parameters });
+                        return {
+                            function: {
+                                name: toolName,
+                                arguments: JSON.stringify(parameters)
+                            }
+                        };
+                    }
                 } catch (error) {
                     console.error('Error parsing XML tool response:', error);
                 }
@@ -2818,15 +2879,27 @@ Parameters:
     "query": "string (the search query or keywords to look for)"
 }
 
-9. fetchRoboticsNews
-Description: Fetches robotics news articles and saves them to a CSV file
+9. fetchNews
+Description: Fetches news articles matching given keywords and saves them to a CSV file
 Parameters:
 {
-    "searchTerm": "string (the search term for robotics news)",
-    "filename": "string (the name of the CSV file to save to)"
+    "searchTerm": "string (keywords to search the news for)",
+    "filename": "string (CSV filename to save to)"
 }
 
-10. uploadToGoogleDrive
+10. pdfToPowerPoint
+Description: Converts a PDF into a presentable PowerPoint presentation (.pptx)
+Parameters:
+{
+    "pdfUrl": "string (optional URL to the PDF)",
+    "promptUpload": "boolean (if true, prompt the user to upload a local PDF)",
+    "title": "string (title for the presentation)",
+    "author": "string (optional author)",
+    "maxSlides": "number (optional maximum number of slides; default 15)",
+    "filename": "string (output .pptx filename)"
+}
+
+11. uploadToGoogleDrive
 Description: Uploads a file to Google Drive using service account authentication
 Parameters:
 {
@@ -2885,21 +2958,31 @@ Assistant: <tool>webSearch</tool>
 }
 </parameters>
 
-User: "Get the latest robotics news and save it to robotics_updates.csv"
-Assistant: <tool>fetchRoboticsNews</tool>
+User: "Get the latest news about climate policy and save it to climate_updates.csv"
+Assistant: <tool>fetchNews</tool>
 <parameters>
 {
-    "searchTerm": "robotics",
-    "filename": "robotics_updates.csv"
+    "searchTerm": "climate policy",
+    "filename": "climate_updates.csv"
 }
 </parameters>
 
-User: "Upload the robotics_updates.csv file to Google Drive"
+User: "Turn this PDF into a PowerPoint: https://example.com/report.pdf. Title it 'Quarterly Report' and save as report.pptx"
+Assistant: <tool>pdfToPowerPoint</tool>
+<parameters>
+{
+    "promptUpload": true,
+    "title": "Quarterly Report",
+    "filename": "report.pptx"
+}
+</parameters>
+
+User: "Upload the climate_updates.csv file to Google Drive"
 Assistant: <tool>uploadToGoogleDrive</tool>
 <parameters>
 {
-    "filePath": "robotics_updates.csv",
-    "fileName": "Latest Robotics News"
+    "filePath": "climate_updates.csv",
+    "fileName": "Latest Climate News"
 }
 </parameters>
 
@@ -3048,6 +3131,22 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                                 if (expressionFile && live2dModel) {
                                     await live2dModel.expression(expressionFile);
                                 }
+                            } else {
+                                // Fallback: if the model returned no content after tool calls,
+                                // synthesize a simple confirmation from the last tool result
+                                const lastToolMsg = messages.slice().reverse().find(m => m.role === 'tool')?.content;
+                                let confirmText = '';
+                                try {
+                                    const parsed = typeof lastToolMsg === 'string' ? JSON.parse(lastToolMsg) : lastToolMsg;
+                                    confirmText = parsed?.message || '';
+                                } catch (_) {
+                                    confirmText = typeof lastToolMsg === 'string' ? lastToolMsg : '';
+                                }
+                                if (confirmText) {
+                                    chatHistory.push({ role: 'assistant', content: confirmText });
+                                    responseOutput.value = confirmText;
+                                    textToSpeech(confirmText);
+                                }
                             }
                             // Remove pulsing effect after receiving the final response
                             responseOutput.classList.remove('responding');
@@ -3057,9 +3156,9 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                             // Fall back to legacy handling below
                         }
                     }
-		   
-    		    const rawContent   = message.content || '';
-         	    const cleanContent = stripThinkTags(rawContent);
+
+                    const rawContent = message.content || '';
+                    const cleanContent = stripThinkTags(rawContent);
                     if (cleanContent) {
                         // Check for tool calls in Qwen's XML format
                         const toolCall = parseToolResponse(cleanContent);
@@ -3100,10 +3199,29 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                         responseOutput.classList.remove('responding');
                     }
                 }
+                } else {
+                    // No choices returned; ensure UI is not left waiting
+                    console.warn('LLM returned no choices');
+                    const lastToolMsg = messages.slice().reverse().find(m => m.role === 'tool')?.content;
+                    if (lastToolMsg) {
+                        let fallbackText = '';
+                        try {
+                            const parsed = typeof lastToolMsg === 'string' ? JSON.parse(lastToolMsg) : lastToolMsg;
+                            fallbackText = parsed?.message || '';
+                        } catch (_) {
+                            fallbackText = typeof lastToolMsg === 'string' ? lastToolMsg : '';
+                        }
+                        if (fallbackText) {
+                            chatHistory.push({ role: 'assistant', content: fallbackText });
+                            responseOutput.value = fallbackText;
+                            textToSpeech(fallbackText);
+                        }
+                    }
                 }
             } catch (error) {
                 console.error('Error:', error);
                 responseOutput.value = `Error: ${error.message}. Please try again.`;
+            } finally {
                 responseOutput.classList.remove('responding');
             }
         }
@@ -3661,7 +3779,7 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
             }
         });
 
-        async function handleRoboticsNews({ searchTerm, filename }) {
+        async function handleNews({ searchTerm, filename }) {
             const API_KEY = 'ad059d25195f48acab2bfbd089ee8fa1';
             
             try {
@@ -3704,16 +3822,173 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                 
                 return {
                     success: true,
-                    message: `Successfully saved ${articles.length} robotics news articles to ${filename}`
+                    message: `Successfully saved ${articles.length} news articles to ${filename}`
                 };
                 
             } catch (error) {
-                console.error('Robotics news error:', error);
+                console.error('News fetch error:', error);
                 return {
                     success: false,
-                    message: `Error fetching robotics news: ${error.message}`
+                    message: `Error fetching news: ${error.message}`
                 };
             }
+        }
+
+        // Converts a PDF (by URL or data URL) into a PowerPoint presentation.
+        // Basic approach:
+        // 1) Load PDF with PDF.js
+        // 2) Create title slide
+        // 3) For up to maxSlides pages, render page to canvas, do a simple text extraction, create a slide with a title and bullet points, plus a thumbnail of the page
+        // 4) Save the PPTX file
+        async function handlePdfToPowerPoint({ pdfUrl, promptUpload = false, title, author = "", maxSlides = 15, filename }) {
+            try {
+                if (!window.pdfjsLib) {
+                    throw new Error('PDF.js not loaded');
+                }
+                if (!window.PptxGenJS) {
+                    throw new Error('PptxGenJS not loaded');
+                }
+
+                // Configure PDF.js worker if available
+                if (window.pdfjsLib.GlobalWorkerOptions) {
+                    window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+                }
+
+                // If requested, prompt the user to upload a PDF
+                if (!pdfUrl && promptUpload) {
+                    const file = await promptForLocalPdf();
+                    if (!file) {
+                        return { success: false, message: 'No PDF selected.' };
+                    }
+                    // Use data URL for local files to avoid CORS issues
+                    pdfUrl = await readFileAsDataUrl(file);
+                }
+                if (!pdfUrl) {
+                    throw new Error('No PDF source provided. Provide pdfUrl or set promptUpload=true.');
+                }
+
+                const loadingTask = window.pdfjsLib.getDocument({ url: pdfUrl, withCredentials: false });
+                const pdf = await loadingTask.promise;
+
+                const pptx = new window.PptxGenJS();
+                pptx.layout = 'LAYOUT_16x9';
+
+                // Title slide
+                {
+                    const slide = pptx.addSlide();
+                    slide.addText(title, { x: 0.5, y: 1.2, w: 9, h: 1, fontSize: 36, bold: true });
+                    if (author) {
+                        slide.addText(author, { x: 0.5, y: 2.1, w: 9, h: 0.6, fontSize: 18, color: '666666' });
+                    }
+                }
+
+                const numPages = Math.min(pdf.numPages, Math.max(1, maxSlides));
+                for (let pageIndex = 1; pageIndex <= numPages; pageIndex++) {
+                    const page = await pdf.getPage(pageIndex);
+                    const viewport = page.getViewport({ scale: 1.5 });
+
+                    // Render page to canvas for thumbnail
+                    const canvas = document.createElement('canvas');
+                    const context = canvas.getContext('2d');
+                    canvas.width = viewport.width;
+                    canvas.height = viewport.height;
+                    await page.render({ canvasContext: context, viewport }).promise;
+                    const dataUrl = canvas.toDataURL('image/png');
+
+                    // Extract text content and generate bullets (simple heuristic)
+                    const textContent = await page.getTextContent();
+                    const pageText = textContent.items.map(it => it.str).join(' ').replace(/\s+/g, ' ').trim();
+                    const bullets = summarizeTextToBullets(pageText, 5);
+
+                    const slide = pptx.addSlide();
+                    const slideTitle = `Page ${pageIndex}`;
+                    slide.addText(slideTitle, { x: 0.5, y: 0.5, w: 9, h: 0.6, fontSize: 24, bold: true });
+                    if (bullets.length > 0) {
+                        slide.addText(bullets.map(b => `• ${b}`).join('\n'), {
+                            x: 0.5,
+                            y: 1.2,
+                            w: 5.5,
+                            h: 4.0,
+                            fontSize: 14
+                        });
+                    }
+                    // Add page thumbnail on the right
+                    slide.addImage({ data: dataUrl, x: 6.2, y: 1.0, w: 3.0, h: 4.5 });
+                }
+
+                await pptx.writeFile({ fileName: filename });
+                return { success: true, message: `Saved presentation to ${filename}` };
+            } catch (error) {
+                console.error('PDF to PPTX error:', error);
+                return { success: false, message: `Error converting PDF: ${error.message}` };
+            }
+        }
+
+        // Shows a visible file picker UI to let the user select a local PDF file
+        function promptForLocalPdf() {
+            return new Promise(resolve => {
+                const wrapper = document.createElement('div');
+                wrapper.id = 'pdf-upload-prompt';
+                wrapper.style.position = 'fixed';
+                wrapper.style.top = '20px';
+                wrapper.style.right = '20px';
+                wrapper.style.zIndex = '99999';
+                wrapper.style.background = '#ffffff';
+                wrapper.style.border = '1px solid #ddd';
+                wrapper.style.borderRadius = '8px';
+                wrapper.style.boxShadow = '0 4px 12px rgba(0,0,0,0.1)';
+                wrapper.style.padding = '12px';
+                wrapper.style.fontFamily = 'Segoe UI, Roboto, sans-serif';
+
+                const text = document.createElement('div');
+                text.textContent = 'Select a PDF to convert to PowerPoint';
+                text.style.marginBottom = '8px';
+
+                const input = document.createElement('input');
+                input.type = 'file';
+                input.accept = 'application/pdf';
+
+                const cancel = document.createElement('button');
+                cancel.textContent = 'Cancel';
+                cancel.style.marginLeft = '8px';
+                cancel.onclick = () => {
+                    document.body.removeChild(wrapper);
+                    resolve(null);
+                };
+
+                input.onchange = () => {
+                    const file = input.files && input.files[0] ? input.files[0] : null;
+                    document.body.removeChild(wrapper);
+                    resolve(file);
+                };
+
+                wrapper.appendChild(text);
+                wrapper.appendChild(input);
+                wrapper.appendChild(cancel);
+                document.body.appendChild(wrapper);
+                input.focus();
+            });
+        }
+
+        // Reads a File as a data URL
+        function readFileAsDataUrl(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onerror = () => reject(new Error('Failed to read file'));
+                reader.onload = () => resolve(reader.result);
+                reader.readAsDataURL(file);
+            });
+        }
+
+        // Simple, client-side text summarization into bullets
+        function summarizeTextToBullets(text, maxBullets) {
+            if (!text) return [];
+            const sentences = text
+                .split(/(?<=[.!?])\s+/)
+                .map(s => s.trim())
+                .filter(s => s.length > 0 && /[a-zA-Z]/.test(s));
+            const limited = sentences.slice(0, Math.max(1, maxBullets));
+            return limited.map(s => s.length > 180 ? s.slice(0, 177) + '…' : s);
         }
 
         async function handleGoogleDriveUpload({ filePath, fileName }) {
