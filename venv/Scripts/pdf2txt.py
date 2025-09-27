@@ -1,4 +1,4 @@
-#!C:\Users\pc\AI_assistant\venv\Scripts\python.exe
+#!C:\Users\andyj\AI_assistant\venv\Scripts\python.exe
 """A command line tool for extracting text and images from PDF and
 output it to plain text, html, xml or tags.
 """

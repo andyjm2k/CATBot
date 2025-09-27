@@ -25,7 +25,7 @@ class Shape:
     #
     ###########################################################################
 
-    def __init__(self, shape_type, name, options):
+    def __init__(self, shape_type, name: str, options) -> None:
         """
         Constructor.
 
@@ -68,21 +68,18 @@ class Shape:
     #
     ###########################################################################
 
-    def _set_options(self, options):
+    def _set_options(self, options) -> None:
         self.align = self._get_align_properties(options.get("align"))
         self.fill = self._get_fill_properties(options.get("fill"))
         self.font = self._get_font_properties(options.get("font"))
         self.gradient = self._get_gradient_properties(options.get("gradient"))
-        self.line = self._get_line_properties(options.get("line"))
+        self.line = self._get_line_properties(options)
 
         self.text_rotation = options.get("text_rotation", 0)
 
         self.textlink = options.get("textlink", "")
         if self.textlink.startswith("="):
             self.textlink = self.textlink.lstrip("=")
-
-        if options.get("border"):
-            self.line = self._get_line_properties(options["border"])
 
         # Gradient fill overrides solid fill.
         if self.gradient:
@@ -95,14 +92,18 @@ class Shape:
     ###########################################################################
 
     @staticmethod
-    def _get_line_properties(line):
+    def _get_line_properties(options: dict) -> dict:
         # Convert user line properties to the structure required internally.
-
-        if not line:
+        if not options.get("line") and not options.get("border"):
             return {"defined": False}
 
         # Copy the user defined properties since they will be modified.
-        line = copy.deepcopy(line)
+        # Depending on the context, the Excel UI property may be called 'line'
+        # or 'border'. Internally they are the same so we handle both.
+        if options.get("line"):
+            line = copy.deepcopy(options["line"])
+        else:
+            line = copy.deepcopy(options["border"])
 
         dash_types = {
             "solid": "solid",
@@ -377,13 +378,13 @@ class Shape:
         if not font:
             return attributes
 
-        if font["name"] is not None:
+        if font.get("name") is not None:
             attributes.append(("typeface", font["name"]))
 
-        if font["pitch_family"] is not None:
+        if font.get("pitch_family") is not None:
             attributes.append(("pitchFamily", font["pitch_family"]))
 
-        if font["charset"] is not None:
+        if font.get("charset") is not None:
             attributes.append(("charset", font["charset"]))
 
         return attributes

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import List, Union, Iterable, Optional
 from typing_extensions import Literal, Required, Annotated, TypedDict
 
+from ..._types import SequenceNotStr
 from ..._utils import PropertyInfo
 from ..model_param import ModelParam
 from .beta_message_param import BetaMessageParam
@@ -88,30 +89,7 @@ class MessageCreateParamsBase(TypedDict, total=False):
     { "role": "user", "content": [{ "type": "text", "text": "Hello, Claude" }] }
     ```
 
-    Starting with Claude 3 models, you can also send image content blocks:
-
-    ```json
-    {
-      "role": "user",
-      "content": [
-        {
-          "type": "image",
-          "source": {
-            "type": "base64",
-            "media_type": "image/jpeg",
-            "data": "/9j/4AAQSkZJRg..."
-          }
-        },
-        { "type": "text", "text": "What is in this image?" }
-      ]
-    }
-    ```
-
-    We currently support the `base64` source type for images, and the `image/jpeg`,
-    `image/png`, `image/gif`, and `image/webp` media types.
-
-    See [examples](https://docs.anthropic.com/en/api/messages-examples#vision) for
-    more input examples.
+    See [input examples](https://docs.anthropic.com/en/api/messages-examples).
 
     Note that if you want to include a
     [system prompt](https://docs.anthropic.com/en/docs/system-prompts), you can use
@@ -146,7 +124,7 @@ class MessageCreateParamsBase(TypedDict, total=False):
     [service-tiers](https://docs.anthropic.com/en/api/service-tiers) for details.
     """
 
-    stop_sequences: List[str]
+    stop_sequences: SequenceNotStr[str]
     """Custom text sequences that will cause the model to stop generating.
 
     Our models will normally stop when they have naturally completed their turn,
