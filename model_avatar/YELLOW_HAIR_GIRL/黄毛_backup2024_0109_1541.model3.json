@@ -1,0 +1,18 @@
+{
+	"Version": 3,
+	"FileReferences": {
+		"Moc": "黄毛_backup2024_0109_1541.moc3",
+		"Textures": [
+			"黄毛_backup2024_0109_1541.8192/texture_00.png"
+		],
+		"Physics": "黄毛_backup2024_0109_1541.physics3.json",
+		"DisplayInfo": "黄毛_backup2024_0109_1541.cdi3.json"
+	},
+	"Groups": [
+		{
+			"Target": "Parameter",
+			"Name": "EyeBlink",
+			"Ids": []
+		}
+	]
+}

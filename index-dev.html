@@ -3236,6 +3236,21 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
             userInput.value = '';
         });
 
+        // Handle Enter key submission and Shift+Enter for newlines
+        userInput.addEventListener('keydown', function (event) {
+            if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault(); // Prevent default newline behavior
+                const userText = userInput.value;
+                if (userText.trim() !== '') {
+                    fetchOpenAIResponse(userText);
+                    userInput.value = '';
+                } else {
+                    alert('Please enter some text or record your voice.');
+                }
+            }
+            // Shift+Enter allows normal newline behavior (default)
+        });
+
         // Update the initLive2D function
         async function initLive2D() {
             try {
