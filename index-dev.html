@@ -144,6 +144,16 @@
             position: relative;
             aspect-ratio: 1/1;
             max-width: 600px;
+        }
+
+        /* VRM Container */
+        #vrm-container {
+            width: 100%;
+            height: 100%;
+            position: relative;
+            aspect-ratio: 1/1;
+            max-width: 600px;
+            display: none;
             margin: 0 auto;
             overflow: hidden;
         }
@@ -151,6 +161,28 @@
         #live2d-canvas {
             width: 100%;
             height: 100%;
+        }
+
+        #vrm-canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+
+        /* Toggle container styling */
+        .toggle-container {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .toggle-container input[type="radio"] {
+            margin-right: 5px;
+        }
+
+        .toggle-container label {
+            margin-right: 15px;
+            cursor: pointer;
         }
 
         /* Clipboard Preview */
@@ -417,6 +449,22 @@
     <script src="https://cdn.jsdelivr.net/npm/pixi.js@6.5.2/dist/browser/pixi.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/eventemitter3@4.0.7/umd/eventemitter3.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/index.min.js"></script>
+
+    <!-- Three.js and VRM dependencies (VRM 1.0 via modules) -->
+    <script type="module">
+        import * as THREE_NS from 'https://esm.sh/three@0.150.1';
+        import { GLTFLoader } from 'https://esm.sh/three@0.150.1/examples/jsm/loaders/GLTFLoader.js';
+        import { VRMLoaderPlugin, VRMUtils } from 'https://esm.sh/@pixiv/three-vrm@3.4.3?deps=three@0.150.1';
+
+        // Expose to global for non-module scripts below (do NOT mutate the module namespace)
+        window.THREE = THREE_NS;
+        window.GLTFLoader = GLTFLoader;
+        window.VRMLoaderPlugin = VRMLoaderPlugin;
+        window.VRMUtils = VRMUtils;
+
+        // Signal readiness
+        window.__vrmModulesReady = true;
+    </script>
     <script src="ai-autogen-call.js"></script>
     <!-- Dependencies for PDF to PowerPoint conversion -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
@@ -428,6 +476,9 @@
             <h1><center>Chat to Eva - Enhanced Voice Assistant</center></h1>
             <div id="live2d-container">
                 <canvas id="live2d-canvas"></canvas>
+            </div>
+            <div id="vrm-container" style="display: none;">
+                <canvas id="vrm-canvas"></canvas>
             </div>
             
             <!-- Add the collapsible tool settings here -->
@@ -512,6 +563,43 @@
                     <input type="range" id="live2d-offset-range" min="-400" max="400" step="5" value="0" />
                     <span class="helper-text">Fine-tune the model's vertical position in the view</span>
 
+                    <label for="avatar-mode-toggle">Avatar Mode:</label>
+                    <div class="toggle-container">
+                        <input type="radio" id="live2d-mode" name="avatar-mode" value="live2d" checked>
+                        <label for="live2d-mode">Live2D</label>
+                        <input type="radio" id="vrm-mode" name="avatar-mode" value="vrm">
+                        <label for="vrm-mode">VRM</label>
+                    </div>
+                    <span class="helper-text">Switch between 2D Live2D and 3D VRM avatar modes</span>
+
+                    <label for="vrm-model-dropdown">VRM Model:</label>
+                    <select id="vrm-model-dropdown">
+                        <option value="">Loading models...</option>
+                    </select>
+                    <span class="helper-text">Select which VRM model to use (shows file name)</span>
+
+                    <label for="vrm-model-list">VRM Model Paths (one per line):</label>
+                    <textarea id="vrm-model-list" rows="4" placeholder="./model_avatar/NAME/FILE.vrm
+Example: ./model_avatar/MyVRM/MyModel.vrm
+Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
+                    <span class="helper-text">Add new VRM model paths on new lines to make them available in the selector</span>
+
+                    <label for="vrm-scale-range">VRM Scale: <span id="vrm-scale-value">1.0</span></label>
+                    <input type="range" id="vrm-scale-range" min="0.1" max="3.0" step="0.1" value="1.0" />
+                    <span class="helper-text">Adjust the 3D model's scale in the view</span>
+
+                    <label for="vrm-position-x-range">VRM Position X: <span id="vrm-position-x-value">0</span></label>
+                    <input type="range" id="vrm-position-x-range" min="-10" max="10" step="0.1" value="0" />
+                    <span class="helper-text">Adjust the 3D model's horizontal position</span>
+
+                    <label for="vrm-position-y-range">VRM Position Y: <span id="vrm-position-y-value">0</span></label>
+                    <input type="range" id="vrm-position-y-range" min="-10" max="10" step="0.1" value="0" />
+                    <span class="helper-text">Adjust the 3D model's vertical position</span>
+
+                    <label for="vrm-rotation-range">VRM Rotation: <span id="vrm-rotation-value">0</span></label>
+                    <input type="range" id="vrm-rotation-range" min="-180" max="180" step="1" value="0" />
+                    <span class="helper-text">Rotate the 3D model (degrees)</span>
+
                 </div>
             </div>
         </div>
@@ -579,6 +667,18 @@
         let live2dOffsets = {}; // Persisted map of modelPath -> vertical offset in px
         // Live2D model configuration (selector-driven)
         let modelPath = './model_avatar/RACOON01/RACOON01.model3.json';
+
+        // VRM model variables
+        let vrmModel;
+        let vrmScene;
+        let vrmCamera;
+        let vrmRenderer;
+        let vrmMixer;
+        let vrmClock;
+        let vrmLipSyncMorphTarget;
+        let vrmPositions = {}; // Persisted map of modelPath -> {scale, positionX, positionY, rotation}
+        let currentVRMModelPath = '';
+        // Removed fallback VRM; enforce valid user-provided .vrm only
         // Add these variables at the top of your script section
         let clipboardData = null;
         let clipboardType = null;
@@ -594,6 +694,11 @@
         const L2D_LIST_KEY = 'live2dModelList';
         const L2D_SELECTED_KEY = 'live2dSelectedModelPath';
         const L2D_OFFSETS_KEY = 'live2dVerticalOffsets'; // Map modelPath -> offset px
+
+        // Storage keys for VRM model list and selection persistence
+        const VRM_LIST_KEY = 'vrmModelList';
+        const VRM_SELECTED_KEY = 'vrmSelectedModelPath';
+        const VRM_POSITIONS_KEY = 'vrmPositions'; // Map modelPath -> {scale, positionX, positionY, rotation}
 
         // Add these variables at the top of your script section
         let clipboardVisionEnabled = false;
@@ -672,6 +777,21 @@
             const apiKey = apiKeyInput.value.trim();
 
             try {
+                // Ensure VRM ES modules have loaded and THREE globals are present
+                if (!window.__vrmModulesReady || !window.THREE || !THREE.GLTFLoader || !THREE.VRMLoaderPlugin) {
+                    await new Promise((resolve) => {
+                        const start = Date.now();
+                        const timer = setInterval(() => {
+                            if (window.__vrmModulesReady && window.THREE && THREE.GLTFLoader && THREE.VRMLoaderPlugin) {
+                                clearInterval(timer);
+                                resolve();
+                            } else if (Date.now() - start > 5000) {
+                                clearInterval(timer);
+                                resolve();
+                            }
+                        }, 50);
+                    });
+                }
                 const response = await fetch(endpoint, {
                     method: 'GET',
                     headers: {
@@ -834,6 +954,164 @@
                             try { localStorage.setItem(L2D_OFFSETS_KEY, JSON.stringify(live2dOffsets)); } catch {}
                         });
                     }
+                }
+
+                // Initialize VRM model list and controls
+                const vrmList = document.getElementById('vrm-model-list');
+                const vrmDropdown = document.getElementById('vrm-model-dropdown');
+                if (vrmList && vrmDropdown) {
+                    // Load any persisted list
+                    try {
+                        const savedList = localStorage.getItem(VRM_LIST_KEY);
+                        if (savedList) {
+                            vrmList.value = JSON.parse(savedList).join('\n');
+                        }
+                        const savedSelected = localStorage.getItem(VRM_SELECTED_KEY);
+                        if (savedSelected) {
+                            currentVRMModelPath = savedSelected;
+                        }
+                        const savedPositions = localStorage.getItem(VRM_POSITIONS_KEY);
+                        if (savedPositions) {
+                            vrmPositions = JSON.parse(savedPositions);
+                        }
+                    } catch (e) {
+                        console.warn('Unable to read persisted VRM model list/selection:', e);
+                    }
+
+                    let lines = vrmList.value
+                        .split('\n')
+                        .map(l => l.trim())
+                        .filter(l => l.length > 0 && l.toLowerCase().endsWith('.vrm'));
+                    // If no VRM entries are provided, keep list empty and wait for user input
+
+                    // Populate dropdown with model paths
+                    vrmDropdown.innerHTML = '';
+                    lines.forEach(line => {
+                        const opt = document.createElement('option');
+                        opt.value = line;
+                        opt.textContent = line.split('/').pop();
+                        vrmDropdown.appendChild(opt);
+                    });
+
+                    // Set initial selection
+                    if (lines.includes(currentVRMModelPath)) {
+                        vrmDropdown.value = currentVRMModelPath;
+                    } else if (lines.length > 0) {
+                        currentVRMModelPath = lines[0];
+                        vrmDropdown.value = currentVRMModelPath;
+                    }
+
+                    vrmDropdown.onchange = async () => {
+                        currentVRMModelPath = vrmDropdown.value;
+                        try { localStorage.setItem(VRM_SELECTED_KEY, currentVRMModelPath); } catch {}
+                        // Optionally reinitialize VRM with the new model
+                        if (document.getElementById('vrm-mode').checked) {
+                            cleanupVRM();
+                            await initVRM();
+                        }
+                    };
+
+                    vrmList.addEventListener('input', async () => {
+                        const updated = vrmList.value
+                            .split('\n')
+                            .map(l => l.trim())
+                            .filter(l => l.length > 0 && l.toLowerCase().endsWith('.vrm'));
+
+                        try { localStorage.setItem(VRM_LIST_KEY, JSON.stringify(updated)); } catch {}
+
+                        // Keep current selection if still present, otherwise select the last added entry
+                        vrmDropdown.innerHTML = '';
+                        updated.forEach(line => {
+                            const opt = document.createElement('option');
+                            opt.value = line;
+                            opt.textContent = line.split('/').pop();
+                            vrmDropdown.appendChild(opt);
+                        });
+
+                        let selectedPath = currentVRMModelPath;
+                        if (!updated.includes(currentVRMModelPath)) {
+                            selectedPath = updated[updated.length - 1] || '';
+                        }
+
+                        if (selectedPath) {
+                            currentVRMModelPath = selectedPath;
+                            vrmDropdown.value = currentVRMModelPath;
+                            try { localStorage.setItem(VRM_SELECTED_KEY, currentVRMModelPath); } catch {}
+                            if (document.getElementById('vrm-mode').checked) {
+                                cleanupVRM();
+                                await initVRM();
+                            }
+                        }
+                    });
+                }
+
+                // VRM position controls
+                const vrmScaleRange = document.getElementById('vrm-scale-range');
+                const vrmScaleValue = document.getElementById('vrm-scale-value');
+                const vrmPositionXRange = document.getElementById('vrm-position-x-range');
+                const vrmPositionXValue = document.getElementById('vrm-position-x-value');
+                const vrmPositionYRange = document.getElementById('vrm-position-y-range');
+                const vrmPositionYValue = document.getElementById('vrm-position-y-value');
+                const vrmRotationRange = document.getElementById('vrm-rotation-range');
+                const vrmRotationValue = document.getElementById('vrm-rotation-value');
+
+                if (vrmScaleRange && vrmScaleValue) {
+                    // Load persisted positions for current model
+                    const currentPositions = vrmPositions[currentVRMModelPath] || { scale: 1.0, positionX: 0, positionY: 0, rotation: 0 };
+                    vrmScaleRange.value = currentPositions.scale;
+                    vrmScaleValue.textContent = String(currentPositions.scale);
+                    vrmPositionXRange.value = currentPositions.positionX;
+                    vrmPositionXValue.textContent = String(currentPositions.positionX);
+                    vrmPositionYRange.value = currentPositions.positionY;
+                    vrmPositionYValue.textContent = String(currentPositions.positionY);
+                    vrmRotationRange.value = currentPositions.rotation;
+                    vrmRotationValue.textContent = String(currentPositions.rotation);
+
+                    // Scale control
+                    vrmScaleRange.addEventListener('input', () => {
+                        const newScale = parseFloat(vrmScaleRange.value) || 1.0;
+                        vrmScaleValue.textContent = String(newScale);
+                        updateVRMTransform();
+                    });
+
+                    // Position X control
+                    vrmPositionXRange.addEventListener('input', () => {
+                        const newX = parseFloat(vrmPositionXRange.value) || 0;
+                        vrmPositionXValue.textContent = String(newX);
+                        updateVRMTransform();
+                    });
+
+                    // Position Y control
+                    vrmPositionYRange.addEventListener('input', () => {
+                        const newY = parseFloat(vrmPositionYRange.value) || 0;
+                        vrmPositionYValue.textContent = String(newY);
+                        updateVRMTransform();
+                    });
+
+                    // Rotation control
+                    vrmRotationRange.addEventListener('input', () => {
+                        const newRotation = parseInt(vrmRotationRange.value, 10) || 0;
+                        vrmRotationValue.textContent = String(newRotation);
+                        updateVRMTransform();
+                    });
+                }
+
+                // Avatar mode toggle
+                const live2dModeRadio = document.getElementById('live2d-mode');
+                const vrmModeRadio = document.getElementById('vrm-mode');
+
+                if (live2dModeRadio && vrmModeRadio) {
+                    live2dModeRadio.addEventListener('change', async () => {
+                        if (live2dModeRadio.checked) {
+                            await switchToLive2D();
+                        }
+                    });
+
+                    vrmModeRadio.addEventListener('change', async () => {
+                        if (vrmModeRadio.checked) {
+                            await switchToVRM();
+                        }
+                    });
                 }
 
                 // Update vision model dropdown (filter to models that look multimodal if desired)
@@ -1065,6 +1343,11 @@
                         animateHeadMovement(live2dModel, 1000);
                     }, 3000);
                 }
+
+                // VRM lip sync animation
+                if (vrmModel && document.getElementById('vrm-mode').checked) {
+                    animateVRMLipSync(1.0);
+                }
             };
 
             utterance.onboundary = function(event) {
@@ -1073,6 +1356,12 @@
                     const mouthOpenValue = isMoving ? 1 : 0;
                     live2dModel.internalModel.coreModel.setParameterValueById(mouthOpenY, mouthOpenValue);
                 }
+
+                // VRM lip sync animation
+                if (vrmModel && document.getElementById('vrm-mode').checked) {
+                    const lipValue = isMoving ? 1.0 : 0.0;
+                    animateVRMLipSync(lipValue);
+                }
             };
 
             utterance.onend = function() {
@@ -1080,7 +1369,7 @@
                 if (headMovementInterval) {
                     clearInterval(headMovementInterval);
                 }
-                
+
                 if (live2dModel) {
                     live2dModel.internalModel.coreModel.setParameterValueById(mouthOpenY, 0);
                     animateHeadMovement(live2dModel, 1000).then(() => {
@@ -1088,6 +1377,11 @@
                         live2dModel.internalModel.coreModel.setParameterValueById('ParamAngleY', 0);
                         live2dModel.internalModel.coreModel.setParameterValueById('ParamAngleZ', 0);
                     });
+                }
+
+                // VRM lip sync end animation
+                if (vrmModel && document.getElementById('vrm-mode').checked) {
+                    animateVRMLipSync(0.0);
                 }
             };
 
@@ -1139,7 +1433,15 @@
             // Fetch available models based on current tool settings
             await fetchAvailableModels();
                 await initAudioRecording();
-                await initLive2D();
+                // Initialize avatar based on mode preference (default to Live2D)
+                const avatarMode = localStorage.getItem('avatarMode') || 'live2d';
+                if (avatarMode === 'vrm') {
+                    document.getElementById('vrm-mode').checked = true;
+                    await switchToVRM();
+                } else {
+                    document.getElementById('live2d-mode').checked = true;
+                    await switchToLive2D();
+                }
                 await initWebcam();
 
                 // Initialize collapsible sections
@@ -3429,6 +3731,228 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
             }
         }
 
+        // VRM Functions
+        async function initVRM() {
+            try {
+                const container = document.getElementById('vrm-container');
+                const canvas = document.getElementById('vrm-canvas');
+                if (!container || !canvas) {
+                    console.warn('VRM container/canvas not found. Skipping init.');
+                    return;
+                }
+
+                // Ensure a valid .vrm path is selected
+                if (!currentVRMModelPath || !currentVRMModelPath.toLowerCase().endsWith('.vrm')) {
+                    throw new Error('Selected model path is not a .vrm file. Please provide a valid VRM file.');
+                }
+
+                // Initialize Three.js scene
+                const scene = new window.THREE.Scene();
+                const camera = new window.THREE.PerspectiveCamera(45, canvas.clientWidth / canvas.clientHeight, 0.1, 1000);
+                const renderer = new window.THREE.WebGLRenderer({ canvas: canvas, antialias: true });
+                renderer.setSize(canvas.clientWidth, canvas.clientHeight);
+                renderer.setClearColor(0x000000, 0);
+
+                // Add lighting
+                const ambientLight = new window.THREE.AmbientLight(0x404040, 0.6);
+                scene.add(ambientLight);
+                const directionalLight = new window.THREE.DirectionalLight(0xffffff, 0.8);
+                directionalLight.position.set(1, 1, 1);
+                scene.add(directionalLight);
+
+                // Load VRM model
+                const loader = new window.GLTFLoader();
+                // Register VRM plugin for GLTFLoader if available
+                if (window.VRMLoaderPlugin) {
+                    loader.register(parser => new window.VRMLoaderPlugin(parser));
+                }
+
+                const gltf = await new Promise((resolve, reject) => {
+                    loader.load(
+                        currentVRMModelPath,
+                        resolve,
+                        undefined,
+                        reject
+                    );
+                });
+
+                // Extract VRM instance from GLTFLoader plugin output
+                const vrm = gltf && gltf.userData && gltf.userData.vrm ? gltf.userData.vrm : null;
+                if (!vrm) {
+                    throw new Error('Loaded GLTF does not contain VRM data. Ensure the file is a valid .vrm model.');
+                }
+
+                // Optionally clean up joints for performance
+                if (window.VRMUtils && vrm && vrm.scene) {
+                    try { window.VRMUtils.removeUnnecessaryJoints(vrm.scene); } catch (_) {}
+                }
+
+                // Setup VRM model
+                vrm.scene.traverse((child) => {
+                    if (child.isMesh && child.material) {
+                        child.material.needsUpdate = true;
+                    }
+                });
+
+                scene.add(vrm.scene);
+
+                // Find lip sync morph target
+                if (vrm.blendShapeProxy) {
+                    const blendShapes = vrm.blendShapeProxy.getBlendShapeGroupList();
+                    for (const group of blendShapes) {
+                        if (group.name.includes('mouth') || group.name.includes('lip') || group.name.includes('MouthOpen') || group.name.includes('MouthSmile')) {
+                            vrmLipSyncMorphTarget = group;
+                            break;
+                        }
+                    }
+                }
+
+                // Position camera
+                camera.position.set(0, 0, 5);
+                camera.lookAt(0, 0, 0);
+
+                // Animation mixer
+                const mixer = new window.THREE.AnimationMixer(vrm.scene);
+                const clock = new window.THREE.Clock();
+
+                // Store references
+                vrmModel = vrm;
+                vrmScene = scene;
+                vrmCamera = camera;
+                vrmRenderer = renderer;
+                vrmMixer = mixer;
+                vrmClock = clock;
+
+                // Apply initial transforms
+                updateVRMTransform();
+
+                // Start render loop
+                function animate() {
+                    requestAnimationFrame(animate);
+
+                    if (vrmClock) {
+                        const delta = vrmClock.getDelta();
+                        if (vrmMixer) vrmMixer.update(delta);
+                    }
+
+                    if (vrmRenderer && vrmScene && vrmCamera) {
+                        vrmRenderer.render(vrmScene, vrmCamera);
+                    }
+                }
+                animate();
+
+                console.log('VRM model loaded successfully');
+
+            } catch (error) {
+                console.error('Failed to load VRM model:', error);
+            }
+        }
+
+        function cleanupVRM() {
+            try {
+                if (!vrmModel) return;
+
+                if (vrmScene) {
+                    vrmScene.traverse((child) => {
+                        if (child.geometry) child.geometry.dispose();
+                        if (child.material) {
+                            if (Array.isArray(child.material)) {
+                                child.material.forEach(material => material.dispose());
+                            } else {
+                                child.material.dispose();
+                            }
+                        }
+                    });
+                }
+
+                if (vrmRenderer) {
+                    vrmRenderer.dispose();
+                }
+
+                vrmModel = null;
+                vrmScene = null;
+                vrmCamera = null;
+                vrmRenderer = null;
+                vrmMixer = null;
+                vrmClock = null;
+                vrmLipSyncMorphTarget = null;
+
+            } catch (error) {
+                console.warn('Error cleaning up VRM:', error);
+            }
+        }
+
+        function updateVRMTransform() {
+            if (!vrmModel || !vrmModel.scene) return;
+
+            const currentPositions = vrmPositions[currentVRMModelPath] || { scale: 1.0, positionX: 0, positionY: 0, rotation: 0 };
+
+            // Apply scale
+            vrmModel.scene.scale.setScalar(currentPositions.scale);
+
+            // Apply position
+            vrmModel.scene.position.set(currentPositions.positionX, currentPositions.positionY, 0);
+
+            // Apply rotation
+            vrmModel.scene.rotation.y = (currentPositions.rotation * Math.PI) / 180;
+
+            // Persist the positions
+            vrmPositions[currentVRMModelPath] = currentPositions;
+            try { localStorage.setItem(VRM_POSITIONS_KEY, JSON.stringify(vrmPositions)); } catch {}
+        }
+
+        function animateVRMLipSync(value) {
+            if (!vrmModel || !vrmLipSyncMorphTarget) return;
+
+            try {
+                vrmModel.blendShapeProxy.setValue(vrmLipSyncMorphTarget, value);
+            } catch (error) {
+                console.warn('Error animating VRM lip sync:', error);
+            }
+        }
+
+        async function switchToLive2D() {
+            // Hide VRM container
+            const vrmContainer = document.getElementById('vrm-container');
+            if (vrmContainer) vrmContainer.style.display = 'none';
+
+            // Show Live2D container
+            const live2dContainer = document.getElementById('live2d-container');
+            if (live2dContainer) live2dContainer.style.display = 'block';
+
+            // Cleanup VRM if active
+            cleanupVRM();
+
+            // Initialize Live2D if needed
+            if (!live2dModel) {
+                await initLive2D();
+            }
+
+            // Persist avatar mode preference
+            try { localStorage.setItem('avatarMode', 'live2d'); } catch {}
+        }
+
+        async function switchToVRM() {
+            // Hide Live2D container
+            const live2dContainer = document.getElementById('live2d-container');
+            if (live2dContainer) live2dContainer.style.display = 'none';
+
+            // Show VRM container
+            const vrmContainer = document.getElementById('vrm-container');
+            if (vrmContainer) vrmContainer.style.display = 'block';
+
+            // Cleanup Live2D if active
+            cleanupLive2D();
+
+            // Initialize VRM if needed
+            if (!vrmModel) {
+                await initVRM();
+            }
+
+            // Persist avatar mode preference
+            try { localStorage.setItem('avatarMode', 'vrm'); } catch {}
+        }
+
         // Add this after your existing button event listeners
         document.getElementById('paste-btn').addEventListener('click', async () => {
             try {
@@ -4985,4 +5509,3 @@ ${fullText.substring(0, 6000)}...${minimalImageInfo}`;
     </script>
 </body>
 </html>
-
