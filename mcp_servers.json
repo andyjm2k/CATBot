@@ -1,0 +1,14 @@
+[
+  {
+    "id": "mcp-browser-use-server",
+    "name": "MCP Browser Use Server",
+    "command": "C:\\\\Users\\\\andyj\\\\AI_assistant\\\\venv312\\\\Scripts\\\\python.exe C:\\\\Users\\\\andyj\\\\AI_assistant\\\\mcp-browser-use\\\\server.py GEMINI_API_KEY=\"AIzaSyAOqhlea6lSWrnTfO6HM3HMIr3sYY_Iabk\" GEMINI_API_KEY=\"AIzaSyAOqhlea6lSWrnTfO6HM3HMIr3sYY_Iabk\" BROWSER_USE_MODEL=\"gemini-flash-latest\"",
+    "apiKey": "AIzaSyAOqhlea6lSWrnTfO6HM3HMIr3sYY_Iabk",
+    "model": "gemini-flash-latest",
+    "url": "",
+    "wsUrl": "",
+    "status": "disconnected",
+    "enabled": true,
+    "action": null
+  }
+]

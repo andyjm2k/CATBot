@@ -4,7 +4,7 @@ import subprocess
 commands = [
     'start cmd /k "%venv% && python -m http.server"',  # Start Http.server
     'start cmd /k "%venv% && cd ..\whisper-api-server && python main.py"',  # Start Whisper
-    'start cmd /k npm start',          # Start node proxy server for brave websearch tool
+    'start cmd /k "C:\\Users\\andyj\\AI_assistant\\venv312\\Scripts\\python C:\\Users\\andyj\\AI_assistant\\proxy_server.py"',  # Start Proxy server
     'start cmd /k "%venv% && autogenstudio ui"'  # Start executable with parameter
 ]
 
