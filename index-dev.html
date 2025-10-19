@@ -3804,15 +3804,30 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
 
                 scene.add(vrm.scene);
 
-                // Find lip sync morph target
-                if (vrm.blendShapeProxy) {
-                    const blendShapes = vrm.blendShapeProxy.getBlendShapeGroupList();
-                    for (const group of blendShapes) {
-                        if (group.name.includes('mouth') || group.name.includes('lip') || group.name.includes('MouthOpen') || group.name.includes('MouthSmile')) {
-                            vrmLipSyncMorphTarget = group;
-                            break;
+                // Find lip sync morph target (supports VRM 0.x and VRM 1.0)
+                try {
+                    if (vrm.expressionManager) {
+                        // VRM 1.0: use vowel expression key 'aa' if available, fallback to common names
+                        vrmLipSyncMorphTarget = 'aa';
+                    } else if (vrm.blendShapeProxy) {
+                        // VRM 0.x: use preset 'A' if available, fallback by name
+                        const groups = vrm.blendShapeProxy.getBlendShapeGroupList ? vrm.blendShapeProxy.getBlendShapeGroupList() : [];
+                        const findByPreset = (preset) => groups.find(g => String(g.presetName || '').toUpperCase() === String(preset).toUpperCase());
+                        const findByName = (regex) => groups.find(g => regex.test(String(g.name || '')));
+                        const aPreset = findByPreset('A');
+                        if (aPreset) {
+                            vrmLipSyncMorphTarget = 'A';
+                        } else {
+                            const mouthOpen = findByName(/MouthOpen/i);
+                            const anyMouth = mouthOpen || findByName(/Mouth/i) || findByName(/Lip/i);
+                            vrmLipSyncMorphTarget = anyMouth ? anyMouth.name : null;
                         }
+                    } else {
+                        vrmLipSyncMorphTarget = null;
                     }
+                } catch (e) {
+                    console.warn('Failed to resolve VRM lip sync target:', e);
+                    vrmLipSyncMorphTarget = null;
                 }
 
                 // Position camera
@@ -3834,6 +3849,35 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                 // Apply initial transforms
                 updateVRMTransform();
 
+                // Create a look-at target and hook mouse movement so the avatar tracks the pointer
+                const lookTarget = new window.THREE.Object3D(); // 3D object used as look target
+                scene.add(lookTarget); // Add target into scene
+                if (vrm.lookAt) { // If VRM has a lookAt component
+                    vrm.lookAt.target = lookTarget; // Set target so head/eyes follow
+                }
+                const onMouseMove = (event) => { // Mouse move handler to convert screen to world position
+                    const rect = canvas.getBoundingClientRect(); // Canvas bounds for NDC conversion
+                    const ndcX = ((event.clientX - rect.left) / rect.width) * 2 - 1; // Normalized X in clip space
+                    const ndcY = -(((event.clientY - rect.top) / rect.height) * 2 - 1); // Normalized Y in clip space
+                    const vec = new window.THREE.Vector3(ndcX, ndcY, 0.5); // Point in clip space depth 0.5
+                    vec.unproject(camera); // Convert to world space
+                    const dir = vec.sub(camera.position).normalize(); // Ray direction from camera
+                    const distance = 2.0; // Distance in front of camera to place target
+                    lookTarget.position.copy(camera.position).add(dir.multiplyScalar(distance)); // Update target position
+                };
+                canvas.addEventListener('mousemove', onMouseMove); // Attach mouse tracking
+                canvas.__vrmMouseMoveHandler = onMouseMove; // Save handler for cleanup
+
+                // Prepare simple idle animation to avoid T-pose (gentle arm and spine motion)
+                const leftUpperArm = vrm.humanoid && vrm.humanoid.getBoneNode ? vrm.humanoid.getBoneNode('leftUpperArm') : null; // Left upper arm bone
+                const rightUpperArm = vrm.humanoid && vrm.humanoid.getBoneNode ? vrm.humanoid.getBoneNode('rightUpperArm') : null; // Right upper arm bone
+                const spineBone = vrm.humanoid && vrm.humanoid.getBoneNode ? vrm.humanoid.getBoneNode('spine') : null; // Spine bone
+                const baseLeftArmZ = leftUpperArm ? leftUpperArm.rotation.z : 0; // Capture base left arm Z rotation
+                const baseRightArmZ = rightUpperArm ? rightUpperArm.rotation.z : 0; // Capture base right arm Z rotation
+                const baseSpineY = spineBone ? spineBone.position.y : 0; // Capture base spine Y position
+                const armLowering = 0.6; // Baseline to lower arms from T-pose
+                const idleStart = performance.now(); // Idle start time reference
+
                 // Start render loop
                 function animate() {
                     requestAnimationFrame(animate);
@@ -3841,6 +3885,17 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                     if (vrmClock) {
                         const delta = vrmClock.getDelta();
                         if (vrmMixer) vrmMixer.update(delta);
+                        // Update VRM per frame so expressions and physics are applied
+                        if (vrmModel && typeof vrmModel.update === 'function') {
+                            try { vrmModel.update(delta); } catch (_) {}
+                        }
+                        // Apply lightweight idle motion each frame
+                        const t = (performance.now() - idleStart) / 1000; // Seconds since start
+                        const sway = Math.sin(t * 1.5) * 0.03; // Small sway factor
+                        const breathe = Math.sin(t * 2.0) * 0.01; // Small breathing factor
+                        if (leftUpperArm) { leftUpperArm.rotation.z = baseLeftArmZ - armLowering + sway; } // Lower and sway left arm
+                        if (rightUpperArm) { rightUpperArm.rotation.z = baseRightArmZ + armLowering - sway; } // Lower and sway right arm
+                        if (spineBone) { spineBone.position.y = baseSpineY + breathe; } // Subtle spine bob for breathing
                     }
 
                     if (vrmRenderer && vrmScene && vrmCamera) {
@@ -3885,6 +3940,13 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                 vrmClock = null;
                 vrmLipSyncMorphTarget = null;
 
+                // Detach mouse move handler if present
+                const canvas = document.getElementById('vrm-canvas'); // Retrieve canvas to remove handler
+                if (canvas && canvas.__vrmMouseMoveHandler) { // If a handler was attached
+                    try { canvas.removeEventListener('mousemove', canvas.__vrmMouseMoveHandler); } catch {} // Remove handler
+                    canvas.__vrmMouseMoveHandler = null; // Clear reference
+                }
+
             } catch (error) {
                 console.warn('Error cleaning up VRM:', error);
             }
@@ -3914,10 +3976,36 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
         }
 
         function animateVRMLipSync(value) {
+            // Ensure VRM model exists and we have a target key
             if (!vrmModel || !vrmLipSyncMorphTarget) return;
 
+            // Normalize key; allow both VRM 0.x ('A') and VRM 1.0 ('aa') conventions
+            let key = vrmLipSyncMorphTarget;
+            if (typeof key !== 'string') {
+                key = (key && (key.presetName || key.name)) || '';
+            }
+            if (!key) return;
+
+            const clamped = Math.max(0, Math.min(1, value));
+
+            // Try VRM 1.0 first if available
             try {
-                vrmModel.blendShapeProxy.setValue(vrmLipSyncMorphTarget, value);
+                if (vrmModel.expressionManager) {
+                    // For VRM 1.0, vowel keys are typically lowercase: 'aa','ih','ou','ee','oh'
+                    const exprKey = key.toLowerCase() === 'a' ? 'aa' : key.toLowerCase();
+                    vrmModel.expressionManager.setValue(exprKey, clamped);
+                    return;
+                }
+            } catch (e) {
+                // fall through to VRM 0.x
+            }
+
+            // Fallback: VRM 0.x blendShapeProxy uses presets like 'A','I','U','E','O' or custom names
+            try {
+                if (vrmModel.blendShapeProxy) {
+                    const proxyKey = key.length === 2 && key === key.toLowerCase() ? key.toUpperCase().charAt(0) : key; // map 'aa'->'A'
+                    vrmModel.blendShapeProxy.setValue(proxyKey, clamped);
+                }
             } catch (error) {
                 console.warn('Error animating VRM lip sync:', error);
             }
