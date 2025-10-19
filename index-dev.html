@@ -1071,6 +1071,8 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
                     vrmScaleRange.addEventListener('input', () => {
                         const newScale = parseFloat(vrmScaleRange.value) || 1.0;
                         vrmScaleValue.textContent = String(newScale);
+                        const existing = vrmPositions[currentVRMModelPath] || { scale: 1.0, positionX: 0, positionY: 0, rotation: 0 };
+                        vrmPositions[currentVRMModelPath] = { ...existing, scale: newScale };
                         updateVRMTransform();
                     });
 
@@ -1078,6 +1080,8 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
                     vrmPositionXRange.addEventListener('input', () => {
                         const newX = parseFloat(vrmPositionXRange.value) || 0;
                         vrmPositionXValue.textContent = String(newX);
+                        const existing = vrmPositions[currentVRMModelPath] || { scale: 1.0, positionX: 0, positionY: 0, rotation: 0 };
+                        vrmPositions[currentVRMModelPath] = { ...existing, positionX: newX };
                         updateVRMTransform();
                     });
 
@@ -1085,6 +1089,8 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
                     vrmPositionYRange.addEventListener('input', () => {
                         const newY = parseFloat(vrmPositionYRange.value) || 0;
                         vrmPositionYValue.textContent = String(newY);
+                        const existing = vrmPositions[currentVRMModelPath] || { scale: 1.0, positionX: 0, positionY: 0, rotation: 0 };
+                        vrmPositions[currentVRMModelPath] = { ...existing, positionY: newY };
                         updateVRMTransform();
                     });
 
@@ -1092,6 +1098,8 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
                     vrmRotationRange.addEventListener('input', () => {
                         const newRotation = parseInt(vrmRotationRange.value, 10) || 0;
                         vrmRotationValue.textContent = String(newRotation);
+                        const existing = vrmPositions[currentVRMModelPath] || { scale: 1.0, positionX: 0, positionY: 0, rotation: 0 };
+                        vrmPositions[currentVRMModelPath] = { ...existing, rotation: newRotation };
                         updateVRMTransform();
                     });
                 }
@@ -3899,6 +3907,10 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
             // Persist the positions
             vrmPositions[currentVRMModelPath] = currentPositions;
             try { localStorage.setItem(VRM_POSITIONS_KEY, JSON.stringify(vrmPositions)); } catch {}
+            // If renderer exists, render a frame to reflect changes immediately
+            if (vrmRenderer && vrmScene && vrmCamera) {
+                try { vrmRenderer.render(vrmScene, vrmCamera); } catch (_) {}
+            }
         }
 
         function animateVRMLipSync(value) {
