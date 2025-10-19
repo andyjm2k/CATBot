@@ -585,7 +585,7 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
                     <span class="helper-text">Add new VRM model paths on new lines to make them available in the selector</span>
 
                     <label for="vrm-scale-range">VRM Scale: <span id="vrm-scale-value">1.0</span></label>
-                    <input type="range" id="vrm-scale-range" min="0.1" max="3.0" step="0.1" value="1.0" />
+                    <input type="range" id="vrm-scale-range" min="0.1" max="6.0" step="0.1" value="1.0" />
                     <span class="helper-text">Adjust the 3D model's scale in the view</span>
 
                     <label for="vrm-position-x-range">VRM Position X: <span id="vrm-position-x-value">0</span></label>
@@ -676,6 +676,7 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
         let vrmMixer;
         let vrmClock;
         let vrmLipSyncMorphTarget;
+        let vrmBlinkTimeout; // Timer id used to schedule periodic blinking
         let vrmPositions = {}; // Persisted map of modelPath -> {scale, positionX, positionY, rotation}
         let currentVRMModelPath = '';
         // Removed fallback VRM; enforce valid user-provided .vrm only
@@ -1329,6 +1330,12 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
             // Cancel any ongoing speech
             speechSynthesis.cancel();
 
+            // Prefer server TTS when API key is present so we can drive true amplitude-based lip sync
+            if (typeof apiKey === 'string' && apiKey.trim().length > 0) { // If an API key is available
+                speakWithOpenAITTS(text); // Use OpenAI TTS which returns audio bytes we can analyze
+                return; // Do not proceed with browser SpeechSynthesis path
+            }
+
             const utterance = new SpeechSynthesisUtterance(text.replace(/\*/g, ''));
             const selectedVoiceIndex = parseInt(voiceDropdown.value);
             
@@ -1340,58 +1347,83 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
                 console.warn('No valid voice selected, using default system voice');
             }
 
-            let isMoving = false;
-            const mouthOpenY = "ParamMouthOpenY";
-            let headMovementInterval;
+            let isMoving = false; // Track whether mouth is currently open or closed
+            const mouthOpenY = "ParamMouthOpenY"; // Live2D mouth open parameter id
+            let headMovementInterval; // Interval id for gentle head movement
+            let lipSyncInterval; // Interval id for lip-sync fallback toggling
+            let lastBoundaryTs = 0; // Timestamp of last onboundary event
             
-            utterance.onstart = function() {
-                console.log('Speech started');
-                if (live2dModel) {
-                    headMovementInterval = setInterval(() => {
-                        animateHeadMovement(live2dModel, 1000);
-                    }, 3000);
-                }
+            utterance.onstart = function() { // When speech begins
+                console.log('Speech started'); // Log start of speech
+                if (live2dModel) { // If Live2D model is active
+                    headMovementInterval = setInterval(() => { // Start periodic head movement
+                        animateHeadMovement(live2dModel, 1000); // Trigger head animation routine
+                    }, 3000); // Run every 3 seconds
+                } // End Live2D head movement setup
+
+                lastBoundaryTs = performance.now(); // Initialize last boundary timestamp to now
+
+                // Start a fallback lip-sync interval to keep mouth moving if onboundary stalls
+                lipSyncInterval = setInterval(() => { // Begin interval for lip sync toggling
+                    const now = performance.now(); // Get current high-resolution time
+                    if (now - lastBoundaryTs > 180) { // If no boundary for >180ms, toggle manually
+                        isMoving = !isMoving; // Flip mouth open/closed state
+                        const value = isMoving ? 1.0 : 0.0; // Compute target value for mouth
+                        if (live2dModel) { // If Live2D active
+                            live2dModel.internalModel.coreModel.setParameterValueById(mouthOpenY, value); // Apply Live2D mouth value
+                        } // End Live2D application
+                        if (vrmModel && document.getElementById('vrm-mode').checked) { // If VRM active
+                            animateVRMLipSync(value); // Apply VRM mouth value
+                        } // End VRM application
+                        lastBoundaryTs = now; // Update last boundary time to avoid over-toggling
+                    } // End boundary gap check
+                }, 120); // Check frequently for smooth motion
+
+                // Kick mouth slightly open at start so it does not appear stuck
+                if (vrmModel && document.getElementById('vrm-mode').checked) { // If VRM active
+                    animateVRMLipSync(0.8); // Open mouth initially
+                } // End VRM initial kick
+            }; // End onstart handler
+
+            utterance.onboundary = function(event) { // Called on word or sentence boundaries
+                lastBoundaryTs = performance.now(); // Record time to inform fallback timer
+                if (live2dModel) { // If Live2D active
+                    isMoving = !isMoving; // Toggle mouth open state
+                    const mouthOpenValue = isMoving ? 1 : 0; // Compute Live2D mouth value
+                    live2dModel.internalModel.coreModel.setParameterValueById(mouthOpenY, mouthOpenValue); // Apply Live2D mouth value
+                } // End Live2D section
 
                 // VRM lip sync animation
-                if (vrmModel && document.getElementById('vrm-mode').checked) {
-                    animateVRMLipSync(1.0);
-                }
-            };
+                if (vrmModel && document.getElementById('vrm-mode').checked) { // If VRM active
+                    const lipValue = isMoving ? 1.0 : 0.0; // Compute VRM target value
+                    animateVRMLipSync(lipValue); // Apply VRM mouth value
+                } // End VRM section
+            }; // End onboundary handler
 
-            utterance.onboundary = function(event) {
-                if (live2dModel) {
-                    isMoving = !isMoving;
-                    const mouthOpenValue = isMoving ? 1 : 0;
-                    live2dModel.internalModel.coreModel.setParameterValueById(mouthOpenY, mouthOpenValue);
-                }
+            utterance.onend = function() { // When speech ends
+                console.log('Speech ended'); // Log end of speech
+                if (headMovementInterval) { // If head movement was running
+                    clearInterval(headMovementInterval); // Stop head movement interval
+                } // End head movement cleanup
+                if (lipSyncInterval) { // If lip-sync fallback was running
+                    clearInterval(lipSyncInterval); // Stop lip-sync interval
+                    lipSyncInterval = null; // Clear reference to interval id
+                } // End lip-sync cleanup
 
-                // VRM lip sync animation
-                if (vrmModel && document.getElementById('vrm-mode').checked) {
-                    const lipValue = isMoving ? 1.0 : 0.0;
-                    animateVRMLipSync(lipValue);
-                }
-            };
-
-            utterance.onend = function() {
-                console.log('Speech ended');
-                if (headMovementInterval) {
-                    clearInterval(headMovementInterval);
-                }
-
-                if (live2dModel) {
-                    live2dModel.internalModel.coreModel.setParameterValueById(mouthOpenY, 0);
-                    animateHeadMovement(live2dModel, 1000).then(() => {
-                        live2dModel.internalModel.coreModel.setParameterValueById('ParamAngleX', 0);
-                        live2dModel.internalModel.coreModel.setParameterValueById('ParamAngleY', 0);
-                        live2dModel.internalModel.coreModel.setParameterValueById('ParamAngleZ', 0);
-                    });
-                }
+                if (live2dModel) { // If Live2D active
+                    live2dModel.internalModel.coreModel.setParameterValueById(mouthOpenY, 0); // Ensure mouth is closed
+                    animateHeadMovement(live2dModel, 1000).then(() => { // Run gentle head settle animation
+                        live2dModel.internalModel.coreModel.setParameterValueById('ParamAngleX', 0); // Reset X angle
+                        live2dModel.internalModel.coreModel.setParameterValueById('ParamAngleY', 0); // Reset Y angle
+                        live2dModel.internalModel.coreModel.setParameterValueById('ParamAngleZ', 0); // Reset Z angle
+                    }); // End settle sequence
+                } // End Live2D reset
 
                 // VRM lip sync end animation
-                if (vrmModel && document.getElementById('vrm-mode').checked) {
-                    animateVRMLipSync(0.0);
-                }
-            };
+                if (vrmModel && document.getElementById('vrm-mode').checked) { // If VRM active
+                    animateVRMLipSync(0.0); // Ensure mouth returns closed at end
+                } // End VRM reset
+            }; // End onend handler
 
             utterance.onerror = function(event) {
                 console.error('Speech synthesis error:', event);
@@ -1406,6 +1438,151 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
                 console.error('Speech synthesis error:', error);
             }
         }
+
+        // Speak using OpenAI TTS endpoint and drive lip sync from the actual audio waveform
+        async function speakWithOpenAITTS(text) { // Asynchronous function to fetch and play TTS audio
+            try { // Begin error handling scope
+                if (!text || !apiKey) return; // Guard for missing input or credentials
+                const endpoint = (typeof openaiEndpoint === 'string' && openaiEndpoint.trim()) ? `${openaiEndpoint.replace(/\/$/, '')}/v1/audio/speech` : 'https://api.openai.com/v1/audio/speech'; // Compute speech endpoint
+                const modelId = (typeof ttsModel === 'string' && ttsModel.trim()) ? ttsModel : 'tts-1'; // Choose model id with default
+                const voiceId = (typeof ttsVoice === 'string' && ttsVoice.trim()) ? ttsVoice : 'alloy'; // Choose voice id with default
+
+                const reqBody = { // Build request payload for OpenAI speech
+                    model: modelId, // TTS model to synthesize speech
+                    voice: voiceId, // Voice preset
+                    input: text, // The text to speak
+                    response_format: 'mp3' // Request mp3 audio for broader support
+                }; // End payload
+
+                const res = await fetch(endpoint, { // Issue HTTP request for speech
+                    method: 'POST', // Use POST method per API spec
+                    headers: { // Set authorization and content headers
+                        'Authorization': `Bearer ${apiKey}`, // Bearer token for OpenAI
+                        'Content-Type': 'application/json' // JSON body content type
+                    }, // End headers
+                    body: JSON.stringify(reqBody) // Attach serialized JSON body
+                }); // End fetch
+
+                if (!res.ok) { // If response indicates failure
+                    const errText = await res.text().catch(() => ''); // Attempt to read error body
+                    console.error('OpenAI TTS error:', res.status, errText); // Log details for diagnostics
+                    // Fallback to browser speech if available
+                    textToSpeechFallback(text); // Use backup speaker for continuity
+                    return; // Exit early
+                } // End error response branch
+
+                const arrayBuf = await res.arrayBuffer(); // Read audio bytes as ArrayBuffer
+                const blob = new Blob([arrayBuf], { type: 'audio/mpeg' }); // Create audio Blob with mp3 type
+                const url = URL.createObjectURL(blob); // Create object URL for audio element source
+
+                const audio = new Audio(); // Create HTML audio element
+                audio.src = url; // Assign synthesized audio URL
+                audio.preload = 'auto'; // Allow browser to preload audio
+                audio.crossOrigin = 'anonymous'; // Allow connecting to WebAudio graph
+
+                // Start per-frame lip sync using audio amplitude before playback
+                startLipSyncFromAudioElement(audio); // Hook analyzer and begin loop
+
+                await audio.play(); // Begin playback of voiced audio
+            } catch (e) { // Catch any runtime errors
+                console.error('speakWithOpenAITTS failed:', e); // Log the error cause
+                // Fallback to browser speech if available
+                textToSpeechFallback(text); // Ensure speech still happens
+            } // End try/catch
+        } // End speakWithOpenAITTS
+
+        // Browser speech fallback wrapper used when server TTS fails
+        function textToSpeechFallback(text) { // Function to call original SpeechSynthesis path
+            try { // Begin guard
+                const utter = new SpeechSynthesisUtterance(text.replace(/\*/g, '')); // Build utterance instance
+                speechSynthesis.speak(utter); // Speak using browser engine
+            } catch (e) { // Catch runtime issues
+                console.warn('Browser TTS fallback failed:', e); // Log warning for diagnostics
+            } // End try/catch
+        } // End textToSpeechFallback
+
+        // Connect an HTMLAudioElement to Web Audio and drive mouth using real-time amplitude
+        function startLipSyncFromAudioElement(audioEl) { // Function to build analyzer pipeline for lip sync
+            try { // Begin guard scope
+                // Ensure an AudioContext exists and is resumed (required by autoplay policies)
+                if (!audioContext) { // If no global audio context is present
+                    audioContext = new (window.AudioContext || window.webkitAudioContext)(); // Create new context instance
+                } // End audio context creation
+                if (audioContext.state === 'suspended') { // If audio is suspended by policy
+                    audioContext.resume().catch(() => {}); // Attempt to resume context
+                } // End resume branch
+
+                const source = audioContext.createMediaElementSource(audioEl); // Wrap element as MediaElementSourceNode
+                const analyser = audioContext.createAnalyser(); // Create AnalyserNode to read waveform
+                analyser.fftSize = 1024; // Set FFT size for time domain buffer length
+                analyser.smoothingTimeConstant = 0.7; // Add smoothing to reduce jitter
+                const gain = audioContext.createGain(); // Create gain node
+                gain.gain.value = 1.0; // Ensure full volume to destination
+
+                source.connect(analyser); // Connect source to analyser for measurement
+                analyser.connect(gain); // Pass through gain to output
+                gain.connect(audioContext.destination); // Route audio to speakers
+
+                const buffer = new Uint8Array(analyser.fftSize); // Allocate byte buffer for time domain samples
+                let rafId = 0; // Store the requestAnimationFrame id for cleanup
+                let smoothed = 0; // Keep a smoothed envelope value
+                const attack = 0.6; // Attack coefficient for rising amplitude
+                const release = 0.15; // Release coefficient for falling amplitude
+
+                const update = () => { // Define per-frame update callback
+                    analyser.getByteTimeDomainData(buffer); // Fill buffer with time-domain samples
+                    // Compute normalized RMS amplitude [0,1]
+                    let sum = 0; // Accumulator for RMS
+                    for (let i = 0; i < buffer.length; i++) { // Iterate over samples
+                        const v = (buffer[i] - 128) / 128; // Convert byte sample to [-1,1]
+                        sum += v * v; // Accumulate squared amplitude
+                    } // End sample loop
+                    const rms = Math.sqrt(sum / buffer.length); // Compute root-mean-square amplitude
+                    // Envelope follower with attack/release
+                    if (rms > smoothed) { // If amplitude is rising
+                        smoothed = smoothed + (rms - smoothed) * attack; // Apply attack smoothing
+                    } else { // If amplitude is falling
+                        smoothed = smoothed + (rms - smoothed) * release; // Apply release smoothing
+                    } // End envelope update
+
+                    // Map amplitude to mouth open value with thresholding
+                    const threshold = 0.03; // Minimum RMS to consider as speech
+                    const scaled = smoothed <= threshold ? 0 : Math.min(1, (smoothed - threshold) * 6.0); // Scale to [0,1]
+
+                    // Apply to Live2D if present
+                    if (live2dModel) { // If Live2D model active
+                        live2dModel.internalModel.coreModel.setParameterValueById('ParamMouthOpenY', scaled); // Set mouth parameter by amplitude
+                    } // End Live2D application
+
+                    // Apply to VRM if present
+                    if (vrmModel && document.getElementById('vrm-mode').checked) { // If VRM active
+                        animateVRMLipSync(scaled); // Set expression value based on amplitude
+                    } // End VRM application
+
+                    if (!audioEl.paused && !audioEl.ended) { // If audio is still playing
+                        rafId = requestAnimationFrame(update); // Schedule next frame update
+                    } // End continuation check
+                }; // End update function
+
+                const onEnded = () => { // Define cleanup on audio end
+                    if (rafId) cancelAnimationFrame(rafId); // Cancel RAF loop
+                    // Ensure mouth returns to closed state
+                    if (live2dModel) { live2dModel.internalModel.coreModel.setParameterValueById('ParamMouthOpenY', 0); } // Close Live2D mouth
+                    if (vrmModel && document.getElementById('vrm-mode').checked) { animateVRMLipSync(0); } // Close VRM mouth
+                    // Disconnect nodes to avoid leaks
+                    try { source.disconnect(); } catch (_) {} // Detach source from graph
+                    try { analyser.disconnect(); } catch (_) {} // Detach analyser from graph
+                    try { gain.disconnect(); } catch (_) {} // Detach gain from graph
+                    try { URL.revokeObjectURL(audioEl.src); } catch (_) {} // Revoke object URL
+                    audioEl.removeEventListener('ended', onEnded); // Remove event handler
+                }; // End onEnded
+
+                audioEl.addEventListener('ended', onEnded); // Wire cleanup on end
+                update(); // Kick off the animation loop
+            } catch (e) { // Catch runtime issues constructing graph
+                console.warn('startLipSyncFromAudioElement failed:', e); // Log warning to console
+            } // End try/catch
+        } // End startLipSyncFromAudioElement
 
         // Add this helper function to create smoother mouth movements
         function animateMouth() {
@@ -3790,9 +3967,9 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                     throw new Error('Loaded GLTF does not contain VRM data. Ensure the file is a valid .vrm model.');
                 }
 
-                // Optionally clean up joints for performance
+                // Optimize skeleton for performance (updated per deprecation notice)
                 if (window.VRMUtils && vrm && vrm.scene) {
-                    try { window.VRMUtils.removeUnnecessaryJoints(vrm.scene); } catch (_) {}
+                    try { window.VRMUtils.combineSkeletons(vrm.scene); } catch (_) {}
                 }
 
                 // Setup VRM model
@@ -3869,13 +4046,27 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                 canvas.__vrmMouseMoveHandler = onMouseMove; // Save handler for cleanup
 
                 // Prepare simple idle animation to avoid T-pose (gentle arm and spine motion)
-                const leftUpperArm = vrm.humanoid && vrm.humanoid.getBoneNode ? vrm.humanoid.getBoneNode('leftUpperArm') : null; // Left upper arm bone
-                const rightUpperArm = vrm.humanoid && vrm.humanoid.getBoneNode ? vrm.humanoid.getBoneNode('rightUpperArm') : null; // Right upper arm bone
-                const spineBone = vrm.humanoid && vrm.humanoid.getBoneNode ? vrm.humanoid.getBoneNode('spine') : null; // Spine bone
+                const getBone = (name) => { // Helper to access humanoid bones using non-deprecated APIs
+                    if (vrm.humanoid && typeof vrm.humanoid.getNormalizedBoneNode === 'function') { return vrm.humanoid.getNormalizedBoneNode(name); } // Prefer normalized bone
+                    if (vrm.humanoid && typeof vrm.humanoid.getRawBoneNode === 'function') { return vrm.humanoid.getRawBoneNode(name); } // Fallback to raw bone
+                    if (vrm.humanoid && typeof vrm.humanoid.getBoneNode === 'function') { return vrm.humanoid.getBoneNode(name); } // Legacy fallback
+                    return null; // Not available
+                }; // End bone helper
+                const leftUpperArm = getBone('leftUpperArm'); // Left upper arm bone
+                const rightUpperArm = getBone('rightUpperArm'); // Right upper arm bone
+                const leftLowerArm = getBone('leftLowerArm'); // Left lower arm bone
+                const rightLowerArm = getBone('rightLowerArm'); // Right lower arm bone
+                const spineBone = getBone('spine'); // Spine bone
                 const baseLeftArmZ = leftUpperArm ? leftUpperArm.rotation.z : 0; // Capture base left arm Z rotation
                 const baseRightArmZ = rightUpperArm ? rightUpperArm.rotation.z : 0; // Capture base right arm Z rotation
+                const baseLeftArmY = leftUpperArm ? leftUpperArm.rotation.y : 0; // Capture base left arm Y rotation
+                const baseRightArmY = rightUpperArm ? rightUpperArm.rotation.y : 0; // Capture base right arm Y rotation
+                const baseLeftLowerArmX = leftLowerArm ? leftLowerArm.rotation.x : 0; // Capture base left elbow rotation X
+                const baseRightLowerArmX = rightLowerArm ? rightLowerArm.rotation.x : 0; // Capture base right elbow rotation X
                 const baseSpineY = spineBone ? spineBone.position.y : 0; // Capture base spine Y position
-                const armLowering = 0.6; // Baseline to lower arms from T-pose
+                const armLowering = 1.25; // Baseline to lower arms naturally alongside torso
+                const armInward = 0.18; // Baseline to rotate arms slightly inward towards body
+                const elbowBend = 0.25; // Baseline elbow bend so arms are relaxed
                 const idleStart = performance.now(); // Idle start time reference
 
                 // Start render loop
@@ -3891,10 +4082,14 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                         }
                         // Apply lightweight idle motion each frame
                         const t = (performance.now() - idleStart) / 1000; // Seconds since start
-                        const sway = Math.sin(t * 1.5) * 0.03; // Small sway factor
+                        const sway = Math.sin(t * 1.1) * 0.035; // Small sway factor
                         const breathe = Math.sin(t * 2.0) * 0.01; // Small breathing factor
-                        if (leftUpperArm) { leftUpperArm.rotation.z = baseLeftArmZ - armLowering + sway; } // Lower and sway left arm
-                        if (rightUpperArm) { rightUpperArm.rotation.z = baseRightArmZ + armLowering - sway; } // Lower and sway right arm
+                        const inwardSway = Math.sin(t * 0.7) * 0.03; // Tiny inward/outward sway
+                        const elbowSway = Math.sin(t * 1.7) * 0.06; // Small elbow motion for naturalness
+                        if (leftUpperArm) { leftUpperArm.rotation.z = baseLeftArmZ - armLowering + sway; leftUpperArm.rotation.y = baseLeftArmY + armInward + inwardSway; } // Lower, sway, and rotate inward left arm
+                        if (rightUpperArm) { rightUpperArm.rotation.z = baseRightArmZ + armLowering - sway; rightUpperArm.rotation.y = baseRightArmY - armInward - inwardSway; } // Lower, sway, and rotate inward right arm
+                        if (leftLowerArm) { leftLowerArm.rotation.x = baseLeftLowerArmX + elbowBend + elbowSway; } // Add subtle elbow bend left
+                        if (rightLowerArm) { rightLowerArm.rotation.x = baseRightLowerArmX + elbowBend - elbowSway; } // Add subtle elbow bend right
                         if (spineBone) { spineBone.position.y = baseSpineY + breathe; } // Subtle spine bob for breathing
                     }
 
@@ -3903,6 +4098,29 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                     }
                 }
                 animate();
+
+                // Start periodic blinking after VRM is ready
+                const setBlink = (value) => { // Helper to set blink expression value
+                    try { if (vrm.expressionManager) { vrm.expressionManager.setValue('blink', value); } } catch (_) {} // VRM 1.0 blink key
+                    try { if (vrm.expressionManager) { vrm.expressionManager.setValue('blinkLeft', value); } } catch (_) {} // Optional left eye key
+                    try { if (vrm.expressionManager) { vrm.expressionManager.setValue('blinkRight', value); } } catch (_) {} // Optional right eye key
+                    try { if (vrm.blendShapeProxy) { vrm.blendShapeProxy.setValue('Blink', value); } } catch (_) {} // VRM 0.x combined blink
+                    try { if (vrm.blendShapeProxy) { vrm.blendShapeProxy.setValue('Blink_L', value); } } catch (_) {} // VRM 0.x left blink
+                    try { if (vrm.blendShapeProxy) { vrm.blendShapeProxy.setValue('Blink_R', value); } } catch (_) {} // VRM 0.x right blink
+                }; // End setBlink helper
+
+                const scheduleBlink = () => { // Function to schedule the next blink
+                    if (!vrmModel) return; // Skip if VRM has been cleaned up
+                    const waitMs = 2200 + Math.random() * 2600; // Random delay between blinks (2.2s - 4.8s)
+                    vrmBlinkTimeout = setTimeout(() => { // Set timer for blink
+                        setBlink(1.0); // Close eyelids
+                        setTimeout(() => { // Short delay to reopen eyes
+                            setBlink(0.0); // Open eyelids
+                            scheduleBlink(); // Schedule subsequent blink
+                        }, 120 + Math.random() * 80); // Keep eyes closed 120-200ms
+                    }, waitMs); // After the random wait
+                }; // End scheduleBlink
+                scheduleBlink(); // Kick off blinking loop
 
                 console.log('VRM model loaded successfully');
 
@@ -3939,6 +4157,7 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                 vrmMixer = null;
                 vrmClock = null;
                 vrmLipSyncMorphTarget = null;
+                if (vrmBlinkTimeout) { try { clearTimeout(vrmBlinkTimeout); } catch (_) {} vrmBlinkTimeout = null; }
 
                 // Detach mouse move handler if present
                 const canvas = document.getElementById('vrm-canvas'); // Retrieve canvas to remove handler
