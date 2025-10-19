@@ -677,6 +677,11 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
         let vrmClock;
         let vrmLipSyncMorphTarget;
         let vrmBlinkTimeout; // Timer id used to schedule periodic blinking
+        let vrmLovePoseActive = false; // Whether the love pose is active
+        let lovePoseTimeoutId = null; // Auto-release timer for love pose
+        let isSpeaking = false; // Global speaking state for lip sync/expressions
+        let lovePoseWeight = 0; // Current blend weight [0..1] toward love pose
+        let targetLovePoseWeight = 0; // Target blend weight we ease toward
         let vrmPositions = {}; // Persisted map of modelPath -> {scale, positionX, positionY, rotation}
         let currentVRMModelPath = '';
         // Removed fallback VRM; enforce valid user-provided .vrm only
@@ -1355,6 +1360,7 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
             
             utterance.onstart = function() { // When speech begins
                 console.log('Speech started'); // Log start of speech
+                isSpeaking = true; // Set global speaking flag
                 if (live2dModel) { // If Live2D model is active
                     headMovementInterval = setInterval(() => { // Start periodic head movement
                         animateHeadMovement(live2dModel, 1000); // Trigger head animation routine
@@ -1402,6 +1408,7 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
 
             utterance.onend = function() { // When speech ends
                 console.log('Speech ended'); // Log end of speech
+                isSpeaking = false; // Clear speaking flag
                 if (headMovementInterval) { // If head movement was running
                     clearInterval(headMovementInterval); // Stop head movement interval
                 } // End head movement cleanup
@@ -3659,10 +3666,31 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                                 chatHistory.push({ role: 'assistant', content: finalContent });
                                 responseOutput.value = finalContent;
                                 textToSpeech(finalContent);
-                                const expressionFile = detectExpressionFromText(finalContent);
-                                if (expressionFile && live2dModel) {
-                                    await live2dModel.expression(expressionFile);
-                                }
+                        const expressionFile = detectExpressionFromText(finalContent);
+                        if (expressionFile && live2dModel) {
+                            await live2dModel.expression(expressionFile);
+                        }
+                        // Trigger VRM love pose when Love eye is detected
+                        try {
+                            const lowered = (finalContent || '').toLowerCase();
+                            const loveHit = ['happy','joy','glad','excited','wonderful','love','lovely','delighted','delight','romantic'].some(k => lowered.includes(k));
+                            if (loveHit) {
+                                vrmLovePoseActive = true; targetLovePoseWeight = 1;
+                                if (lovePoseTimeoutId) { clearTimeout(lovePoseTimeoutId); }
+                                lovePoseTimeoutId = setTimeout(() => {
+                                    vrmLovePoseActive = false; targetLovePoseWeight = 0;
+                                    // Ensure smile/eyes reset after timeout
+                                    try {
+                                        if (vrm.expressionManager) {
+                                            ['smile','happy','joy','fun'].forEach(k => { try { vrm.expressionManager.setValue(k, 0.0); } catch (_) {} });
+                                        }
+                                        if (vrm.blendShapeProxy) {
+                                            ['Smile','Joy','Fun','MouthSmile'].forEach(k => { try { vrm.blendShapeProxy.setValue(k, 0.0); } catch (_) {} });
+                                        }
+                                    } catch (_) {}
+                                }, 6000);
+                            }
+                        } catch (_) {}
                             } else {
                                 // Fallback: if the model returned no content after tool calls,
                                 // synthesize a simple confirmation from the last tool result
@@ -3728,6 +3756,26 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                         if (expressionFile && live2dModel) {
                             await live2dModel.expression(expressionFile);
                         }
+                        // Trigger VRM love pose when Love eye is detected
+                        try {
+                            const lowered = (cleanContent || '').toLowerCase();
+                            const loveHit = ['happy','joy','glad','excited','wonderful','love','lovely','delighted','delight','romantic'].some(k => lowered.includes(k));
+                            if (loveHit) {
+                                vrmLovePoseActive = true; targetLovePoseWeight = 1;
+                                if (lovePoseTimeoutId) { clearTimeout(lovePoseTimeoutId); }
+                                lovePoseTimeoutId = setTimeout(() => {
+                                    vrmLovePoseActive = false; targetLovePoseWeight = 0;
+                                    try {
+                                        if (vrm.expressionManager) {
+                                            ['smile','happy','joy','fun'].forEach(k => { try { vrm.expressionManager.setValue(k, 0.0); } catch (_) {} });
+                                        }
+                                        if (vrm.blendShapeProxy) {
+                                            ['Smile','Joy','Fun','MouthSmile'].forEach(k => { try { vrm.blendShapeProxy.setValue(k, 0.0); } catch (_) {} });
+                                        }
+                                    } catch (_) {}
+                                }, 6000);
+                            }
+                        } catch (_) {}
                         responseOutput.classList.remove('responding');
                     }
                 }
@@ -4061,10 +4109,14 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                 const spineBone = getBone('spine'); // Spine bone
                 const neckBone = getBone('neck'); // Neck bone for head rotation blending
                 const headBone = getBone('head'); // Head bone for direct head rotation
+                const leftHand = getBone('leftHand'); // Left hand bone for love pose
+                const rightHand = getBone('rightHand'); // Right hand bone for love pose
                 const baseLeftArmZ = leftUpperArm ? leftUpperArm.rotation.z : 0; // Capture base left arm Z rotation
                 const baseRightArmZ = rightUpperArm ? rightUpperArm.rotation.z : 0; // Capture base right arm Z rotation
                 const baseLeftArmY = leftUpperArm ? leftUpperArm.rotation.y : 0; // Capture base left arm Y rotation
                 const baseRightArmY = rightUpperArm ? rightUpperArm.rotation.y : 0; // Capture base right arm Y rotation
+                const baseLeftUpperArmX = leftUpperArm ? leftUpperArm.rotation.x : 0; // Base left upper arm forward
+                const baseRightUpperArmX = rightUpperArm ? rightUpperArm.rotation.x : 0; // Base right upper arm forward
                 const baseLeftLowerArmX = leftLowerArm ? leftLowerArm.rotation.x : 0; // Capture base left elbow rotation X
                 const baseRightLowerArmX = rightLowerArm ? rightLowerArm.rotation.x : 0; // Capture base right elbow rotation X
                 const baseSpineY = spineBone ? spineBone.position.y : 0; // Capture base spine Y position
@@ -4072,6 +4124,8 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                 const baseNeckY = neckBone ? neckBone.rotation.y : 0; // Capture base neck Y rotation (yaw)
                 const baseHeadX = headBone ? headBone.rotation.x : 0; // Capture base head X rotation (pitch)
                 const baseHeadY = headBone ? headBone.rotation.y : 0; // Capture base head Y rotation (yaw)
+                const baseLeftHandY = leftHand ? leftHand.rotation.y : 0; // Base left hand yaw
+                const baseRightHandY = rightHand ? rightHand.rotation.y : 0; // Base right hand yaw
                 const armLowering = 1.25; // Baseline to lower arms naturally alongside torso
                 const armInward = 0.18; // Baseline to rotate arms slightly inward towards body
                 const elbowBend = 0.25; // Baseline elbow bend so arms are relaxed
@@ -4105,16 +4159,59 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                                 lookTarget.position.lerp(targetPos, 0.05); // Smoothly approach new position
                             }
                         }
-                        // Apply lightweight idle motion each frame
+                        // Blend weight toward target for love pose
+                        lovePoseWeight += (targetLovePoseWeight - lovePoseWeight) * 0.12; // Ease-in/out
+
+                        // Apply lightweight idle motion each frame (with love pose blending)
                         const t = (performance.now() - idleStart) / 1000; // Seconds since start
                         const sway = Math.sin(t * 1.1) * 0.035; // Small sway factor
                         const breathe = Math.sin(t * 2.0) * 0.01; // Small breathing factor
                         const inwardSway = Math.sin(t * 0.7) * 0.03; // Tiny inward/outward sway
                         const elbowSway = Math.sin(t * 1.7) * 0.06; // Small elbow motion for naturalness
-                        if (leftUpperArm) { leftUpperArm.rotation.z = baseLeftArmZ - armLowering + sway; leftUpperArm.rotation.y = baseLeftArmY + armInward + inwardSway; } // Lower, sway, and rotate inward left arm
-                        if (rightUpperArm) { rightUpperArm.rotation.z = baseRightArmZ + armLowering - sway; rightUpperArm.rotation.y = baseRightArmY - armInward - inwardSway; } // Lower, sway, and rotate inward right arm
-                        if (leftLowerArm) { leftLowerArm.rotation.x = baseLeftLowerArmX + elbowBend + elbowSway; } // Add subtle elbow bend left
-                        if (rightLowerArm) { rightLowerArm.rotation.x = baseRightLowerArmX + elbowBend - elbowSway; } // Add subtle elbow bend right
+                        const w = lovePoseWeight; // Shorthand
+                        // Compute defaults (relaxed idle) and targets (love pose), then blend
+                        if (leftUpperArm) {
+                            const defZ = baseLeftArmZ - armLowering + sway; // relaxed lowered
+                            const tgtZ = baseLeftArmZ - armLowering * 0.4; // reduce flaring to the side
+                            leftUpperArm.rotation.z = defZ * (1 - w) + tgtZ * w;
+                            const defY = baseLeftArmY + armInward + inwardSway; // slight inward
+                            const tgtY = baseLeftArmY + 0.45; // inward toward chest
+                            leftUpperArm.rotation.y = defY * (1 - w) + tgtY * w;
+                            const defX = baseLeftUpperArmX; // minimal forward
+                            const tgtX = baseLeftUpperArmX - 0.35; // raise forward (negative pitch)
+                            leftUpperArm.rotation.x = defX * (1 - w) + tgtX * w;
+                        }
+                        if (rightUpperArm) {
+                            const defZ = baseRightArmZ + armLowering - sway; // relaxed lowered
+                            const tgtZ = baseRightArmZ + armLowering * 0.4; // reduce flaring to the side
+                            rightUpperArm.rotation.z = defZ * (1 - w) + tgtZ * w;
+                            const defY = baseRightArmY - armInward - inwardSway; // slight inward
+                            const tgtY = baseRightArmY - 0.45; // inward toward chest
+                            rightUpperArm.rotation.y = defY * (1 - w) + tgtY * w;
+                            const defX = baseRightUpperArmX; // minimal forward
+                            const tgtX = baseRightUpperArmX - 0.35; // raise forward (negative pitch)
+                            rightUpperArm.rotation.x = defX * (1 - w) + tgtX * w;
+                        }
+                        if (leftLowerArm) {
+                            const def = baseLeftLowerArmX + elbowBend + elbowSway; // relaxed elbow
+                            const tgt = baseLeftLowerArmX + 1.0; // bend toward chest
+                            leftLowerArm.rotation.x = def * (1 - w) + tgt * w;
+                        }
+                        if (rightLowerArm) {
+                            const def = baseRightLowerArmX + elbowBend - elbowSway; // relaxed elbow
+                            const tgt = baseRightLowerArmX + 1.0; // bend toward chest
+                            rightLowerArm.rotation.x = def * (1 - w) + tgt * w;
+                        }
+                        if (leftHand) {
+                            const def = baseLeftHandY; // relaxed
+                            const tgt = baseLeftHandY + 0.4; // rotate inward
+                            leftHand.rotation.y = def * (1 - w) + tgt * w;
+                        }
+                        if (rightHand) {
+                            const def = baseRightHandY; // relaxed
+                            const tgt = baseRightHandY - 0.4; // rotate inward (mirror)
+                            rightHand.rotation.y = def * (1 - w) + tgt * w;
+                        }
                         if (spineBone) { spineBone.position.y = baseSpineY + breathe; } // Subtle spine bob for breathing
 
                         // Compute desired head yaw/pitch to look towards the drifting/mouse-driven look target
@@ -4143,6 +4240,41 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                                 headBone.rotation.x += (targetHeadX - headBone.rotation.x) * smoothing; // Smoothly apply head pitch
                             } // End head application
                         } // End head rotation block
+
+                        // When love pose is active and not speaking, hold a closed smile (scaled by weight)
+                        if (lovePoseWeight > 0.1 && !isSpeaking) {
+                            try {
+                                const smileVal = 0.85 * Math.min(1, lovePoseWeight + 0.2);
+                                if (vrm.expressionManager) {
+                                    const smileKeys = ['smile', 'happy', 'joy', 'fun'];
+                                    for (const k of smileKeys) { try { vrm.expressionManager.setValue(k, smileVal); } catch (_) {} }
+                                    // Keep vowels closed only when not speaking
+                                    const vowels = ['aa','ih','ou','ee','oh'];
+                                    for (const v of vowels) { try { vrm.expressionManager.setValue(v, 0.0); } catch (_) {} }
+                                    // Ensure eye openness returns if any blink-like keys exist
+                                    const eyeOpenKeys = ['relaxed', 'neutral', 'look','lookLeft','lookRight'];
+                                    for (const eKey of eyeOpenKeys) { try { vrm.expressionManager.setValue(eKey, 0.0); } catch (_) {} }
+                                }
+                                if (vrm.blendShapeProxy) {
+                                    const smile0 = ['Smile','Joy','Fun','MouthSmile'];
+                                    for (const k of smile0) { try { vrm.blendShapeProxy.setValue(k, smileVal); } catch (_) {} }
+                                    const vowels0 = ['A','I','U','E','O'];
+                                    for (const v of vowels0) { try { vrm.blendShapeProxy.setValue(v, 0.0); } catch (_) {} }
+                                }
+                            } catch (_) {}
+                        } else if (!isSpeaking && lovePoseWeight <= 0.1) {
+                            // Fully release smile/eye shapes when pose finished
+                            try {
+                                if (vrm.expressionManager) {
+                                    const smileKeys = ['smile', 'happy', 'joy', 'fun'];
+                                    for (const k of smileKeys) { try { vrm.expressionManager.setValue(k, 0.0); } catch (_) {} }
+                                }
+                                if (vrm.blendShapeProxy) {
+                                    const smile0 = ['Smile','Joy','Fun','MouthSmile'];
+                                    for (const k of smile0) { try { vrm.blendShapeProxy.setValue(k, 0.0); } catch (_) {} }
+                                }
+                            } catch (_) {}
+                        }
                     }
 
                     if (vrmRenderer && vrmScene && vrmCamera) {
