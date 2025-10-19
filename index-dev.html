@@ -4032,6 +4032,7 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                 if (vrm.lookAt) { // If VRM has a lookAt component
                     vrm.lookAt.target = lookTarget; // Set target so head/eyes follow
                 }
+                let lastMouseMoveTs = performance.now(); // Timestamp of the most recent mouse move
                 const onMouseMove = (event) => { // Mouse move handler to convert screen to world position
                     const rect = canvas.getBoundingClientRect(); // Canvas bounds for NDC conversion
                     const ndcX = ((event.clientX - rect.left) / rect.width) * 2 - 1; // Normalized X in clip space
@@ -4041,6 +4042,7 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                     const dir = vec.sub(camera.position).normalize(); // Ray direction from camera
                     const distance = 2.0; // Distance in front of camera to place target
                     lookTarget.position.copy(camera.position).add(dir.multiplyScalar(distance)); // Update target position
+                    lastMouseMoveTs = performance.now(); // Record the time of this mouse movement
                 };
                 canvas.addEventListener('mousemove', onMouseMove); // Attach mouse tracking
                 canvas.__vrmMouseMoveHandler = onMouseMove; // Save handler for cleanup
@@ -4057,6 +4059,8 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                 const leftLowerArm = getBone('leftLowerArm'); // Left lower arm bone
                 const rightLowerArm = getBone('rightLowerArm'); // Right lower arm bone
                 const spineBone = getBone('spine'); // Spine bone
+                const neckBone = getBone('neck'); // Neck bone for head rotation blending
+                const headBone = getBone('head'); // Head bone for direct head rotation
                 const baseLeftArmZ = leftUpperArm ? leftUpperArm.rotation.z : 0; // Capture base left arm Z rotation
                 const baseRightArmZ = rightUpperArm ? rightUpperArm.rotation.z : 0; // Capture base right arm Z rotation
                 const baseLeftArmY = leftUpperArm ? leftUpperArm.rotation.y : 0; // Capture base left arm Y rotation
@@ -4064,6 +4068,10 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                 const baseLeftLowerArmX = leftLowerArm ? leftLowerArm.rotation.x : 0; // Capture base left elbow rotation X
                 const baseRightLowerArmX = rightLowerArm ? rightLowerArm.rotation.x : 0; // Capture base right elbow rotation X
                 const baseSpineY = spineBone ? spineBone.position.y : 0; // Capture base spine Y position
+                const baseNeckX = neckBone ? neckBone.rotation.x : 0; // Capture base neck X rotation (pitch)
+                const baseNeckY = neckBone ? neckBone.rotation.y : 0; // Capture base neck Y rotation (yaw)
+                const baseHeadX = headBone ? headBone.rotation.x : 0; // Capture base head X rotation (pitch)
+                const baseHeadY = headBone ? headBone.rotation.y : 0; // Capture base head Y rotation (yaw)
                 const armLowering = 1.25; // Baseline to lower arms naturally alongside torso
                 const armInward = 0.18; // Baseline to rotate arms slightly inward towards body
                 const elbowBend = 0.25; // Baseline elbow bend so arms are relaxed
@@ -4080,6 +4088,23 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                         if (vrmModel && typeof vrmModel.update === 'function') {
                             try { vrmModel.update(delta); } catch (_) {}
                         }
+                        // Idle head/eye movement by drifting the look target when mouse is idle
+                        if (lookTarget && vrmCamera) { // Ensure target and camera exist
+                            const idleFor = performance.now() - lastMouseMoveTs; // Duration since last mouse move
+                            if (idleFor > 1500) { // Only apply drift after 1.5s of inactivity
+                                const forward = new window.THREE.Vector3(); // Camera forward vector container
+                                vrmCamera.getWorldDirection(forward).normalize(); // Compute normalized forward
+                                const worldUp = new window.THREE.Vector3(0, 1, 0); // World up axis vector
+                                const right = new window.THREE.Vector3().crossVectors(forward, worldUp).normalize(); // Camera right vector
+                                const up = new window.THREE.Vector3().crossVectors(right, forward).normalize(); // Camera up vector
+                                const t = performance.now() * 0.001; // Time in seconds for oscillation
+                                const dx = Math.sin(t * 0.6) * 0.25 + Math.sin(t * 1.1 + 1.7) * 0.08; // Horizontal drift offset
+                                const dy = Math.sin(t * 0.8 + 0.5) * 0.18 + Math.sin(t * 1.3 + 2.2) * 0.06; // Vertical drift offset
+                                const base = new window.THREE.Vector3().copy(vrmCamera.position).add(forward.multiplyScalar(2.0)); // Base point in front of camera
+                                const targetPos = new window.THREE.Vector3().copy(base).add(right.multiplyScalar(dx)).add(up.multiplyScalar(dy)); // New target position
+                                lookTarget.position.lerp(targetPos, 0.05); // Smoothly approach new position
+                            }
+                        }
                         // Apply lightweight idle motion each frame
                         const t = (performance.now() - idleStart) / 1000; // Seconds since start
                         const sway = Math.sin(t * 1.1) * 0.035; // Small sway factor
@@ -4091,6 +4116,33 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                         if (leftLowerArm) { leftLowerArm.rotation.x = baseLeftLowerArmX + elbowBend + elbowSway; } // Add subtle elbow bend left
                         if (rightLowerArm) { rightLowerArm.rotation.x = baseRightLowerArmX + elbowBend - elbowSway; } // Add subtle elbow bend right
                         if (spineBone) { spineBone.position.y = baseSpineY + breathe; } // Subtle spine bob for breathing
+
+                        // Compute desired head yaw/pitch to look towards the drifting/mouse-driven look target
+                        if (vrmCamera && (neckBone || headBone)) { // Ensure camera and bones exist
+                            const camInv = new window.THREE.Matrix4().copy(vrmCamera.matrixWorld).invert(); // Inverse of camera world matrix
+                            const tgtCam = new window.THREE.Vector3().copy(lookTarget.position).applyMatrix4(camInv); // Target position in camera space
+                            const yaw = Math.atan2(tgtCam.x, tgtCam.z); // Yaw angle from camera X/Z
+                            const pitch = Math.atan2(-tgtCam.y, tgtCam.z); // Pitch angle from camera Y/Z
+                            const maxYaw = 0.35; // Maximum yaw in radians (~20 degrees)
+                            const maxPitch = 0.25; // Maximum pitch in radians (~14 degrees)
+                            const clampedYaw = Math.max(-maxYaw, Math.min(maxYaw, yaw)); // Clamp yaw to safe range
+                            const clampedPitch = Math.max(-maxPitch, Math.min(maxPitch, pitch)); // Clamp pitch to safe range
+                            const neckWeight = 0.4; // Proportion of rotation applied to neck
+                            const headWeight = 0.6; // Proportion of rotation applied to head
+                            const smoothing = 0.12; // Lerp factor for smooth motion
+                            if (neckBone) { // If neck bone is available
+                                const targetNeckY = baseNeckY + clampedYaw * neckWeight; // Desired neck yaw
+                                const targetNeckX = baseNeckX + clampedPitch * neckWeight; // Desired neck pitch
+                                neckBone.rotation.y += (targetNeckY - neckBone.rotation.y) * smoothing; // Smoothly apply neck yaw
+                                neckBone.rotation.x += (targetNeckX - neckBone.rotation.x) * smoothing; // Smoothly apply neck pitch
+                            } // End neck application
+                            if (headBone) { // If head bone is available
+                                const targetHeadY = baseHeadY + clampedYaw * headWeight; // Desired head yaw
+                                const targetHeadX = baseHeadX + clampedPitch * headWeight; // Desired head pitch
+                                headBone.rotation.y += (targetHeadY - headBone.rotation.y) * smoothing; // Smoothly apply head yaw
+                                headBone.rotation.x += (targetHeadX - headBone.rotation.x) * smoothing; // Smoothly apply head pitch
+                            } // End head application
+                        } // End head rotation block
                     }
 
                     if (vrmRenderer && vrmScene && vrmCamera) {
