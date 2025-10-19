@@ -691,6 +691,10 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
         let webcamStream = null;
         let isProcessing = false;
         let webcamInterval = null;
+        // Global lip sync controller state
+        let ttsLipSyncIntervalId = null; // Interval used by SpeechSynthesis fallback
+        let ttsRafId = 0; // requestAnimationFrame id used by audio analyser loop
+        let ttsCleanupFns = []; // Set of cleanup callbacks for active audio graph/listeners
 
         // Add these variables at the top of your script section
         let webcamEnabled = false;
@@ -1332,8 +1336,11 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
                 return;
             }
 
-            // Cancel any ongoing speech
-            speechSynthesis.cancel();
+            // Cancel any ongoing speech and active lip-sync loops/graphs
+            try { speechSynthesis.cancel(); } catch (_) {}
+            try { if (ttsLipSyncIntervalId) { clearInterval(ttsLipSyncIntervalId); ttsLipSyncIntervalId = null; } } catch (_) {}
+            try { if (ttsRafId) { cancelAnimationFrame(ttsRafId); ttsRafId = 0; } } catch (_) {}
+            try { ttsCleanupFns.forEach(fn => { try { fn(); } catch(_){} }); ttsCleanupFns = []; } catch (_) {}
 
             // Prefer server TTS when API key is present so we can drive true amplitude-based lip sync
             if (typeof apiKey === 'string' && apiKey.trim().length > 0) { // If an API key is available
@@ -1384,6 +1391,7 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
                         lastBoundaryTs = now; // Update last boundary time to avoid over-toggling
                     } // End boundary gap check
                 }, 120); // Check frequently for smooth motion
+                ttsLipSyncIntervalId = lipSyncInterval; // Track active interval globally for cleanup
 
                 // Kick mouth slightly open at start so it does not appear stuck
                 if (vrmModel && document.getElementById('vrm-mode').checked) { // If VRM active
@@ -1416,6 +1424,10 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
                     clearInterval(lipSyncInterval); // Stop lip-sync interval
                     lipSyncInterval = null; // Clear reference to interval id
                 } // End lip-sync cleanup
+                if (ttsLipSyncIntervalId) { try { clearInterval(ttsLipSyncIntervalId); } catch(_){} ttsLipSyncIntervalId = null; }
+                if (ttsRafId) { try { cancelAnimationFrame(ttsRafId); } catch(_){} ttsRafId = 0; }
+                try { ttsCleanupFns.forEach(fn => { try { fn(); } catch(_){} }); } catch(_){}
+                ttsCleanupFns = [];
 
                 if (live2dModel) { // If Live2D active
                     live2dModel.internalModel.coreModel.setParameterValueById(mouthOpenY, 0); // Ensure mouth is closed
@@ -1502,6 +1514,13 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
         function textToSpeechFallback(text) { // Function to call original SpeechSynthesis path
             try { // Begin guard
                 const utter = new SpeechSynthesisUtterance(text.replace(/\*/g, '')); // Build utterance instance
+                utter.onend = () => { // Ensure cleanup on browser TTS end
+                    try { if (ttsLipSyncIntervalId) { clearInterval(ttsLipSyncIntervalId); ttsLipSyncIntervalId = null; } } catch(_){}
+                    try { if (ttsRafId) { cancelAnimationFrame(ttsRafId); ttsRafId = 0; } } catch(_){}
+                    try { ttsCleanupFns.forEach(fn => { try { fn(); } catch(_){} }); ttsCleanupFns = []; } catch(_){}
+                    if (live2dModel) { live2dModel.internalModel.coreModel.setParameterValueById('ParamMouthOpenY', 0); }
+                    if (vrmModel && document.getElementById('vrm-mode').checked) { animateVRMLipSync(0); }
+                };
                 speechSynthesis.speak(utter); // Speak using browser engine
             } catch (e) { // Catch runtime issues
                 console.warn('Browser TTS fallback failed:', e); // Log warning for diagnostics
@@ -1568,11 +1587,13 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
 
                     if (!audioEl.paused && !audioEl.ended) { // If audio is still playing
                         rafId = requestAnimationFrame(update); // Schedule next frame update
+                        ttsRafId = rafId; // Track globally so we can cancel on utterance end elsewhere
                     } // End continuation check
                 }; // End update function
 
                 const onEnded = () => { // Define cleanup on audio end
                     if (rafId) cancelAnimationFrame(rafId); // Cancel RAF loop
+                    ttsRafId = 0; // Clear global raf id
                     // Ensure mouth returns to closed state
                     if (live2dModel) { live2dModel.internalModel.coreModel.setParameterValueById('ParamMouthOpenY', 0); } // Close Live2D mouth
                     if (vrmModel && document.getElementById('vrm-mode').checked) { animateVRMLipSync(0); } // Close VRM mouth
@@ -1585,6 +1606,16 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
                 }; // End onEnded
 
                 audioEl.addEventListener('ended', onEnded); // Wire cleanup on end
+                // Register cleanup for external cancellations
+                ttsCleanupFns.push(() => {
+                    try { audioEl.pause(); } catch(_){}
+                    try { audioEl.removeEventListener('ended', onEnded); } catch(_){}
+                    try { source.disconnect(); } catch(_){}
+                    try { analyser.disconnect(); } catch(_){}
+                    try { gain.disconnect(); } catch(_){}
+                    try { if (rafId) cancelAnimationFrame(rafId); } catch(_){}
+                    try { URL.revokeObjectURL(audioEl.src); } catch(_){}
+                });
                 update(); // Kick off the animation loop
             } catch (e) { // Catch runtime issues constructing graph
                 console.warn('startLipSyncFromAudioElement failed:', e); // Log warning to console
