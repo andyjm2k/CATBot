@@ -455,12 +455,15 @@
         import * as THREE_NS from 'https://esm.sh/three@0.150.1';
         import { GLTFLoader } from 'https://esm.sh/three@0.150.1/examples/jsm/loaders/GLTFLoader.js';
         import { VRMLoaderPlugin, VRMUtils } from 'https://esm.sh/@pixiv/three-vrm@3.4.3?deps=three@0.150.1';
+        import { VRMAnimation, VRMAnimationLoaderPlugin } from 'https://esm.sh/@pixiv/three-vrm-animation@3.4.3?deps=three@0.150.1';
 
         // Expose to global for non-module scripts below (do NOT mutate the module namespace)
         window.THREE = THREE_NS;
         window.GLTFLoader = GLTFLoader;
         window.VRMLoaderPlugin = VRMLoaderPlugin;
         window.VRMUtils = VRMUtils;
+        window.VRMAnimation = VRMAnimation;
+        window.VRMAnimationLoaderPlugin = VRMAnimationLoaderPlugin;
 
         // Signal readiness
         window.__vrmModulesReady = true;
@@ -682,6 +685,10 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
         let isSpeaking = false; // Global speaking state for lip sync/expressions
         let lovePoseWeight = 0; // Current blend weight [0..1] toward love pose
         let targetLovePoseWeight = 0; // Target blend weight we ease toward
+        let vrmThinkPoseActive = false; // Whether the thinking pose is active
+        let thinkPoseTimeoutId = null; // Auto-release timer for thinking pose
+        let thinkPoseWeight = 0; // Current blend for thinking pose
+        let targetThinkPoseWeight = 0; // Target blend for thinking pose
         let vrmPositions = {}; // Persisted map of modelPath -> {scale, positionX, positionY, rotation}
         let currentVRMModelPath = '';
         // Removed fallback VRM; enforce valid user-provided .vrm only
@@ -695,6 +702,45 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
         let ttsLipSyncIntervalId = null; // Interval used by SpeechSynthesis fallback
         let ttsRafId = 0; // requestAnimationFrame id used by audio analyser loop
         let ttsCleanupFns = []; // Set of cleanup callbacks for active audio graph/listeners
+
+        // Global VRMA actions
+        let vrmLoveVrmaAction = null; // Prepared AnimationAction for love VRMA
+
+        // Pose configuration (tweak these numbers to adjust poses)
+        const POSE_CONFIG = {
+            blendSmoothing: 0.12, // Easing toward target pose weights per frame
+            love: {
+                durationMs: 6000, // How long to hold the love pose
+                expressionsOnly: true, // Do not apply manual limb rotations; VRMA drives motion
+                vrmaPath: './model_avatar/Eva/Kawaii Kaiwai.vrma', // VRMA animation path for love pose
+                useVrma: true, // Prefer VRMA over JSON pose
+                upperArmRollFactor: 0.15, // Reduce side roll by this fraction of armLowering
+                upperArmPitchForward: 0.9, // How much to pitch both upper arms forward (negative X)
+                upperArmYawIn: 0.9, // How much to yaw both upper arms inward (Y)
+                forearmBend: 1.4, // How much to bend both elbows (forearm Z)
+                handYawIn: 1.1, // How much to yaw both hands inward (Y)
+                smileGain: 0.85, // Smile amplitude scale during pose
+                smileBias: 0.2, // Extra bias so smile starts visible
+                loveEyesGain: 0.75, // Love eyes (relaxed) amplitude scale during pose
+                loveEyesBias: 0.15, // Extra bias so love eyes start visible
+                affectFace: false, // If true, also set smile/eye shapes (disabled per user request)
+                poseJsonPath: 'model_avatar/Eva/Eva0.vrm.json', // Optional pose JSON path with target quaternions (ignored when useVrma is true)
+                poseName: 'Heart', // Pose name in the JSON file
+                convertUnityQuat: false // Do not flip axes; VRM Poser quaternions align with three-vrm normalized bones
+            },
+            think: {
+                durationMs: 6000, // How long to hold the thinking pose
+                expressionsOnly: true, // If true, only drive facial expressions; skip limb rotations
+                upperArmPitchForward: 0.6, // Additional forward pitch for right upper arm
+                upperArmYawIn: 0.65, // Additional inward yaw for right upper arm
+                upperArmRollZ: 0.2, // Additional roll for right upper arm
+                forearmBendExtra: 1.6, // Extra elbow bend for right forearm
+                handYawInExtra: 0.8, // Extra inward yaw on right hand
+                oMouthGain: 0.75, // O mouth amplitude scale
+                oMouthBias: 0.2, // O mouth bias
+                browRaiseGain: 0.6 // Brow raise amplitude scale
+            }
+        };
 
         // Add these variables at the top of your script section
         let webcamEnabled = false;
@@ -3705,21 +3751,54 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                         try {
                             const lowered = (finalContent || '').toLowerCase();
                             const loveHit = ['happy','joy','glad','excited','wonderful','love','lovely','delighted','delight','romantic'].some(k => lowered.includes(k));
+                            const thinkHit = ['thinking','consider','perhaps','maybe','hmm','interesting','curious','think','think about','ponder'].some(k => lowered.includes(k));
                             if (loveHit) {
-                                vrmLovePoseActive = true; targetLovePoseWeight = 1;
+                                vrmLovePoseActive = true; targetLovePoseWeight = 1; targetThinkPoseWeight = 0; vrmThinkPoseActive = false;
                                 if (lovePoseTimeoutId) { clearTimeout(lovePoseTimeoutId); }
+                                // Prefer VRMA animation if available
+                                if (vrmLoveVrmaAction) {
+                                    try {
+                                        console.log('Playing VRMA love action');
+                                        vrmLoveVrmaAction.reset();
+                                        vrmLoveVrmaAction.setEffectiveWeight(1.0);
+                                        vrmLoveVrmaAction.setEffectiveTimeScale(1.0);
+                                        vrmLoveVrmaAction.play();
+                                    } catch(_) {}
+                                }
                                 lovePoseTimeoutId = setTimeout(() => {
                                     vrmLovePoseActive = false; targetLovePoseWeight = 0;
                                     // Ensure smile/eyes reset after timeout
                                     try {
+                                        if (!POSE_CONFIG.love.expressionsOnly) { try { restoreHumanoidQuats(vrm, lovePoseRestore); } catch(_) {} }
+                                        lovePoseRestore = null;
                                         if (vrm.expressionManager) {
                                             ['smile','happy','joy','fun'].forEach(k => { try { vrm.expressionManager.setValue(k, 0.0); } catch (_) {} });
+                                            // Clear love eyes expressions
+                                            ['relaxed','heart','love'].forEach(k => { try { vrm.expressionManager.setValue(k, 0.0); } catch (_) {} });
                                         }
                                         if (vrm.blendShapeProxy) {
                                             ['Smile','Joy','Fun','MouthSmile'].forEach(k => { try { vrm.blendShapeProxy.setValue(k, 0.0); } catch (_) {} });
+                                            // Clear love eyes expressions for VRM 0.x
+                                            ['Relaxed','Heart','Love'].forEach(k => { try { vrm.blendShapeProxy.setValue(k, 0.0); } catch (_) {} });
                                         }
                                     } catch (_) {}
-                                }, 6000);
+                                }, POSE_CONFIG.love.durationMs);
+                            } else if (thinkHit) {
+                                vrmThinkPoseActive = true; targetThinkPoseWeight = 1; targetLovePoseWeight = 0; vrmLovePoseActive = false;
+                                if (thinkPoseTimeoutId) { clearTimeout(thinkPoseTimeoutId); }
+                                thinkPoseTimeoutId = setTimeout(() => {
+                                    vrmThinkPoseActive = false; targetThinkPoseWeight = 0;
+                                    try {
+                                        if (vrm.expressionManager) {
+                                            try { vrm.expressionManager.setValue('oh', 0.0); } catch(_){}
+                                            ['browUp','browUpLeft','browUpRight','surprised'].forEach(k => { try { vrm.expressionManager.setValue(k, 0.0); } catch(_){} });
+                                        }
+                                        if (vrm.blendShapeProxy) {
+                                            try { vrm.blendShapeProxy.setValue('O', 0.0); } catch(_){}
+                                            ['BrowUp','BrowUp_L','BrowUp_R','Surprised'].forEach(k => { try { vrm.blendShapeProxy.setValue(k, 0.0); } catch(_){} });
+                                        }
+                                    } catch(_){}
+                                }, POSE_CONFIG.think.durationMs);
                             }
                         } catch (_) {}
                             } else {
@@ -3791,20 +3870,53 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                         try {
                             const lowered = (cleanContent || '').toLowerCase();
                             const loveHit = ['happy','joy','glad','excited','wonderful','love','lovely','delighted','delight','romantic'].some(k => lowered.includes(k));
+                            const thinkHit = ['thinking','consider','perhaps','maybe','hmm','interesting','curious','think','think about','ponder'].some(k => lowered.includes(k));
                             if (loveHit) {
-                                vrmLovePoseActive = true; targetLovePoseWeight = 1;
+                                vrmLovePoseActive = true; targetLovePoseWeight = 1; targetThinkPoseWeight = 0; vrmThinkPoseActive = false;
                                 if (lovePoseTimeoutId) { clearTimeout(lovePoseTimeoutId); }
+                                // Prefer VRMA animation if available
+                                if (vrmLoveVrmaAction) {
+                                    try {
+                                        console.log('Playing VRMA love action');
+                                        vrmLoveVrmaAction.reset();
+                                        vrmLoveVrmaAction.setEffectiveWeight(1.0);
+                                        vrmLoveVrmaAction.setEffectiveTimeScale(1.0);
+                                        vrmLoveVrmaAction.play();
+                                    } catch(_) {}
+                                }
                                 lovePoseTimeoutId = setTimeout(() => {
                                     vrmLovePoseActive = false; targetLovePoseWeight = 0;
                                     try {
+                                        if (!POSE_CONFIG.love.expressionsOnly) { try { restoreHumanoidQuats(vrm, lovePoseRestore); } catch(_) {} }
+                                        lovePoseRestore = null;
                                         if (vrm.expressionManager) {
                                             ['smile','happy','joy','fun'].forEach(k => { try { vrm.expressionManager.setValue(k, 0.0); } catch (_) {} });
+                                            // Clear love eyes expressions
+                                            ['relaxed','heart','love'].forEach(k => { try { vrm.expressionManager.setValue(k, 0.0); } catch (_) {} });
                                         }
                                         if (vrm.blendShapeProxy) {
                                             ['Smile','Joy','Fun','MouthSmile'].forEach(k => { try { vrm.blendShapeProxy.setValue(k, 0.0); } catch (_) {} });
+                                            // Clear love eyes expressions for VRM 0.x
+                                            ['Relaxed','Heart','Love'].forEach(k => { try { vrm.blendShapeProxy.setValue(k, 0.0); } catch (_) {} });
                                         }
                                     } catch (_) {}
                                 }, 6000);
+                            } else if (thinkHit) {
+                                vrmThinkPoseActive = true; targetThinkPoseWeight = 1; targetLovePoseWeight = 0; vrmLovePoseActive = false;
+                                if (thinkPoseTimeoutId) { clearTimeout(thinkPoseTimeoutId); }
+                                thinkPoseTimeoutId = setTimeout(() => {
+                                    vrmThinkPoseActive = false; targetThinkPoseWeight = 0;
+                                    try {
+                                        if (vrm.expressionManager) {
+                                            try { vrm.expressionManager.setValue('oh', 0.0); } catch(_){}
+                                            ['browUp','browUpLeft','browUpRight','surprised'].forEach(k => { try { vrm.expressionManager.setValue(k, 0.0); } catch(_){} });
+                                        }
+                                        if (vrm.blendShapeProxy) {
+                                            try { vrm.blendShapeProxy.setValue('O', 0.0); } catch(_){}
+                                            ['BrowUp','BrowUp_L','BrowUp_R','Surprised'].forEach(k => { try { vrm.blendShapeProxy.setValue(k, 0.0); } catch(_){} });
+                                        }
+                                    } catch(_){}
+                                }, POSE_CONFIG.love.durationMs);
                             }
                         } catch (_) {}
                         responseOutput.classList.remove('responding');
@@ -4026,9 +4138,12 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
 
                 // Load VRM model
                 const loader = new window.GLTFLoader();
-                // Register VRM plugin for GLTFLoader if available
+                // Register VRM + VRMA plugins for GLTFLoader if available
                 if (window.VRMLoaderPlugin) {
                     loader.register(parser => new window.VRMLoaderPlugin(parser));
+                }
+                if (window.VRMAnimationLoaderPlugin) {
+                    loader.register(parser => new window.VRMAnimationLoaderPlugin(parser));
                 }
 
                 const gltf = await new Promise((resolve, reject) => {
@@ -4092,6 +4207,52 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
 
                 // Animation mixer
                 const mixer = new window.THREE.AnimationMixer(vrm.scene);
+                // Optional: preload VRMA animation clip for love pose
+                let loveVrmaAction = null;
+                try {
+                    if (POSE_CONFIG?.love?.useVrma && POSE_CONFIG?.love?.vrmaPath) {
+                        const vrmaUrl = encodeURI(POSE_CONFIG.love.vrmaPath);
+                        console.log('Loading VRMA from', vrmaUrl);
+                        const vrmaGltf = await new Promise((resolve, reject) => {
+                            loader.load(vrmaUrl, resolve, undefined, reject);
+                        });
+                        // Prefer VRMAnimation (vrma) from userData if provided by plugin
+                        let clip = null;
+                        if (vrmaGltf?.userData?.vrmAnimations && Array.isArray(vrmaGltf.userData.vrmAnimations) && vrmaGltf.userData.vrmAnimations.length > 0) {
+                            console.log('Found VRMAnimation entries:', vrmaGltf.userData.vrmAnimations.length);
+                            const vrma = vrmaGltf.userData.vrmAnimations[0];
+                            // Prefer instance method on VRMAnimation to retarget to this VRM
+                            if (vrma && typeof vrma.createAnimationClip === 'function') {
+                                clip = vrma.createAnimationClip(vrm);
+                            } else if (window.VRMAnimation && typeof window.VRMAnimation.createAnimationClip === 'function') {
+                                // Static helper fallback if available
+                                clip = window.VRMAnimation.createAnimationClip(vrma, vrm);
+                            } else if (vrma?.clip) {
+                                // As a last resort, try a direct clip exposed on the object
+                                clip = vrma.clip;
+                            }
+                        }
+                        // Fallback to first animation clip attached to gltf
+                        if (!clip && Array.isArray(vrmaGltf.animations) && vrmaGltf.animations.length > 0) {
+                            console.log('Falling back to gltf.animations[0]');
+                            clip = vrmaGltf.animations[0];
+                        }
+                        if (clip) {
+                            // Retarget track names to VRM bone UUIDs if needed
+                            const boundClip = retargetClipToVRM(clip, vrm) || clip;
+                            loveVrmaAction = mixer.clipAction(boundClip, vrm.scene);
+                            loveVrmaAction.clampWhenFinished = true;
+                            loveVrmaAction.setEffectiveWeight(1.0);
+                            loveVrmaAction.setEffectiveTimeScale(1.0);
+                            loveVrmaAction.loop = window.THREE.LoopOnce;
+                            console.log('VRMA clip prepared. Tracks:', Array.isArray(boundClip.tracks) ? boundClip.tracks.length : 'unknown');
+                        } else {
+                            console.warn('No animation clip found in VRMA');
+                        }
+                    }
+                } catch (e) {
+                    console.warn('Failed to preload VRMA animation:', e);
+                }
                 const clock = new window.THREE.Clock();
 
                 // Store references
@@ -4101,6 +4262,7 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                 vrmRenderer = renderer;
                 vrmMixer = mixer;
                 vrmClock = clock;
+                vrmLoveVrmaAction = loveVrmaAction;
 
                 // Apply initial transforms
                 updateVRMTransform();
@@ -4142,14 +4304,135 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                 const headBone = getBone('head'); // Head bone for direct head rotation
                 const leftHand = getBone('leftHand'); // Left hand bone for love pose
                 const rightHand = getBone('rightHand'); // Right hand bone for love pose
+                const rightForeArm = getBone('rightLowerArm') || rightLowerArm; // Alias
+                // Optional: load target arm/hand rotations from VRM pose JSON (skip when VRMA is used)
+                let jsonPoseTargets = null;
+                if (!POSE_CONFIG?.love?.useVrma) {
+                    try {
+                        jsonPoseTargets = await (await fetch(POSE_CONFIG.love.poseJsonPath)).json();
+                    } catch (_) {}
+                }
+                // Map VRoid node names -> VRM humanoid canonical names (for pose retargeting)
+                function mapVroidToHumanoid(name) { const M = { 'J_Bip_C_Hips': 'hips', 'J_Bip_C_Spine': 'spine', 'J_Bip_C_Chest': 'chest', 'J_Bip_C_UpperChest': 'upperChest', 'J_Bip_C_Neck': 'neck', 'J_Bip_C_Head': 'head', 'J_Bip_L_Shoulder': 'leftShoulder', 'J_Bip_L_UpperArm': 'leftUpperArm', 'J_Bip_L_LowerArm': 'leftLowerArm', 'J_Bip_L_Hand': 'leftHand', 'J_Bip_R_Shoulder': 'rightShoulder', 'J_Bip_R_UpperArm': 'rightUpperArm', 'J_Bip_R_LowerArm': 'rightLowerArm', 'J_Bip_R_Hand': 'rightHand', 'J_Bip_L_UpperLeg': 'leftUpperLeg', 'J_Bip_L_LowerLeg': 'leftLowerLeg', 'J_Bip_L_Foot': 'leftFoot', 'J_Bip_L_ToeBase': 'leftToes', 'J_Bip_R_UpperLeg': 'rightUpperLeg', 'J_Bip_R_LowerLeg': 'rightLowerLeg', 'J_Bip_R_Foot': 'rightFoot', 'J_Bip_R_ToeBase': 'rightToes', 'J_Bip_L_Thumb1': 'leftThumbProximal', 'J_Bip_L_Thumb2': 'leftThumbIntermediate', 'J_Bip_L_Thumb3': 'leftThumbDistal', 'J_Bip_L_Index1': 'leftIndexProximal', 'J_Bip_L_Index2': 'leftIndexIntermediate', 'J_Bip_L_Index3': 'leftIndexDistal', 'J_Bip_L_Middle1': 'leftMiddleProximal', 'J_Bip_L_Middle2': 'leftMiddleIntermediate', 'J_Bip_L_Middle3': 'leftMiddleDistal', 'J_Bip_L_Ring1': 'leftRingProximal', 'J_Bip_L_Ring2': 'leftRingIntermediate', 'J_Bip_L_Ring3': 'leftRingDistal', 'J_Bip_L_Little1': 'leftLittleProximal', 'J_Bip_L_Little2': 'leftLittleIntermediate', 'J_Bip_L_Little3': 'leftLittleDistal', 'J_Bip_R_Thumb1': 'rightThumbProximal', 'J_Bip_R_Thumb2': 'rightThumbIntermediate', 'J_Bip_R_Thumb3': 'rightThumbDistal', 'J_Bip_R_Index1': 'rightIndexProximal', 'J_Bip_R_Index2': 'rightIndexIntermediate', 'J_Bip_R_Index3': 'rightIndexDistal', 'J_Bip_R_Middle1': 'rightMiddleProximal', 'J_Bip_R_Middle2': 'rightMiddleIntermediate', 'J_Bip_R_Middle3': 'rightMiddleDistal', 'J_Bip_R_Ring1': 'rightRingProximal', 'J_Bip_R_Ring2': 'rightRingIntermediate', 'J_Bip_R_Ring3': 'rightRingDistal', 'J_Bip_R_Little1': 'rightLittleProximal', 'J_Bip_R_Little2': 'rightLittleIntermediate', 'J_Bip_R_Little3': 'rightLittleDistal' }; return M[name] || null; }
+                // Convert the VRM Poser pose object -> { humanoid: {boneName:{rotation:[x,y,z,w]}} }
+                function toHumanoidPoseFromVrmPoser(poseObj) { const out = { version: '1.0', humanoid: {} }; for (const b of poseObj?.bones || []) { const hName = mapVroidToHumanoid(b.boneName); if (!hName || !b.localRotation || b.localRotation.length !== 4) continue; const r = b.localRotation; out.humanoid[hName] = { rotation: [r[0], r[1], r[2], r[3]] }; } return out; }
+                // Apply the converted pose to a VRM using normalized bones (works for 0.x and 1.0)
+                function applyHumanoidPose(vrmInstance, humanoidPose) { const human = vrmInstance?.humanoid; if (!human) return; for (const [name, data] of Object.entries(humanoidPose.humanoid)) { const node = human.getNormalizedBoneNode(name); if (!node || !data?.rotation) continue; const q = data.rotation; node.quaternion.set(q[0], q[1], q[2], q[3]); node.updateMatrixWorld(true); } }
+                // Utility to find a pose by name
+                function findPoseEntry(poserJsonArray, poseName) { if (!Array.isArray(poserJsonArray)) return null; return poserJsonArray.find(p => p.poseName === poseName) || poserJsonArray[0] || null; }
+                // Capture and restore helpers for quaternions
+                function captureHumanoidQuats(vrmInstance, boneNames) { const human = vrmInstance?.humanoid; const out = {}; if (!human) return out; for (const n of boneNames) { const node = human.getNormalizedBoneNode(n); if (node) out[n] = node.quaternion.clone(); } return out; }
+                function restoreHumanoidQuats(vrmInstance, captured) { const human = vrmInstance?.humanoid; if (!human || !captured) return; for (const [n, q] of Object.entries(captured)) { const node = human.getNormalizedBoneNode(n); if (node && q) { node.quaternion.copy(q); node.updateMatrixWorld(true); } } }
+                let lovePoseRestore = null; // Captured quaternions for restoring after love pose
+
+                // Retarget a THREE.AnimationClip (from VRMA/Mixamo names) to this VRM's bones by UUID
+                function retargetClipToVRM(sourceClip, vrmInstance) {
+                    try {
+                        if (!sourceClip || !Array.isArray(sourceClip.tracks)) return sourceClip;
+                        const human = vrmInstance?.humanoid; if (!human) return sourceClip;
+                        const mixamoToHumanoid = {
+                            'Hips': 'hips', 'Spine': 'spine', 'Chest': 'chest', 'UpperChest': 'upperChest', 'Neck': 'neck', 'Head': 'head',
+                            'LeftShoulder': 'leftShoulder', 'LeftArm': 'leftUpperArm', 'LeftForeArm': 'leftLowerArm', 'LeftHand': 'leftHand',
+                            'RightShoulder': 'rightShoulder', 'RightArm': 'rightUpperArm', 'RightForeArm': 'rightLowerArm', 'RightHand': 'rightHand',
+                            'LeftUpLeg': 'leftUpperLeg', 'LeftLeg': 'leftLowerLeg', 'LeftFoot': 'leftFoot', 'LeftToeBase': 'leftToes',
+                            'RightUpLeg': 'rightUpperLeg', 'RightLeg': 'rightLowerLeg', 'RightFoot': 'rightFoot', 'RightToeBase': 'rightToes',
+                            'LeftHandThumb1': 'leftThumbProximal', 'LeftHandThumb2': 'leftThumbIntermediate', 'LeftHandThumb3': 'leftThumbDistal',
+                            'LeftHandIndex1': 'leftIndexProximal', 'LeftHandIndex2': 'leftIndexIntermediate', 'LeftHandIndex3': 'leftIndexDistal',
+                            'LeftHandMiddle1': 'leftMiddleProximal', 'LeftHandMiddle2': 'leftMiddleIntermediate', 'LeftHandMiddle3': 'leftMiddleDistal',
+                            'LeftHandRing1': 'leftRingProximal', 'LeftHandRing2': 'leftRingIntermediate', 'LeftHandRing3': 'leftRingDistal',
+                            'LeftHandPinky1': 'leftLittleProximal', 'LeftHandPinky2': 'leftLittleIntermediate', 'LeftHandPinky3': 'leftLittleDistal',
+                            'RightHandThumb1': 'rightThumbProximal', 'RightHandThumb2': 'rightThumbIntermediate', 'RightHandThumb3': 'rightThumbDistal',
+                            'RightHandIndex1': 'rightIndexProximal', 'RightHandIndex2': 'rightIndexIntermediate', 'RightHandIndex3': 'rightIndexDistal',
+                            'RightHandMiddle1': 'rightMiddleProximal', 'RightHandMiddle2': 'rightMiddleIntermediate', 'RightHandMiddle3': 'rightMiddleDistal',
+                            'RightHandRing1': 'rightRingProximal', 'RightHandRing2': 'rightRingIntermediate', 'RightHandRing3': 'rightRingDistal',
+                            'RightHandPinky1': 'rightLittleProximal', 'RightHandPinky2': 'rightLittleIntermediate', 'RightHandPinky3': 'rightLittleDistal'
+                        };
+                        const retargetedTracks = [];
+                        for (const t of sourceClip.tracks) {
+                            const parts = String(t.name || '').split('.');
+                            if (parts.length < 2) continue;
+                            const srcNode = parts[0];
+                            const prop = parts.slice(1).join('.');
+                            // Only retarget rotations; skip position/scale to avoid moving the rig off-screen
+                            if (!/^quaternion(\.|$)/i.test(prop)) continue;
+                            const humanoidName = mixamoToHumanoid[srcNode];
+                            if (!humanoidName) continue;
+                            // Bind to raw bone node to ensure stable bindings for animation
+                            const node = (typeof human.getRawBoneNode === 'function') ? human.getRawBoneNode(humanoidName) : human.getNormalizedBoneNode(humanoidName);
+                            if (!node) continue;
+                            const newName = `${node.uuid}.${prop}`;
+                            // Recreate the track with the same constructor and values but different name
+                            const Cls = t.constructor; // e.g., THREE.QuaternionKeyframeTrack
+                            const newTrack = new Cls(newName, t.times.slice(), t.values.slice(), t.interpolation);
+                            retargetedTracks.push(newTrack);
+                        }
+                        if (retargetedTracks.length === 0) return sourceClip;
+                        const THREE_NS = window.THREE;
+                        const out = new THREE_NS.AnimationClip(sourceClip.name || 'retargeted', sourceClip.duration, retargetedTracks);
+                        return out;
+                    } catch (_) { return sourceClip; }
+                }
+                const convertUnityToThree = (q) => {
+                    // JSON localRotation order is [x, y, z, w]. We treat it as a Unity quaternion.
+                    // If conversion is enabled, flip X and Z to account for handedness differences.
+                    if (POSE_CONFIG.love.convertUnityQuat) {
+                        return new window.THREE.Quaternion(-q.x, q.y, -q.z, q.w).normalize();
+                    }
+                    return new window.THREE.Quaternion(q.x, q.y, q.z, q.w).normalize();
+                };
+                const readQuatForPose = (poseName, name) => {
+                    if (!jsonPoseTargets) return null;
+                    const pose = jsonPoseTargets.find(p => p.poseName === poseName);
+                    if (!pose) return null;
+                    const bone = pose.bones.find(b => b.boneName === name);
+                    if (!bone || !bone.localRotation) return null;
+                    const q = bone.localRotation; // [x,y,z,w] in Unity space order
+                    const unityQ = new window.THREE.Quaternion(q[0], q[1], q[2], q[3]);
+                    return convertUnityToThree(unityQ);
+                };
+                const qLUpper = readQuatForPose(POSE_CONFIG.love.poseName, 'J_Bip_L_UpperArm');
+                const qRUpper = readQuatForPose(POSE_CONFIG.love.poseName, 'J_Bip_R_UpperArm');
+                const qLLower = readQuatForPose(POSE_CONFIG.love.poseName, 'J_Bip_L_LowerArm');
+                const qRLower = readQuatForPose(POSE_CONFIG.love.poseName, 'J_Bip_R_LowerArm');
+                const qLHand  = readQuatForPose(POSE_CONFIG.love.poseName, 'J_Bip_L_Hand');
+                const qRHand  = readQuatForPose(POSE_CONFIG.love.poseName, 'J_Bip_R_Hand');
+                const bLUpper = readQuatForPose('Base', 'J_Bip_L_UpperArm');
+                const bRUpper = readQuatForPose('Base', 'J_Bip_R_UpperArm');
+                const bLLower = readQuatForPose('Base', 'J_Bip_L_LowerArm');
+                const bRLower = readQuatForPose('Base', 'J_Bip_R_LowerArm');
+                const bLHand  = readQuatForPose('Base', 'J_Bip_L_Hand');
+                const bRHand  = readQuatForPose('Base', 'J_Bip_R_Hand');
+
+                // Capture the model's neutral (current) bind orientation as a reference
+                const neutral = {
+                    LUpper: leftUpperArm ? leftUpperArm.quaternion.clone() : null,
+                    RUpper: rightUpperArm ? rightUpperArm.quaternion.clone() : null,
+                    LLower: leftLowerArm ? leftLowerArm.quaternion.clone() : null,
+                    RLower: rightLowerArm ? rightLowerArm.quaternion.clone() : null,
+                    LHand: leftHand ? leftHand.quaternion.clone() : null,
+                    RHand: rightHand ? rightHand.quaternion.clone() : null
+                };
+
+                // Compute deltas Heart relative to Base so we respect the rig's bind orientation
+                const deltaOr = (baseQ, heartQ) => {
+                    if (!heartQ) return null;
+                    if (!baseQ) return heartQ.clone();
+                    const invBase = baseQ.clone().invert();
+                    return invBase.multiply(heartQ).normalize();
+                };
+                const dLUpper = deltaOr(bLUpper, qLUpper);
+                const dRUpper = deltaOr(bRUpper, qRUpper);
+                const dLLower = deltaOr(bLLower, qLLower);
+                const dRLower = deltaOr(bRLower, qRLower);
+                const dLHand  = deltaOr(bLHand,  qLHand);
+                const dRHand  = deltaOr(bRHand,  qRHand);
                 const baseLeftArmZ = leftUpperArm ? leftUpperArm.rotation.z : 0; // Capture base left arm Z rotation
                 const baseRightArmZ = rightUpperArm ? rightUpperArm.rotation.z : 0; // Capture base right arm Z rotation
                 const baseLeftArmY = leftUpperArm ? leftUpperArm.rotation.y : 0; // Capture base left arm Y rotation
                 const baseRightArmY = rightUpperArm ? rightUpperArm.rotation.y : 0; // Capture base right arm Y rotation
                 const baseLeftUpperArmX = leftUpperArm ? leftUpperArm.rotation.x : 0; // Base left upper arm forward
-                const baseRightUpperArmX = rightUpperArm ? rightUpperArm.rotation.x : 0; // Base right upper arm forward
-                const baseLeftLowerArmX = leftLowerArm ? leftLowerArm.rotation.x : 0; // Capture base left elbow rotation X
-                const baseRightLowerArmX = rightLowerArm ? rightLowerArm.rotation.x : 0; // Capture base right elbow rotation X
+                const baseLeftLowerArmZ = leftLowerArm ? leftLowerArm.rotation.z : 0; // Capture base left elbow hinge (Z)
+                const baseRightLowerArmZ = rightLowerArm ? rightLowerArm.rotation.z : 0; // Capture base right elbow hinge (Z)
                 const baseSpineY = spineBone ? spineBone.position.y : 0; // Capture base spine Y position
                 const baseNeckX = neckBone ? neckBone.rotation.x : 0; // Capture base neck X rotation (pitch)
                 const baseNeckY = neckBone ? neckBone.rotation.y : 0; // Capture base neck Y rotation (yaw)
@@ -4157,6 +4440,11 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                 const baseHeadY = headBone ? headBone.rotation.y : 0; // Capture base head Y rotation (yaw)
                 const baseLeftHandY = leftHand ? leftHand.rotation.y : 0; // Base left hand yaw
                 const baseRightHandY = rightHand ? rightHand.rotation.y : 0; // Base right hand yaw
+                const baseRightUpperArmX = rightUpperArm ? rightUpperArm.rotation.x : 0; // Base right upper arm pitch
+                const baseRightUpperArmY = rightUpperArm ? rightUpperArm.rotation.y : 0; // Base right upper arm yaw
+                const baseRightUpperArmZ = rightUpperArm ? rightUpperArm.rotation.z : 0; // Base right upper arm roll
+                const baseRightForeArmX = rightForeArm ? rightForeArm.rotation.x : 0; // Base right forearm bend
+                const baseHeadZ = headBone ? headBone.rotation.z : 0; // Base head roll
                 const armLowering = 1.25; // Baseline to lower arms naturally alongside torso
                 const armInward = 0.18; // Baseline to rotate arms slightly inward towards body
                 const elbowBend = 0.25; // Baseline elbow bend so arms are relaxed
@@ -4190,58 +4478,125 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                                 lookTarget.position.lerp(targetPos, 0.05); // Smoothly approach new position
                             }
                         }
-                        // Blend weight toward target for love pose
-                        lovePoseWeight += (targetLovePoseWeight - lovePoseWeight) * 0.12; // Ease-in/out
+                        // Blend weights toward targets for poses
+                        lovePoseWeight += (targetLovePoseWeight - lovePoseWeight) * POSE_CONFIG.blendSmoothing; // Ease-in/out
+                        thinkPoseWeight += (targetThinkPoseWeight - thinkPoseWeight) * POSE_CONFIG.blendSmoothing; // Ease-in/out
 
-                        // Apply lightweight idle motion each frame (with love pose blending)
+                // Apply lightweight idle motion each frame (with love/think pose handling)
                         const t = (performance.now() - idleStart) / 1000; // Seconds since start
                         const sway = Math.sin(t * 1.1) * 0.035; // Small sway factor
                         const breathe = Math.sin(t * 2.0) * 0.01; // Small breathing factor
                         const inwardSway = Math.sin(t * 0.7) * 0.03; // Tiny inward/outward sway
                         const elbowSway = Math.sin(t * 1.7) * 0.06; // Small elbow motion for naturalness
-                        const w = lovePoseWeight; // Shorthand
+                // Strict Love pose (disabled when using VRMA)
+                if (vrmLovePoseActive && !POSE_CONFIG.love.expressionsOnly && !POSE_CONFIG.love.useVrma && (dLUpper || dRUpper || dLLower || dRLower || dLHand || dRHand)) {
+                    try { if (leftUpperArm && dLUpper && neutral.LUpper) { leftUpperArm.quaternion.copy(neutral.LUpper.clone().multiply(dLUpper)); } } catch(_){}
+                    try { if (rightUpperArm && dRUpper && neutral.RUpper) { rightUpperArm.quaternion.copy(neutral.RUpper.clone().multiply(dRUpper)); } } catch(_){}
+                    try { if (leftLowerArm && dLLower && neutral.LLower) { leftLowerArm.quaternion.copy(neutral.LLower.clone().multiply(dLLower)); } } catch(_){}
+                    try { if (rightLowerArm && dRLower && neutral.RLower) { rightLowerArm.quaternion.copy(neutral.RLower.clone().multiply(dRLower)); } } catch(_){}
+                    try { if (leftHand && dLHand && neutral.LHand) { leftHand.quaternion.copy(neutral.LHand.clone().multiply(dLHand)); } } catch(_){}
+                    try { if (rightHand && dRHand && neutral.RHand) { rightHand.quaternion.copy(neutral.RHand.clone().multiply(dRHand)); } } catch(_){}
+                } else {
+                        const w = lovePoseWeight; // Shorthand for love pose
+                        const wt = thinkPoseWeight; // Shorthand for think pose
+                        const applyLimbs = !POSE_CONFIG.love.expressionsOnly; // Skip love limb offsets when expressions-only is enabled
+                        const wL = applyLimbs ? w : 0; // Use 0 weight for limbs when expressions-only, to keep idle only
                         // Compute defaults (relaxed idle) and targets (love pose), then blend
                         if (leftUpperArm) {
                             const defZ = baseLeftArmZ - armLowering + sway; // relaxed lowered
-                            const tgtZ = baseLeftArmZ - armLowering * 0.4; // reduce flaring to the side
-                            leftUpperArm.rotation.z = defZ * (1 - w) + tgtZ * w;
+                            const tgtZ = baseLeftArmZ - armLowering * POSE_CONFIG.love.upperArmRollFactor; // minimal side roll to reduce flare
+                            leftUpperArm.rotation.z = defZ * (1 - wL) + tgtZ * wL;
                             const defY = baseLeftArmY + armInward + inwardSway; // slight inward
-                            const tgtY = baseLeftArmY + 0.45; // inward toward chest
-                            leftUpperArm.rotation.y = defY * (1 - w) + tgtY * w;
+                            const tgtY = baseLeftArmY + POSE_CONFIG.love.upperArmYawIn; // inward toward chest
+                            leftUpperArm.rotation.y = defY * (1 - wL) + tgtY * wL;
                             const defX = baseLeftUpperArmX; // minimal forward
-                            const tgtX = baseLeftUpperArmX - 0.35; // raise forward (negative pitch)
-                            leftUpperArm.rotation.x = defX * (1 - w) + tgtX * w;
+                            const tgtX = baseLeftUpperArmX - POSE_CONFIG.love.upperArmPitchForward; // forward pitch (negative)
+                            leftUpperArm.rotation.x = defX * (1 - wL) + tgtX * wL;
+                            // If JSON pose targets provided, blend toward them too
+                            if (applyLimbs && qLUpper) {
+                                const curQ = new window.THREE.Quaternion().setFromEuler(leftUpperArm.rotation);
+                                const blended = curQ.clone().slerp(qLUpper, Math.min(1, wL * 0.85));
+                                leftUpperArm.rotation.setFromQuaternion(blended);
+                            }
                         }
                         if (rightUpperArm) {
                             const defZ = baseRightArmZ + armLowering - sway; // relaxed lowered
-                            const tgtZ = baseRightArmZ + armLowering * 0.4; // reduce flaring to the side
-                            rightUpperArm.rotation.z = defZ * (1 - w) + tgtZ * w;
+                            const tgtZ = baseRightArmZ + armLowering * POSE_CONFIG.love.upperArmRollFactor; // minimal side roll to reduce flare
+                            let outZ = defZ * (1 - wL) + tgtZ * wL; // Start from love blend (or idle only)
                             const defY = baseRightArmY - armInward - inwardSway; // slight inward
-                            const tgtY = baseRightArmY - 0.45; // inward toward chest
-                            rightUpperArm.rotation.y = defY * (1 - w) + tgtY * w;
+                            const tgtY = baseRightArmY - POSE_CONFIG.love.upperArmYawIn; // inward toward chest
+                            let outY = defY * (1 - wL) + tgtY * wL;
                             const defX = baseRightUpperArmX; // minimal forward
-                            const tgtX = baseRightUpperArmX - 0.35; // raise forward (negative pitch)
-                            rightUpperArm.rotation.x = defX * (1 - w) + tgtX * w;
+                            const tgtX = baseRightUpperArmX - POSE_CONFIG.love.upperArmPitchForward; // forward pitch (negative)
+                            let outX = defX * (1 - wL) + tgtX * wL;
+                            // Thinking pose adjustment: bring right hand to chin (raise and yaw inward more)
+                            if (wt > 0 && !POSE_CONFIG.think.expressionsOnly) {
+                                const tRaise = baseRightUpperArmX - POSE_CONFIG.think.upperArmPitchForward; // raise further forward
+                                const tYawIn = baseRightUpperArmY - POSE_CONFIG.think.upperArmYawIn; // yaw inward more
+                                const tRoll = baseRightUpperArmZ + POSE_CONFIG.think.upperArmRollZ; // slight roll to align palm
+                                outX = outX * (1 - wt) + tRaise * wt;
+                                outY = outY * (1 - wt) + tYawIn * wt;
+                                outZ = outZ * (1 - wt) + tRoll * wt;
+                            }
+                            rightUpperArm.rotation.x = outX;
+                            rightUpperArm.rotation.y = outY;
+                            rightUpperArm.rotation.z = outZ;
+                            if (applyLimbs && qRUpper) {
+                                const curQ = new window.THREE.Quaternion().setFromEuler(rightUpperArm.rotation);
+                                const blended = curQ.clone().slerp(qRUpper, Math.min(1, wL * 0.85));
+                                rightUpperArm.rotation.setFromQuaternion(blended);
+                            }
                         }
                         if (leftLowerArm) {
-                            const def = baseLeftLowerArmX + elbowBend + elbowSway; // relaxed elbow
-                            const tgt = baseLeftLowerArmX + 1.0; // bend toward chest
-                            leftLowerArm.rotation.x = def * (1 - w) + tgt * w;
+                            const def = baseLeftLowerArmZ + elbowBend + elbowSway; // relaxed elbow on Z hinge
+                            const tgt = baseLeftLowerArmZ + POSE_CONFIG.love.forearmBend; // stronger bend toward chest
+                            let outL = def * (1 - wL) + tgt * wL;
+                            leftLowerArm.rotation.z = outL;
+                            if (applyLimbs && qLLower) {
+                                const curQ = new window.THREE.Quaternion().setFromEuler(leftLowerArm.rotation);
+                                const blended = curQ.clone().slerp(qLLower, Math.min(1, wL * 0.9));
+                                leftLowerArm.rotation.setFromQuaternion(blended);
+                            }
                         }
                         if (rightLowerArm) {
-                            const def = baseRightLowerArmX + elbowBend - elbowSway; // relaxed elbow
-                            const tgt = baseRightLowerArmX + 1.0; // bend toward chest
-                            rightLowerArm.rotation.x = def * (1 - w) + tgt * w;
+                            const def = baseRightLowerArmZ + elbowBend - elbowSway; // relaxed elbow on Z hinge
+                            const tgt = baseRightLowerArmZ + POSE_CONFIG.love.forearmBend; // stronger bend toward chest
+                            let out = def * (1 - wL) + tgt * wL;
+                            if (wt > 0 && !POSE_CONFIG.think.expressionsOnly) {
+                                const tFore = baseRightLowerArmZ + POSE_CONFIG.think.forearmBendExtra; // stronger bend to reach chin
+                                out = out * (1 - wt) + tFore * wt;
+                            }
+                            rightLowerArm.rotation.z = out;
+                            if (applyLimbs && qRLower) {
+                                const curQ = new window.THREE.Quaternion().setFromEuler(rightLowerArm.rotation);
+                                const blended = curQ.clone().slerp(qRLower, Math.min(1, wL * 0.9));
+                                rightLowerArm.rotation.setFromQuaternion(blended);
+                            }
                         }
                         if (leftHand) {
                             const def = baseLeftHandY; // relaxed
-                            const tgt = baseLeftHandY + 0.4; // rotate inward
-                            leftHand.rotation.y = def * (1 - w) + tgt * w;
+                            const tgt = baseLeftHandY + POSE_CONFIG.love.handYawIn; // strong inward to chest
+                            leftHand.rotation.y = def * (1 - wL) + tgt * wL;
+                            if (applyLimbs && qLHand) {
+                                const curQ = new window.THREE.Quaternion().setFromEuler(leftHand.rotation);
+                                const blended = curQ.clone().slerp(qLHand, Math.min(1, wL));
+                                leftHand.rotation.setFromQuaternion(blended);
+                            }
                         }
                         if (rightHand) {
                             const def = baseRightHandY; // relaxed
-                            const tgt = baseRightHandY - 0.4; // rotate inward (mirror)
-                            rightHand.rotation.y = def * (1 - w) + tgt * w;
+                            const tgt = baseRightHandY - POSE_CONFIG.love.handYawIn; // strong inward to chest (mirror)
+                            let out = def * (1 - wL) + tgt * wL;
+                            if (wt > 0 && !POSE_CONFIG.think.expressionsOnly) {
+                                const tHandYaw = baseRightHandY - POSE_CONFIG.think.handYawInExtra; // more inward for chin touch
+                                out = out * (1 - wt) + tHandYaw * wt;
+                            }
+                            rightHand.rotation.y = out;
+                            if (applyLimbs && qRHand) {
+                                const curQ = new window.THREE.Quaternion().setFromEuler(rightHand.rotation);
+                                const blended = curQ.clone().slerp(qRHand, Math.min(1, wL));
+                                rightHand.rotation.setFromQuaternion(blended);
+                            }
                         }
                         if (spineBone) { spineBone.position.y = baseSpineY + breathe; } // Subtle spine bob for breathing
 
@@ -4271,26 +4626,38 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                                 headBone.rotation.x += (targetHeadX - headBone.rotation.x) * smoothing; // Smoothly apply head pitch
                             } // End head application
                         } // End head rotation block
+                } // end strict love pose else-branch
 
-                        // When love pose is active and not speaking, hold a closed smile (scaled by weight)
+                        // When love pose is active and not speaking, hold a closed smile and love eyes (scaled by weight)
                         if (lovePoseWeight > 0.1 && !isSpeaking) {
                             try {
-                                const smileVal = 0.85 * Math.min(1, lovePoseWeight + 0.2);
+                                const smileVal = POSE_CONFIG.love.smileGain * Math.min(1, lovePoseWeight + POSE_CONFIG.love.smileBias);
+                                const loveEyesVal = POSE_CONFIG.love.loveEyesGain * Math.min(1, lovePoseWeight + POSE_CONFIG.love.loveEyesBias);
                                 if (vrm.expressionManager) {
+                                    // Set smile expressions
                                     const smileKeys = ['smile', 'happy', 'joy', 'fun'];
                                     for (const k of smileKeys) { try { vrm.expressionManager.setValue(k, smileVal); } catch (_) {} }
                                     // Keep vowels closed only when not speaking
                                     const vowels = ['aa','ih','ou','ee','oh'];
                                     for (const v of vowels) { try { vrm.expressionManager.setValue(v, 0.0); } catch (_) {} }
-                                    // Ensure eye openness returns if any blink-like keys exist
-                                    const eyeOpenKeys = ['relaxed', 'neutral', 'look','lookLeft','lookRight'];
-                                    for (const eKey of eyeOpenKeys) { try { vrm.expressionManager.setValue(eKey, 0.0); } catch (_) {} }
+                                    // Set love eyes (relaxed expression creates soft half-closed eyes)
+                                    try { vrm.expressionManager.setValue('relaxed', loveEyesVal); } catch (_) {} // VRM 1.0 standard relaxed key
+                                    try { vrm.expressionManager.setValue('heart', loveEyesVal); } catch (_) {} // Optional custom heart eyes
+                                    try { vrm.expressionManager.setValue('love', loveEyesVal); } catch (_) {} // Optional custom love eyes
+                                    // Clear conflicting eye expressions
+                                    const clearEyeKeys = ['neutral', 'look','lookLeft','lookRight'];
+                                    for (const eKey of clearEyeKeys) { try { vrm.expressionManager.setValue(eKey, 0.0); } catch (_) {} }
                                 }
                                 if (vrm.blendShapeProxy) {
+                                    // VRM 0.x: Set smile expressions
                                     const smile0 = ['Smile','Joy','Fun','MouthSmile'];
                                     for (const k of smile0) { try { vrm.blendShapeProxy.setValue(k, smileVal); } catch (_) {} }
                                     const vowels0 = ['A','I','U','E','O'];
                                     for (const v of vowels0) { try { vrm.blendShapeProxy.setValue(v, 0.0); } catch (_) {} }
+                                    // VRM 0.x: Set love eyes expressions
+                                    try { vrm.blendShapeProxy.setValue('Relaxed', loveEyesVal); } catch (_) {} // VRM 0.x relaxed key
+                                    try { vrm.blendShapeProxy.setValue('Heart', loveEyesVal); } catch (_) {} // Optional custom heart eyes
+                                    try { vrm.blendShapeProxy.setValue('Love', loveEyesVal); } catch (_) {} // Optional custom love eyes
                                 }
                             } catch (_) {}
                         } else if (!isSpeaking && lovePoseWeight <= 0.1) {
@@ -4299,12 +4666,52 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                                 if (vrm.expressionManager) {
                                     const smileKeys = ['smile', 'happy', 'joy', 'fun'];
                                     for (const k of smileKeys) { try { vrm.expressionManager.setValue(k, 0.0); } catch (_) {} }
+                                    // Clear love eyes expressions
+                                    try { vrm.expressionManager.setValue('relaxed', 0.0); } catch (_) {}
+                                    try { vrm.expressionManager.setValue('heart', 0.0); } catch (_) {}
+                                    try { vrm.expressionManager.setValue('love', 0.0); } catch (_) {}
                                 }
                                 if (vrm.blendShapeProxy) {
                                     const smile0 = ['Smile','Joy','Fun','MouthSmile'];
                                     for (const k of smile0) { try { vrm.blendShapeProxy.setValue(k, 0.0); } catch (_) {} }
+                                    // Clear love eyes expressions for VRM 0.x
+                                    try { vrm.blendShapeProxy.setValue('Relaxed', 0.0); } catch (_) {}
+                                    try { vrm.blendShapeProxy.setValue('Heart', 0.0); } catch (_) {}
+                                    try { vrm.blendShapeProxy.setValue('Love', 0.0); } catch (_) {}
                                 }
                             } catch (_) {}
+                        }
+
+                        // Thinking pose facial cues when active and not speaking
+                        if (thinkPoseWeight > 0.1 && !isSpeaking) {
+                            try {
+                                const oVal = Math.min(1, POSE_CONFIG.think.oMouthGain * thinkPoseWeight + POSE_CONFIG.think.oMouthBias);
+                                if (vrm.expressionManager) {
+                                    // Prefer 'oh' vowel for O mouth
+                                    try { vrm.expressionManager.setValue('oh', oVal); } catch(_){}
+                                    // Raise brows if keys exist
+                                    const browUpKeys = ['browUp','browUpLeft','browUpRight','surprised'];
+                                    for (const b of browUpKeys) { try { vrm.expressionManager.setValue(b, POSE_CONFIG.think.browRaiseGain * thinkPoseWeight); } catch(_){} }
+                                }
+                                if (vrm.blendShapeProxy) {
+                                    // VRM 0.x: use 'O' if available
+                                    try { vrm.blendShapeProxy.setValue('O', oVal); } catch(_){}
+                                    const brow0 = ['BrowUp','BrowUp_L','BrowUp_R','Surprised'];
+                                    for (const b of brow0) { try { vrm.blendShapeProxy.setValue(b, POSE_CONFIG.think.browRaiseGain * thinkPoseWeight); } catch(_){} }
+                                }
+                            } catch(_){}
+                        } else if (!isSpeaking && thinkPoseWeight <= 0.1) {
+                            // Release O mouth and brow keys when done
+                            try {
+                                if (vrm.expressionManager) {
+                                    try { vrm.expressionManager.setValue('oh', 0.0); } catch(_){}
+                                    ['browUp','browUpLeft','browUpRight','surprised'].forEach(k => { try { vrm.expressionManager.setValue(k, 0.0); } catch(_){} });
+                                }
+                                if (vrm.blendShapeProxy) {
+                                    try { vrm.blendShapeProxy.setValue('O', 0.0); } catch(_){}
+                                    ['BrowUp','BrowUp_L','BrowUp_R','Surprised'].forEach(k => { try { vrm.blendShapeProxy.setValue(k, 0.0); } catch(_){} });
+                                }
+                            } catch(_){}
                         }
                     }
 
