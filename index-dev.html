@@ -693,6 +693,10 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
         let cryPoseTimeoutId = null; // Auto-release timer for cry pose
         let cryPoseWeight = 0; // Current blend for cry pose
         let targetCryPoseWeight = 0; // Target blend for cry pose
+        let vrmAngryPoseActive = false; // Whether the angry pose is active
+        let angryPoseTimeoutId = null; // Auto-release timer for angry pose
+        let angryPoseWeight = 0; // Current blend for angry pose
+        let targetAngryPoseWeight = 0; // Target blend for angry pose
         let vrmPositions = {}; // Persisted map of modelPath -> {scale, positionX, positionY, rotation}
         let currentVRMModelPath = '';
         // Removed fallback VRM; enforce valid user-provided .vrm only
@@ -711,6 +715,7 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
         let vrmLoveVrmaAction = null; // Prepared AnimationAction for love VRMA
         let vrmThinkVrmaAction = null; // Prepared AnimationAction for thinking VRMA
         let vrmCryVrmaAction = null; // Prepared AnimationAction for cry VRMA
+        let vrmAngryVrmaAction = null; // Prepared AnimationAction for angry VRMA
 
         // Pose configuration (tweak these numbers to adjust poses)
         const POSE_CONFIG = {
@@ -756,6 +761,14 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
                 sadMouthGain: 0.75, // Sad mouth amplitude scale
                 sadMouthBias: 0.2, // Sad mouth bias
                 tearGain: 0.8 // Tear/crying expression amplitude
+            },
+            angry: {
+                durationMs: 6000, // How long to hold the angry pose
+                expressionsOnly: true, // Only drive facial expressions; skip limb rotations
+                vrmaPath: './model_avatar/Eva/VRMA_04.vrma', // VRMA animation path for angry pose
+                useVrma: true, // Prefer VRMA over manual pose
+                angryExpressionGain: 1.0, // Angry expression amplitude scale
+                browDownGain: 0.8 // Brow down amplitude for angry look
             }
         };
 
@@ -3770,6 +3783,7 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                             const loveHit = ['happy','joy','glad','excited','wonderful','love','lovely','delighted','delight','romantic'].some(k => lowered.includes(k));
                             const thinkHit = ['thinking','consider','perhaps','maybe','hmm','interesting','curious','think','think about','ponder'].some(k => lowered.includes(k));
                             const cryHit = ['sad','upset','sorry','disappointed','unhappy','crying','cry'].some(k => lowered.includes(k));
+                            const angryHit = ['angry','mad','furious','annoyed','irritated','frustrated','harsh'].some(k => lowered.includes(k));
                             if (loveHit) {
                                 vrmLovePoseActive = true; targetLovePoseWeight = 1; targetThinkPoseWeight = 0; vrmThinkPoseActive = false;
                                 if (lovePoseTimeoutId) { clearTimeout(lovePoseTimeoutId); }
@@ -3916,6 +3930,64 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                                         }
                                     } catch(_){}
                                 }, POSE_CONFIG.cry.durationMs);
+                            } else if (angryHit) {
+                                vrmAngryPoseActive = true; targetAngryPoseWeight = 1; targetLovePoseWeight = 0; targetThinkPoseWeight = 0; targetCryPoseWeight = 0; vrmLovePoseActive = false; vrmThinkPoseActive = false; vrmCryPoseActive = false;
+                                if (angryPoseTimeoutId) { clearTimeout(angryPoseTimeoutId); }
+                                // Set angry expression on the model
+                                try {
+                                    if (vrm.expressionManager) {
+                                        // Set angry expression to full intensity
+                                        try { vrm.expressionManager.setValue('angry', 1.0); } catch(_){}
+                                    }
+                                    if (vrm.blendShapeProxy) {
+                                        // Set angry expression for VRM 0.x
+                                        try { vrm.blendShapeProxy.setValue('Angry', 1.0); } catch(_){}
+                                    }
+                                } catch(_){}
+                                // Prefer VRMA animation if available
+                                if (vrmAngryVrmaAction) {
+                                    try {
+                                        console.log('Playing VRMA angry action');
+                                        vrmAngryVrmaAction.stop();
+                                        vrmAngryVrmaAction.reset();
+                                        vrmAngryVrmaAction.setEffectiveWeight(1.0);
+                                        vrmAngryVrmaAction.setEffectiveTimeScale(1.0);
+                                        vrmAngryVrmaAction.enabled = true;
+                                        vrmAngryVrmaAction.play();
+                                        console.log('VRMA angry action state:', {
+                                            isRunning: vrmAngryVrmaAction.isRunning(),
+                                            isScheduled: vrmAngryVrmaAction.isScheduled(),
+                                            paused: vrmAngryVrmaAction.paused,
+                                            enabled: vrmAngryVrmaAction.enabled,
+                                            time: vrmAngryVrmaAction.time,
+                                            weight: vrmAngryVrmaAction.getEffectiveWeight()
+                                        });
+                                    } catch(e) {
+                                        console.warn('Error playing VRMA angry action:', e);
+                                    }
+                                }
+                                angryPoseTimeoutId = setTimeout(() => {
+                                    vrmAngryPoseActive = false; targetAngryPoseWeight = 0;
+                                    // Smoothly fade out VRMA animation before stopping
+                                    if (vrmAngryVrmaAction && vrmAngryVrmaAction.isRunning()) {
+                                        try {
+                                            vrmAngryVrmaAction.fadeOut(0.8); // Fade out over 0.8 seconds
+                                            console.log('Fading out VRMA angry animation');
+                                        } catch(e) {
+                                            console.warn('Error fading out VRMA angry:', e);
+                                        }
+                                    }
+                                    try {
+                                        if (vrm.expressionManager) {
+                                            // Clear angry expressions
+                                            try { vrm.expressionManager.setValue('angry', 0.0); } catch(_){}
+                                        }
+                                        if (vrm.blendShapeProxy) {
+                                            // Clear angry expressions for VRM 0.x
+                                            try { vrm.blendShapeProxy.setValue('Angry', 0.0); } catch(_){}
+                                        }
+                                    } catch(_){}
+                                }, POSE_CONFIG.angry.durationMs);
                             }
                         } catch (_) {}
                             } else {
@@ -3989,6 +4061,7 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                             const loveHit = ['happy','joy','glad','excited','wonderful','love','lovely','delighted','delight','romantic'].some(k => lowered.includes(k));
                             const thinkHit = ['thinking','consider','perhaps','maybe','hmm','interesting','curious','think','think about','ponder'].some(k => lowered.includes(k));
                             const cryHit = ['sad','upset','sorry','disappointed','unhappy','crying','cry'].some(k => lowered.includes(k));
+                            const angryHit = ['angry','mad','furious','annoyed','irritated','frustrated','harsh'].some(k => lowered.includes(k));
                             if (loveHit) {
                                 vrmLovePoseActive = true; targetLovePoseWeight = 1; targetThinkPoseWeight = 0; vrmThinkPoseActive = false;
                                 if (lovePoseTimeoutId) { clearTimeout(lovePoseTimeoutId); }
@@ -4134,6 +4207,64 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                                         }
                                     } catch(_){}
                                 }, POSE_CONFIG.cry.durationMs);
+                            } else if (angryHit) {
+                                vrmAngryPoseActive = true; targetAngryPoseWeight = 1; targetLovePoseWeight = 0; targetThinkPoseWeight = 0; targetCryPoseWeight = 0; vrmLovePoseActive = false; vrmThinkPoseActive = false; vrmCryPoseActive = false;
+                                if (angryPoseTimeoutId) { clearTimeout(angryPoseTimeoutId); }
+                                // Set angry expression on the model
+                                try {
+                                    if (vrm.expressionManager) {
+                                        // Set angry expression to full intensity
+                                        try { vrm.expressionManager.setValue('angry', 1.0); } catch(_){}
+                                    }
+                                    if (vrm.blendShapeProxy) {
+                                        // Set angry expression for VRM 0.x
+                                        try { vrm.blendShapeProxy.setValue('Angry', 1.0); } catch(_){}
+                                    }
+                                } catch(_){}
+                                // Prefer VRMA animation if available
+                                if (vrmAngryVrmaAction) {
+                                    try {
+                                        console.log('Playing VRMA angry action');
+                                        vrmAngryVrmaAction.stop();
+                                        vrmAngryVrmaAction.reset();
+                                        vrmAngryVrmaAction.setEffectiveWeight(1.0);
+                                        vrmAngryVrmaAction.setEffectiveTimeScale(1.0);
+                                        vrmAngryVrmaAction.enabled = true;
+                                        vrmAngryVrmaAction.play();
+                                        console.log('VRMA angry action state:', {
+                                            isRunning: vrmAngryVrmaAction.isRunning(),
+                                            isScheduled: vrmAngryVrmaAction.isScheduled(),
+                                            paused: vrmAngryVrmaAction.paused,
+                                            enabled: vrmAngryVrmaAction.enabled,
+                                            time: vrmAngryVrmaAction.time,
+                                            weight: vrmAngryVrmaAction.getEffectiveWeight()
+                                        });
+                                    } catch(e) {
+                                        console.warn('Error playing VRMA angry action:', e);
+                                    }
+                                }
+                                angryPoseTimeoutId = setTimeout(() => {
+                                    vrmAngryPoseActive = false; targetAngryPoseWeight = 0;
+                                    // Smoothly fade out VRMA animation before stopping
+                                    if (vrmAngryVrmaAction && vrmAngryVrmaAction.isRunning()) {
+                                        try {
+                                            vrmAngryVrmaAction.fadeOut(0.8); // Fade out over 0.8 seconds
+                                            console.log('Fading out VRMA angry animation');
+                                        } catch(e) {
+                                            console.warn('Error fading out VRMA angry:', e);
+                                        }
+                                    }
+                                    try {
+                                        if (vrm.expressionManager) {
+                                            // Clear angry expressions
+                                            try { vrm.expressionManager.setValue('angry', 0.0); } catch(_){}
+                                        }
+                                        if (vrm.blendShapeProxy) {
+                                            // Clear angry expressions for VRM 0.x
+                                            try { vrm.blendShapeProxy.setValue('Angry', 0.0); } catch(_){}
+                                        }
+                                    } catch(_){}
+                                }, POSE_CONFIG.angry.durationMs);
                             }
                         } catch (_) {}
                         responseOutput.classList.remove('responding');
@@ -4364,10 +4495,12 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
             vrmLoveVrmaAction = null;
             vrmThinkVrmaAction = null;
             vrmCryVrmaAction = null;
+            vrmAngryVrmaAction = null;
             if (vrmBlinkTimeout) { try { clearTimeout(vrmBlinkTimeout); } catch (_) {} vrmBlinkTimeout = null; }
             if (lovePoseTimeoutId) { try { clearTimeout(lovePoseTimeoutId); } catch (_) {} lovePoseTimeoutId = null; }
             if (thinkPoseTimeoutId) { try { clearTimeout(thinkPoseTimeoutId); } catch (_) {} thinkPoseTimeoutId = null; }
             if (cryPoseTimeoutId) { try { clearTimeout(cryPoseTimeoutId); } catch (_) {} cryPoseTimeoutId = null; }
+            if (angryPoseTimeoutId) { try { clearTimeout(angryPoseTimeoutId); } catch (_) {} angryPoseTimeoutId = null; }
 
             // Detach mouse move handler if present
             const canvas = document.getElementById('vrm-canvas'); // Retrieve canvas to remove handler
@@ -4802,6 +4935,83 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                     console.warn('Failed to preload Cry VRMA animation:', e);
                 }
                 
+                // Optional: preload VRMA animation clip for angry pose
+                let angryVrmaAction = null;
+                try {
+                    if (POSE_CONFIG?.angry?.useVrma && POSE_CONFIG?.angry?.vrmaPath) {
+                        const vrmaUrl = encodeURI(POSE_CONFIG.angry.vrmaPath);
+                        console.log('Loading Angry VRMA from', vrmaUrl);
+                        const vrmaGltf = await new Promise((resolve, reject) => {
+                            loader.load(vrmaUrl, resolve, undefined, reject);
+                        });
+                        // Check multiple possible locations for VRMA data
+                        let vrma = null;
+
+                        // Try userData first
+                        if (vrmaGltf?.userData?.vrmAnimations && Array.isArray(vrmaGltf.userData.vrmAnimations) && vrmaGltf.userData.vrmAnimations.length > 0) {
+                            vrma = vrmaGltf.userData.vrmAnimations[0];
+                        }
+                        // Try extensions
+                        else if (vrmaGltf?.extensions?.VRMC_vrm_animation) {
+                            vrma = vrmaGltf.extensions.VRMC_vrm_animation;
+                        }
+                        // Try parser userData
+                        else if (vrmaGltf?.parser?.userData?.vrmAnimations) {
+                            vrma = vrmaGltf.parser.userData.vrmAnimations[0];
+                        }
+
+                        let clip = null;
+                        
+                        // Try instance method on VRMAnimation to retarget to this VRM
+                        if (!clip && vrma && typeof vrma.createAnimationClip === 'function') {
+                            try { 
+                                console.log('Trying vrma.createAnimationClip(vrm) for angry...');
+                                clip = vrma.createAnimationClip(vrm); 
+                                if (clip) {
+                                    console.log('Successfully created angry clip via vrma.createAnimationClip');
+                                }
+                            } catch(e) { 
+                                console.warn('vrma.createAnimationClip failed for angry:', e);
+                            }
+                        }
+                        // Static helper fallback if available
+                        if (!clip && window.VRMAnimation && typeof window.VRMAnimation.createAnimationClip === 'function') {
+                            try { 
+                                console.log('Trying VRMAnimation.createAnimationClip(vrma, vrm) for angry...');
+                                clip = window.VRMAnimation.createAnimationClip(vrma, vrm); 
+                                if (clip) {
+                                    console.log('Successfully created angry clip via VRMAnimation.createAnimationClip');
+                                }
+                            } catch(e) { 
+                                console.warn('VRMAnimation.createAnimationClip failed for angry:', e);
+                            }
+                        }
+                        // Synthesise THREE.AnimationClip if tracks array present
+                        if (!clip) {
+                            console.log('Trying to build angry clip manually from VRMA object...');
+                            const built = buildClipFromVRMAObject(vrma, vrm);
+                            if (built) { 
+                                clip = built;
+                                console.log('Successfully built angry clip manually');
+                            }
+                        }
+
+                        if (clip) {
+                            const boundClip = retargetClipToVRM(clip, vrm) || clip;
+                            angryVrmaAction = mixer.clipAction(boundClip, vrm.scene);
+                            angryVrmaAction.clampWhenFinished = true;
+                            angryVrmaAction.setEffectiveWeight(1.0);
+                            angryVrmaAction.setEffectiveTimeScale(1.0);
+                            angryVrmaAction.loop = window.THREE.LoopOnce;
+                            console.log('Angry VRMA clip prepared. Tracks:', Array.isArray(boundClip.tracks) ? boundClip.tracks.length : 'unknown');
+                        } else {
+                            console.warn('No animation clip found in Angry VRMA');
+                        }
+                    }
+                } catch (e) {
+                    console.warn('Failed to preload Angry VRMA animation:', e);
+                }
+                
                 const clock = new window.THREE.Clock();
 
                 // Store references
@@ -4814,6 +5024,7 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                 vrmLoveVrmaAction = loveVrmaAction;
                 vrmThinkVrmaAction = thinkVrmaAction;
                 vrmCryVrmaAction = cryVrmaAction;
+                vrmAngryVrmaAction = angryVrmaAction;
 
                 // Apply initial transforms
                 updateVRMTransform();
@@ -5254,6 +5465,16 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                                     };
                                     console.log('Cry Animation running:', actionState, '- Manual pose control DISABLED');
                                 }
+                                if (vrmAngryVrmaAction && vrmAngryVrmaAction.isRunning()) {
+                                    const actionState = {
+                                        type: 'Angry',
+                                        isRunning: vrmAngryVrmaAction.isRunning(),
+                                        isScheduled: vrmAngryVrmaAction.isScheduled(),
+                                        time: vrmAngryVrmaAction.time.toFixed(2),
+                                        weight: vrmAngryVrmaAction.getEffectiveWeight()
+                                    };
+                                    console.log('Angry Animation running:', actionState, '- Manual pose control DISABLED');
+                                }
                             }
                         }
                         // Idle head/eye movement by drifting the look target when mouse is idle
@@ -5291,7 +5512,7 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                     try { if (rightLowerArm && dRLower && neutral.RLower) { rightLowerArm.quaternion.copy(neutral.RLower.clone().multiply(dRLower)); } } catch(_){}
                     try { if (leftHand && dLHand && neutral.LHand) { leftHand.quaternion.copy(neutral.LHand.clone().multiply(dLHand)); } } catch(_){}
                     try { if (rightHand && dRHand && neutral.RHand) { rightHand.quaternion.copy(neutral.RHand.clone().multiply(dRHand)); } } catch(_){}
-                } else if (!(vrmLoveVrmaAction && vrmLoveVrmaAction.isRunning()) && !(vrmThinkVrmaAction && vrmThinkVrmaAction.isRunning()) && !(vrmCryVrmaAction && vrmCryVrmaAction.isRunning())) {
+                } else if (!(vrmLoveVrmaAction && vrmLoveVrmaAction.isRunning()) && !(vrmThinkVrmaAction && vrmThinkVrmaAction.isRunning()) && !(vrmCryVrmaAction && vrmCryVrmaAction.isRunning()) && !(vrmAngryVrmaAction && vrmAngryVrmaAction.isRunning())) {
                     // Only apply manual pose control if VRMA animations are NOT running
                         const w = lovePoseWeight; // Shorthand for love pose
                         const wt = thinkPoseWeight; // Shorthand for think pose
