@@ -689,6 +689,10 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
         let thinkPoseTimeoutId = null; // Auto-release timer for thinking pose
         let thinkPoseWeight = 0; // Current blend for thinking pose
         let targetThinkPoseWeight = 0; // Target blend for thinking pose
+        let vrmCryPoseActive = false; // Whether the cry pose is active
+        let cryPoseTimeoutId = null; // Auto-release timer for cry pose
+        let cryPoseWeight = 0; // Current blend for cry pose
+        let targetCryPoseWeight = 0; // Target blend for cry pose
         let vrmPositions = {}; // Persisted map of modelPath -> {scale, positionX, positionY, rotation}
         let currentVRMModelPath = '';
         // Removed fallback VRM; enforce valid user-provided .vrm only
@@ -706,6 +710,7 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
         // Global VRMA actions
         let vrmLoveVrmaAction = null; // Prepared AnimationAction for love VRMA
         let vrmThinkVrmaAction = null; // Prepared AnimationAction for thinking VRMA
+        let vrmCryVrmaAction = null; // Prepared AnimationAction for cry VRMA
 
         // Pose configuration (tweak these numbers to adjust poses)
         const POSE_CONFIG = {
@@ -742,6 +747,15 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
                 oMouthGain: 0.75, // O mouth amplitude scale
                 oMouthBias: 0.2, // O mouth bias
                 browRaiseGain: 0.6 // Brow raise amplitude scale
+            },
+            cry: {
+                durationMs: 6000, // How long to hold the cry pose
+                expressionsOnly: true, // Only drive facial expressions; skip limb rotations
+                vrmaPath: './model_avatar/Eva/007_gekirei.vrma', // VRMA animation path for cry pose
+                useVrma: true, // Prefer VRMA over manual pose
+                sadMouthGain: 0.75, // Sad mouth amplitude scale
+                sadMouthBias: 0.2, // Sad mouth bias
+                tearGain: 0.8 // Tear/crying expression amplitude
             }
         };
 
@@ -3755,6 +3769,7 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                             const lowered = (finalContent || '').toLowerCase();
                             const loveHit = ['happy','joy','glad','excited','wonderful','love','lovely','delighted','delight','romantic'].some(k => lowered.includes(k));
                             const thinkHit = ['thinking','consider','perhaps','maybe','hmm','interesting','curious','think','think about','ponder'].some(k => lowered.includes(k));
+                            const cryHit = ['sad','upset','sorry','disappointed','unhappy','crying','cry'].some(k => lowered.includes(k));
                             if (loveHit) {
                                 vrmLovePoseActive = true; targetLovePoseWeight = 1; targetThinkPoseWeight = 0; vrmThinkPoseActive = false;
                                 if (lovePoseTimeoutId) { clearTimeout(lovePoseTimeoutId); }
@@ -3854,6 +3869,53 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                                         }
                                     } catch(_){}
                                 }, POSE_CONFIG.think.durationMs);
+                            } else if (cryHit) {
+                                vrmCryPoseActive = true; targetCryPoseWeight = 1; targetLovePoseWeight = 0; targetThinkPoseWeight = 0; vrmLovePoseActive = false; vrmThinkPoseActive = false;
+                                if (cryPoseTimeoutId) { clearTimeout(cryPoseTimeoutId); }
+                                // Prefer VRMA animation if available
+                                if (vrmCryVrmaAction) {
+                                    try {
+                                        console.log('Playing VRMA cry action');
+                                        vrmCryVrmaAction.stop();
+                                        vrmCryVrmaAction.reset();
+                                        vrmCryVrmaAction.setEffectiveWeight(1.0);
+                                        vrmCryVrmaAction.setEffectiveTimeScale(1.0);
+                                        vrmCryVrmaAction.enabled = true;
+                                        vrmCryVrmaAction.play();
+                                        console.log('VRMA cry action state:', {
+                                            isRunning: vrmCryVrmaAction.isRunning(),
+                                            isScheduled: vrmCryVrmaAction.isScheduled(),
+                                            paused: vrmCryVrmaAction.paused,
+                                            enabled: vrmCryVrmaAction.enabled,
+                                            time: vrmCryVrmaAction.time,
+                                            weight: vrmCryVrmaAction.getEffectiveWeight()
+                                        });
+                                    } catch(e) {
+                                        console.warn('Error playing VRMA cry action:', e);
+                                    }
+                                }
+                                cryPoseTimeoutId = setTimeout(() => {
+                                    vrmCryPoseActive = false; targetCryPoseWeight = 0;
+                                    // Smoothly fade out VRMA animation before stopping
+                                    if (vrmCryVrmaAction && vrmCryVrmaAction.isRunning()) {
+                                        try {
+                                            vrmCryVrmaAction.fadeOut(0.8); // Fade out over 0.8 seconds
+                                            console.log('Fading out VRMA cry animation');
+                                        } catch(e) {
+                                            console.warn('Error fading out VRMA cry:', e);
+                                        }
+                                    }
+                                    try {
+                                        if (vrm.expressionManager) {
+                                            // Clear sad/cry expressions
+                                            ['sad','cry','sorrow'].forEach(k => { try { vrm.expressionManager.setValue(k, 0.0); } catch(_){} });
+                                        }
+                                        if (vrm.blendShapeProxy) {
+                                            // Clear sad/cry expressions for VRM 0.x
+                                            ['Sad','Cry','Sorrow'].forEach(k => { try { vrm.blendShapeProxy.setValue(k, 0.0); } catch(_){} });
+                                        }
+                                    } catch(_){}
+                                }, POSE_CONFIG.cry.durationMs);
                             }
                         } catch (_) {}
                             } else {
@@ -3926,6 +3988,7 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                             const lowered = (cleanContent || '').toLowerCase();
                             const loveHit = ['happy','joy','glad','excited','wonderful','love','lovely','delighted','delight','romantic'].some(k => lowered.includes(k));
                             const thinkHit = ['thinking','consider','perhaps','maybe','hmm','interesting','curious','think','think about','ponder'].some(k => lowered.includes(k));
+                            const cryHit = ['sad','upset','sorry','disappointed','unhappy','crying','cry'].some(k => lowered.includes(k));
                             if (loveHit) {
                                 vrmLovePoseActive = true; targetLovePoseWeight = 1; targetThinkPoseWeight = 0; vrmThinkPoseActive = false;
                                 if (lovePoseTimeoutId) { clearTimeout(lovePoseTimeoutId); }
@@ -4024,6 +4087,53 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                                         }
                                     } catch(_){}
                                 }, POSE_CONFIG.think.durationMs);
+                            } else if (cryHit) {
+                                vrmCryPoseActive = true; targetCryPoseWeight = 1; targetLovePoseWeight = 0; targetThinkPoseWeight = 0; vrmLovePoseActive = false; vrmThinkPoseActive = false;
+                                if (cryPoseTimeoutId) { clearTimeout(cryPoseTimeoutId); }
+                                // Prefer VRMA animation if available
+                                if (vrmCryVrmaAction) {
+                                    try {
+                                        console.log('Playing VRMA cry action');
+                                        vrmCryVrmaAction.stop();
+                                        vrmCryVrmaAction.reset();
+                                        vrmCryVrmaAction.setEffectiveWeight(1.0);
+                                        vrmCryVrmaAction.setEffectiveTimeScale(1.0);
+                                        vrmCryVrmaAction.enabled = true;
+                                        vrmCryVrmaAction.play();
+                                        console.log('VRMA cry action state:', {
+                                            isRunning: vrmCryVrmaAction.isRunning(),
+                                            isScheduled: vrmCryVrmaAction.isScheduled(),
+                                            paused: vrmCryVrmaAction.paused,
+                                            enabled: vrmCryVrmaAction.enabled,
+                                            time: vrmCryVrmaAction.time,
+                                            weight: vrmCryVrmaAction.getEffectiveWeight()
+                                        });
+                                    } catch(e) {
+                                        console.warn('Error playing VRMA cry action:', e);
+                                    }
+                                }
+                                cryPoseTimeoutId = setTimeout(() => {
+                                    vrmCryPoseActive = false; targetCryPoseWeight = 0;
+                                    // Smoothly fade out VRMA animation before stopping
+                                    if (vrmCryVrmaAction && vrmCryVrmaAction.isRunning()) {
+                                        try {
+                                            vrmCryVrmaAction.fadeOut(0.8); // Fade out over 0.8 seconds
+                                            console.log('Fading out VRMA cry animation');
+                                        } catch(e) {
+                                            console.warn('Error fading out VRMA cry:', e);
+                                        }
+                                    }
+                                    try {
+                                        if (vrm.expressionManager) {
+                                            // Clear sad/cry expressions
+                                            ['sad','cry','sorrow'].forEach(k => { try { vrm.expressionManager.setValue(k, 0.0); } catch(_){} });
+                                        }
+                                        if (vrm.blendShapeProxy) {
+                                            // Clear sad/cry expressions for VRM 0.x
+                                            ['Sad','Cry','Sorrow'].forEach(k => { try { vrm.blendShapeProxy.setValue(k, 0.0); } catch(_){} });
+                                        }
+                                    } catch(_){}
+                                }, POSE_CONFIG.cry.durationMs);
                             }
                         } catch (_) {}
                         responseOutput.classList.remove('responding');
@@ -4253,7 +4363,11 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
             vrmLipSyncMorphTarget = null;
             vrmLoveVrmaAction = null;
             vrmThinkVrmaAction = null;
+            vrmCryVrmaAction = null;
             if (vrmBlinkTimeout) { try { clearTimeout(vrmBlinkTimeout); } catch (_) {} vrmBlinkTimeout = null; }
+            if (lovePoseTimeoutId) { try { clearTimeout(lovePoseTimeoutId); } catch (_) {} lovePoseTimeoutId = null; }
+            if (thinkPoseTimeoutId) { try { clearTimeout(thinkPoseTimeoutId); } catch (_) {} thinkPoseTimeoutId = null; }
+            if (cryPoseTimeoutId) { try { clearTimeout(cryPoseTimeoutId); } catch (_) {} cryPoseTimeoutId = null; }
 
             // Detach mouse move handler if present
             const canvas = document.getElementById('vrm-canvas'); // Retrieve canvas to remove handler
@@ -4611,6 +4725,83 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                     console.warn('Failed to preload Thinking VRMA animation:', e);
                 }
                 
+                // Optional: preload VRMA animation clip for cry pose
+                let cryVrmaAction = null;
+                try {
+                    if (POSE_CONFIG?.cry?.useVrma && POSE_CONFIG?.cry?.vrmaPath) {
+                        const vrmaUrl = encodeURI(POSE_CONFIG.cry.vrmaPath);
+                        console.log('Loading Cry VRMA from', vrmaUrl);
+                        const vrmaGltf = await new Promise((resolve, reject) => {
+                            loader.load(vrmaUrl, resolve, undefined, reject);
+                        });
+                        // Check multiple possible locations for VRMA data
+                        let vrma = null;
+
+                        // Try userData first
+                        if (vrmaGltf?.userData?.vrmAnimations && Array.isArray(vrmaGltf.userData.vrmAnimations) && vrmaGltf.userData.vrmAnimations.length > 0) {
+                            vrma = vrmaGltf.userData.vrmAnimations[0];
+                        }
+                        // Try extensions
+                        else if (vrmaGltf?.extensions?.VRMC_vrm_animation) {
+                            vrma = vrmaGltf.extensions.VRMC_vrm_animation;
+                        }
+                        // Try parser userData
+                        else if (vrmaGltf?.parser?.userData?.vrmAnimations) {
+                            vrma = vrmaGltf.parser.userData.vrmAnimations[0];
+                        }
+
+                        let clip = null;
+                        
+                        // Try instance method on VRMAnimation to retarget to this VRM
+                        if (!clip && vrma && typeof vrma.createAnimationClip === 'function') {
+                            try { 
+                                console.log('Trying vrma.createAnimationClip(vrm) for cry...');
+                                clip = vrma.createAnimationClip(vrm); 
+                                if (clip) {
+                                    console.log('Successfully created cry clip via vrma.createAnimationClip');
+                                }
+                            } catch(e) { 
+                                console.warn('vrma.createAnimationClip failed for cry:', e);
+                            }
+                        }
+                        // Static helper fallback if available
+                        if (!clip && window.VRMAnimation && typeof window.VRMAnimation.createAnimationClip === 'function') {
+                            try { 
+                                console.log('Trying VRMAnimation.createAnimationClip(vrma, vrm) for cry...');
+                                clip = window.VRMAnimation.createAnimationClip(vrma, vrm); 
+                                if (clip) {
+                                    console.log('Successfully created cry clip via VRMAnimation.createAnimationClip');
+                                }
+                            } catch(e) { 
+                                console.warn('VRMAnimation.createAnimationClip failed for cry:', e);
+                            }
+                        }
+                        // Synthesise THREE.AnimationClip if tracks array present
+                        if (!clip) {
+                            console.log('Trying to build cry clip manually from VRMA object...');
+                            const built = buildClipFromVRMAObject(vrma, vrm);
+                            if (built) { 
+                                clip = built;
+                                console.log('Successfully built cry clip manually');
+                            }
+                        }
+
+                        if (clip) {
+                            const boundClip = retargetClipToVRM(clip, vrm) || clip;
+                            cryVrmaAction = mixer.clipAction(boundClip, vrm.scene);
+                            cryVrmaAction.clampWhenFinished = true;
+                            cryVrmaAction.setEffectiveWeight(1.0);
+                            cryVrmaAction.setEffectiveTimeScale(1.0);
+                            cryVrmaAction.loop = window.THREE.LoopOnce;
+                            console.log('Cry VRMA clip prepared. Tracks:', Array.isArray(boundClip.tracks) ? boundClip.tracks.length : 'unknown');
+                        } else {
+                            console.warn('No animation clip found in Cry VRMA');
+                        }
+                    }
+                } catch (e) {
+                    console.warn('Failed to preload Cry VRMA animation:', e);
+                }
+                
                 const clock = new window.THREE.Clock();
 
                 // Store references
@@ -4622,6 +4813,7 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                 vrmClock = clock;
                 vrmLoveVrmaAction = loveVrmaAction;
                 vrmThinkVrmaAction = thinkVrmaAction;
+                vrmCryVrmaAction = cryVrmaAction;
 
                 // Apply initial transforms
                 updateVRMTransform();
@@ -5052,6 +5244,16 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                                     };
                                     console.log('Think Animation running:', actionState, '- Manual pose control DISABLED');
                                 }
+                                if (vrmCryVrmaAction && vrmCryVrmaAction.isRunning()) {
+                                    const actionState = {
+                                        type: 'Cry',
+                                        isRunning: vrmCryVrmaAction.isRunning(),
+                                        isScheduled: vrmCryVrmaAction.isScheduled(),
+                                        time: vrmCryVrmaAction.time.toFixed(2),
+                                        weight: vrmCryVrmaAction.getEffectiveWeight()
+                                    };
+                                    console.log('Cry Animation running:', actionState, '- Manual pose control DISABLED');
+                                }
                             }
                         }
                         // Idle head/eye movement by drifting the look target when mouse is idle
@@ -5089,7 +5291,7 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                     try { if (rightLowerArm && dRLower && neutral.RLower) { rightLowerArm.quaternion.copy(neutral.RLower.clone().multiply(dRLower)); } } catch(_){}
                     try { if (leftHand && dLHand && neutral.LHand) { leftHand.quaternion.copy(neutral.LHand.clone().multiply(dLHand)); } } catch(_){}
                     try { if (rightHand && dRHand && neutral.RHand) { rightHand.quaternion.copy(neutral.RHand.clone().multiply(dRHand)); } } catch(_){}
-                } else if (!(vrmLoveVrmaAction && vrmLoveVrmaAction.isRunning()) && !(vrmThinkVrmaAction && vrmThinkVrmaAction.isRunning())) {
+                } else if (!(vrmLoveVrmaAction && vrmLoveVrmaAction.isRunning()) && !(vrmThinkVrmaAction && vrmThinkVrmaAction.isRunning()) && !(vrmCryVrmaAction && vrmCryVrmaAction.isRunning())) {
                     // Only apply manual pose control if VRMA animations are NOT running
                         const w = lovePoseWeight; // Shorthand for love pose
                         const wt = thinkPoseWeight; // Shorthand for think pose
