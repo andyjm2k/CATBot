@@ -705,6 +705,7 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
 
         // Global VRMA actions
         let vrmLoveVrmaAction = null; // Prepared AnimationAction for love VRMA
+        let vrmThinkVrmaAction = null; // Prepared AnimationAction for thinking VRMA
 
         // Pose configuration (tweak these numbers to adjust poses)
         const POSE_CONFIG = {
@@ -731,6 +732,8 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
             think: {
                 durationMs: 6000, // How long to hold the thinking pose
                 expressionsOnly: true, // If true, only drive facial expressions; skip limb rotations
+                vrmaPath: './model_avatar/Eva/VRMA_06.vrma', // VRMA animation path for thinking pose
+                useVrma: true, // Prefer VRMA over manual pose
                 upperArmPitchForward: 0.6, // Additional forward pitch for right upper arm
                 upperArmYawIn: 0.65, // Additional inward yaw for right upper arm
                 upperArmRollZ: 0.2, // Additional roll for right upper arm
@@ -3807,8 +3810,39 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                             } else if (thinkHit) {
                                 vrmThinkPoseActive = true; targetThinkPoseWeight = 1; targetLovePoseWeight = 0; vrmLovePoseActive = false;
                                 if (thinkPoseTimeoutId) { clearTimeout(thinkPoseTimeoutId); }
+                                // Prefer VRMA animation if available
+                                if (vrmThinkVrmaAction) {
+                                    try {
+                                        console.log('Playing VRMA thinking action');
+                                        vrmThinkVrmaAction.stop();
+                                        vrmThinkVrmaAction.reset();
+                                        vrmThinkVrmaAction.setEffectiveWeight(1.0);
+                                        vrmThinkVrmaAction.setEffectiveTimeScale(1.0);
+                                        vrmThinkVrmaAction.enabled = true;
+                                        vrmThinkVrmaAction.play();
+                                        console.log('VRMA thinking action state:', {
+                                            isRunning: vrmThinkVrmaAction.isRunning(),
+                                            isScheduled: vrmThinkVrmaAction.isScheduled(),
+                                            paused: vrmThinkVrmaAction.paused,
+                                            enabled: vrmThinkVrmaAction.enabled,
+                                            time: vrmThinkVrmaAction.time,
+                                            weight: vrmThinkVrmaAction.getEffectiveWeight()
+                                        });
+                                    } catch(e) {
+                                        console.warn('Error playing VRMA thinking action:', e);
+                                    }
+                                }
                                 thinkPoseTimeoutId = setTimeout(() => {
                                     vrmThinkPoseActive = false; targetThinkPoseWeight = 0;
+                                    // Smoothly fade out VRMA animation before stopping
+                                    if (vrmThinkVrmaAction && vrmThinkVrmaAction.isRunning()) {
+                                        try {
+                                            vrmThinkVrmaAction.fadeOut(0.8); // Fade out over 0.8 seconds
+                                            console.log('Fading out VRMA thinking animation');
+                                        } catch(e) {
+                                            console.warn('Error fading out VRMA thinking:', e);
+                                        }
+                                    }
                                     try {
                                         if (vrm.expressionManager) {
                                             try { vrm.expressionManager.setValue('oh', 0.0); } catch(_){}
@@ -3946,8 +3980,39 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                             } else if (thinkHit) {
                                 vrmThinkPoseActive = true; targetThinkPoseWeight = 1; targetLovePoseWeight = 0; vrmLovePoseActive = false;
                                 if (thinkPoseTimeoutId) { clearTimeout(thinkPoseTimeoutId); }
+                                // Prefer VRMA animation if available
+                                if (vrmThinkVrmaAction) {
+                                    try {
+                                        console.log('Playing VRMA thinking action');
+                                        vrmThinkVrmaAction.stop();
+                                        vrmThinkVrmaAction.reset();
+                                        vrmThinkVrmaAction.setEffectiveWeight(1.0);
+                                        vrmThinkVrmaAction.setEffectiveTimeScale(1.0);
+                                        vrmThinkVrmaAction.enabled = true;
+                                        vrmThinkVrmaAction.play();
+                                        console.log('VRMA thinking action state:', {
+                                            isRunning: vrmThinkVrmaAction.isRunning(),
+                                            isScheduled: vrmThinkVrmaAction.isScheduled(),
+                                            paused: vrmThinkVrmaAction.paused,
+                                            enabled: vrmThinkVrmaAction.enabled,
+                                            time: vrmThinkVrmaAction.time,
+                                            weight: vrmThinkVrmaAction.getEffectiveWeight()
+                                        });
+                                    } catch(e) {
+                                        console.warn('Error playing VRMA thinking action:', e);
+                                    }
+                                }
                                 thinkPoseTimeoutId = setTimeout(() => {
                                     vrmThinkPoseActive = false; targetThinkPoseWeight = 0;
+                                    // Smoothly fade out VRMA animation before stopping
+                                    if (vrmThinkVrmaAction && vrmThinkVrmaAction.isRunning()) {
+                                        try {
+                                            vrmThinkVrmaAction.fadeOut(0.8); // Fade out over 0.8 seconds
+                                            console.log('Fading out VRMA thinking animation');
+                                        } catch(e) {
+                                            console.warn('Error fading out VRMA thinking:', e);
+                                        }
+                                    }
                                     try {
                                         if (vrm.expressionManager) {
                                             try { vrm.expressionManager.setValue('oh', 0.0); } catch(_){}
@@ -3958,7 +4023,7 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                                             ['BrowUp','BrowUp_L','BrowUp_R','Surprised'].forEach(k => { try { vrm.blendShapeProxy.setValue(k, 0.0); } catch(_){} });
                                         }
                                     } catch(_){}
-                                }, POSE_CONFIG.love.durationMs);
+                                }, POSE_CONFIG.think.durationMs);
                             }
                         } catch (_) {}
                         responseOutput.classList.remove('responding');
@@ -4187,6 +4252,7 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
             vrmClock = null;
             vrmLipSyncMorphTarget = null;
             vrmLoveVrmaAction = null;
+            vrmThinkVrmaAction = null;
             if (vrmBlinkTimeout) { try { clearTimeout(vrmBlinkTimeout); } catch (_) {} vrmBlinkTimeout = null; }
 
             // Detach mouse move handler if present
@@ -4467,6 +4533,84 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                 } catch (e) {
                     console.warn('Failed to preload VRMA animation:', e);
                 }
+                
+                // Optional: preload VRMA animation clip for thinking pose
+                let thinkVrmaAction = null;
+                try {
+                    if (POSE_CONFIG?.think?.useVrma && POSE_CONFIG?.think?.vrmaPath) {
+                        const vrmaUrl = encodeURI(POSE_CONFIG.think.vrmaPath);
+                        console.log('Loading Thinking VRMA from', vrmaUrl);
+                        const vrmaGltf = await new Promise((resolve, reject) => {
+                            loader.load(vrmaUrl, resolve, undefined, reject);
+                        });
+                        // Check multiple possible locations for VRMA data
+                        let vrma = null;
+
+                        // Try userData first
+                        if (vrmaGltf?.userData?.vrmAnimations && Array.isArray(vrmaGltf.userData.vrmAnimations) && vrmaGltf.userData.vrmAnimations.length > 0) {
+                            vrma = vrmaGltf.userData.vrmAnimations[0];
+                        }
+                        // Try extensions
+                        else if (vrmaGltf?.extensions?.VRMC_vrm_animation) {
+                            vrma = vrmaGltf.extensions.VRMC_vrm_animation;
+                        }
+                        // Try parser userData
+                        else if (vrmaGltf?.parser?.userData?.vrmAnimations) {
+                            vrma = vrmaGltf.parser.userData.vrmAnimations[0];
+                        }
+
+                        let clip = null;
+                        
+                        // Try instance method on VRMAnimation to retarget to this VRM
+                        if (!clip && vrma && typeof vrma.createAnimationClip === 'function') {
+                            try { 
+                                console.log('Trying vrma.createAnimationClip(vrm) for thinking...');
+                                clip = vrma.createAnimationClip(vrm); 
+                                if (clip) {
+                                    console.log('Successfully created thinking clip via vrma.createAnimationClip');
+                                }
+                            } catch(e) { 
+                                console.warn('vrma.createAnimationClip failed for thinking:', e);
+                            }
+                        }
+                        // Static helper fallback if available
+                        if (!clip && window.VRMAnimation && typeof window.VRMAnimation.createAnimationClip === 'function') {
+                            try { 
+                                console.log('Trying VRMAnimation.createAnimationClip(vrma, vrm) for thinking...');
+                                clip = window.VRMAnimation.createAnimationClip(vrma, vrm); 
+                                if (clip) {
+                                    console.log('Successfully created thinking clip via VRMAnimation.createAnimationClip');
+                                }
+                            } catch(e) { 
+                                console.warn('VRMAnimation.createAnimationClip failed for thinking:', e);
+                            }
+                        }
+                        // Synthesise THREE.AnimationClip if tracks array present
+                        if (!clip) {
+                            console.log('Trying to build thinking clip manually from VRMA object...');
+                            const built = buildClipFromVRMAObject(vrma, vrm);
+                            if (built) { 
+                                clip = built;
+                                console.log('Successfully built thinking clip manually');
+                            }
+                        }
+
+                        if (clip) {
+                            const boundClip = retargetClipToVRM(clip, vrm) || clip;
+                            thinkVrmaAction = mixer.clipAction(boundClip, vrm.scene);
+                            thinkVrmaAction.clampWhenFinished = true;
+                            thinkVrmaAction.setEffectiveWeight(1.0);
+                            thinkVrmaAction.setEffectiveTimeScale(1.0);
+                            thinkVrmaAction.loop = window.THREE.LoopOnce;
+                            console.log('Thinking VRMA clip prepared. Tracks:', Array.isArray(boundClip.tracks) ? boundClip.tracks.length : 'unknown');
+                        } else {
+                            console.warn('No animation clip found in Thinking VRMA');
+                        }
+                    }
+                } catch (e) {
+                    console.warn('Failed to preload Thinking VRMA animation:', e);
+                }
+                
                 const clock = new window.THREE.Clock();
 
                 // Store references
@@ -4477,6 +4621,7 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                 vrmMixer = mixer;
                 vrmClock = clock;
                 vrmLoveVrmaAction = loveVrmaAction;
+                vrmThinkVrmaAction = thinkVrmaAction;
 
                 // Apply initial transforms
                 updateVRMTransform();
@@ -4886,15 +5031,26 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                             // Debug animation state periodically
                             if (window.debugAnimationFrames === undefined) window.debugAnimationFrames = 0;
                             window.debugAnimationFrames++;
-                            if (window.debugAnimationFrames % 60 === 0 && vrmLoveVrmaAction) {
-                                const actionState = {
-                                    isRunning: vrmLoveVrmaAction.isRunning(),
-                                    isScheduled: vrmLoveVrmaAction.isScheduled(),
-                                    time: vrmLoveVrmaAction.time.toFixed(2),
-                                    weight: vrmLoveVrmaAction.getEffectiveWeight()
-                                };
-                                if (actionState.isRunning) {
-                                    console.log('Animation running:', actionState, '- Manual pose control DISABLED');
+                            if (window.debugAnimationFrames % 60 === 0) {
+                                if (vrmLoveVrmaAction && vrmLoveVrmaAction.isRunning()) {
+                                    const actionState = {
+                                        type: 'Love',
+                                        isRunning: vrmLoveVrmaAction.isRunning(),
+                                        isScheduled: vrmLoveVrmaAction.isScheduled(),
+                                        time: vrmLoveVrmaAction.time.toFixed(2),
+                                        weight: vrmLoveVrmaAction.getEffectiveWeight()
+                                    };
+                                    console.log('Love Animation running:', actionState, '- Manual pose control DISABLED');
+                                }
+                                if (vrmThinkVrmaAction && vrmThinkVrmaAction.isRunning()) {
+                                    const actionState = {
+                                        type: 'Think',
+                                        isRunning: vrmThinkVrmaAction.isRunning(),
+                                        isScheduled: vrmThinkVrmaAction.isScheduled(),
+                                        time: vrmThinkVrmaAction.time.toFixed(2),
+                                        weight: vrmThinkVrmaAction.getEffectiveWeight()
+                                    };
+                                    console.log('Think Animation running:', actionState, '- Manual pose control DISABLED');
                                 }
                             }
                         }
@@ -4933,8 +5089,8 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                     try { if (rightLowerArm && dRLower && neutral.RLower) { rightLowerArm.quaternion.copy(neutral.RLower.clone().multiply(dRLower)); } } catch(_){}
                     try { if (leftHand && dLHand && neutral.LHand) { leftHand.quaternion.copy(neutral.LHand.clone().multiply(dLHand)); } } catch(_){}
                     try { if (rightHand && dRHand && neutral.RHand) { rightHand.quaternion.copy(neutral.RHand.clone().multiply(dRHand)); } } catch(_){}
-                } else if (!(vrmLoveVrmaAction && vrmLoveVrmaAction.isRunning())) {
-                    // Only apply manual pose control if VRMA animation is NOT running
+                } else if (!(vrmLoveVrmaAction && vrmLoveVrmaAction.isRunning()) && !(vrmThinkVrmaAction && vrmThinkVrmaAction.isRunning())) {
+                    // Only apply manual pose control if VRMA animations are NOT running
                         const w = lovePoseWeight; // Shorthand for love pose
                         const wt = thinkPoseWeight; // Shorthand for think pose
                         const applyLimbs = !POSE_CONFIG.love.expressionsOnly; // Skip love limb offsets when expressions-only is enabled
@@ -5069,7 +5225,7 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                         // When love pose is active and not speaking, hold a closed smile and love eyes (scaled by weight)
                         if (lovePoseWeight > 0.1 && !isSpeaking) {
                             try {
-                                const smileVal = POSE_CONFIG.love.smileGain * Math.min(1, lovePoseWeight + POSE_CONFIG.love.smileBias);
+                                const smileVal = POSE_CONFIG.love.smileGain * Math.min(1, lovePoseWeight + POSE_CONFIG.love.smileBias) * 0.5; // Reduced to 50%
                                 const loveEyesVal = POSE_CONFIG.love.loveEyesGain * Math.min(1, lovePoseWeight + POSE_CONFIG.love.loveEyesBias);
                                 if (vrm.expressionManager) {
                                     // Set smile expressions
@@ -5087,7 +5243,7 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                                     for (const eKey of clearEyeKeys) { try { vrm.expressionManager.setValue(eKey, 0.0); } catch (_) {} }
                                 }
                                 if (vrm.blendShapeProxy) {
-                                    // VRM 0.x: Set smile expressions
+                                    // VRM 0.x: Set smile expressions (already reduced to 50% via smileVal)
                                     const smile0 = ['Smile','Joy','Fun','MouthSmile'];
                                     for (const k of smile0) { try { vrm.blendShapeProxy.setValue(k, smileVal); } catch (_) {} }
                                     const vowels0 = ['A','I','U','E','O'];
@@ -5123,7 +5279,7 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                         // Thinking pose facial cues when active and not speaking
                         if (thinkPoseWeight > 0.1 && !isSpeaking) {
                             try {
-                                const oVal = Math.min(1, POSE_CONFIG.think.oMouthGain * thinkPoseWeight + POSE_CONFIG.think.oMouthBias);
+                                const oVal = Math.min(1, POSE_CONFIG.think.oMouthGain * thinkPoseWeight + POSE_CONFIG.think.oMouthBias) * 0.5; // Reduced to 50%
                                 if (vrm.expressionManager) {
                                     // Prefer 'oh' vowel for O mouth
                                     try { vrm.expressionManager.setValue('oh', oVal); } catch(_){}
@@ -5132,7 +5288,7 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                                     for (const b of browUpKeys) { try { vrm.expressionManager.setValue(b, POSE_CONFIG.think.browRaiseGain * thinkPoseWeight); } catch(_){} }
                                 }
                                 if (vrm.blendShapeProxy) {
-                                    // VRM 0.x: use 'O' if available
+                                    // VRM 0.x: use 'O' if available (already reduced to 50% via oVal)
                                     try { vrm.blendShapeProxy.setValue('O', oVal); } catch(_){}
                                     const brow0 = ['BrowUp','BrowUp_L','BrowUp_R','Surprised'];
                                     for (const b of brow0) { try { vrm.blendShapeProxy.setValue(b, POSE_CONFIG.think.browRaiseGain * thinkPoseWeight); } catch(_){} }
