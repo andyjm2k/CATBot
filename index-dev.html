@@ -3779,6 +3779,15 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                                 }
                                 lovePoseTimeoutId = setTimeout(() => {
                                     vrmLovePoseActive = false; targetLovePoseWeight = 0;
+                                    // Smoothly fade out VRMA animation before stopping
+                                    if (vrmLoveVrmaAction && vrmLoveVrmaAction.isRunning()) {
+                                        try {
+                                            vrmLoveVrmaAction.fadeOut(0.8); // Fade out over 0.8 seconds
+                                            console.log('Fading out VRMA animation');
+                                        } catch(e) {
+                                            console.warn('Error fading out VRMA:', e);
+                                        }
+                                    }
                                     // Ensure smile/eyes reset after timeout
                                     try {
                                         if (!POSE_CONFIG.love.expressionsOnly) { try { restoreHumanoidQuats(vrm, lovePoseRestore); } catch(_) {} }
@@ -3910,6 +3919,15 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                                 }
                                 lovePoseTimeoutId = setTimeout(() => {
                                     vrmLovePoseActive = false; targetLovePoseWeight = 0;
+                                    // Smoothly fade out VRMA animation before stopping
+                                    if (vrmLoveVrmaAction && vrmLoveVrmaAction.isRunning()) {
+                                        try {
+                                            vrmLoveVrmaAction.fadeOut(0.8); // Fade out over 0.8 seconds
+                                            console.log('Fading out VRMA animation');
+                                        } catch(e) {
+                                            console.warn('Error fading out VRMA:', e);
+                                        }
+                                    }
                                     try {
                                         if (!POSE_CONFIG.love.expressionsOnly) { try { restoreHumanoidQuats(vrm, lovePoseRestore); } catch(_) {} }
                                         lovePoseRestore = null;
