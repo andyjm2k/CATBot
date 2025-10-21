@@ -1399,6 +1399,14 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
             }
         }
 
+        // Helper function to remove emojis from text before TTS processing
+        function removeEmojis(text) {
+            // Comprehensive regex pattern to match various emoji ranges
+            // Includes standard emojis, symbols, emoticons, pictographs, etc.
+            const emojiRegex = /[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F700}-\u{1F77F}\u{1F780}-\u{1F7FF}\u{1F800}-\u{1F8FF}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{2300}-\u{23FF}\u{2B50}\u{2B55}\u{231A}\u{231B}\u{2328}\u{23CF}\u{23E9}-\u{23FF}\u{24C2}\u{25AA}-\u{25AB}\u{25B6}\u{25C0}\u{25FB}-\u{25FE}\u{2934}-\u{2935}\u{2B05}-\u{2B07}\u{2B1B}-\u{2B1C}\u{3030}\u{303D}\u{3297}\u{3299}\u{FE0F}\u{200D}]/gu;
+            return text.replace(emojiRegex, ''); // Remove all emojis and return clean text
+        }
+
         // Update the textToSpeech function
         function textToSpeech(text) {
             if (!text) {
@@ -1411,6 +1419,9 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
                 console.log('TTS is muted, skipping speech');
                 return;
             }
+
+            // Remove emojis from text to avoid TTS attempting to speak them
+            text = removeEmojis(text);
 
             // Cancel any ongoing speech and active lip-sync loops/graphs
             try { speechSynthesis.cancel(); } catch (_) {}
@@ -1538,6 +1549,10 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
         async function speakWithOpenAITTS(text) { // Asynchronous function to fetch and play TTS audio
             try { // Begin error handling scope
                 if (!text || !apiKey) return; // Guard for missing input or credentials
+                
+                // Remove emojis and asterisks from text before sending to TTS API
+                text = removeEmojis(text.replace(/\*/g, ''));
+                
                 const endpoint = (typeof openaiEndpoint === 'string' && openaiEndpoint.trim()) ? `${openaiEndpoint.replace(/\/$/, '')}/v1/audio/speech` : 'https://api.openai.com/v1/audio/speech'; // Compute speech endpoint
                 const modelId = (typeof ttsModel === 'string' && ttsModel.trim()) ? ttsModel : 'tts-1'; // Choose model id with default
                 const voiceId = (typeof ttsVoice === 'string' && ttsVoice.trim()) ? ttsVoice : 'alloy'; // Choose voice id with default
@@ -1545,7 +1560,7 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
                 const reqBody = { // Build request payload for OpenAI speech
                     model: modelId, // TTS model to synthesize speech
                     voice: voiceId, // Voice preset
-                    input: text, // The text to speak
+                    input: text, // The text to speak (emojis already removed)
                     response_format: 'mp3' // Request mp3 audio for broader support
                 }; // End payload
 
@@ -1589,7 +1604,9 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
         // Browser speech fallback wrapper used when server TTS fails
         function textToSpeechFallback(text) { // Function to call original SpeechSynthesis path
             try { // Begin guard
-                const utter = new SpeechSynthesisUtterance(text.replace(/\*/g, '')); // Build utterance instance
+                // Remove emojis and asterisks from text before creating utterance
+                text = removeEmojis(text.replace(/\*/g, ''));
+                const utter = new SpeechSynthesisUtterance(text); // Build utterance instance
                 utter.onend = () => { // Ensure cleanup on browser TTS end
                     try { if (ttsLipSyncIntervalId) { clearInterval(ttsLipSyncIntervalId); ttsLipSyncIntervalId = null; } } catch(_){}
                     try { if (ttsRafId) { cancelAnimationFrame(ttsRafId); ttsRafId = 0; } } catch(_){}
