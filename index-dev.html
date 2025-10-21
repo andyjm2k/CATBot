@@ -3759,11 +3759,23 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                                 if (vrmLoveVrmaAction) {
                                     try {
                                         console.log('Playing VRMA love action');
+                                        vrmLoveVrmaAction.stop();
                                         vrmLoveVrmaAction.reset();
                                         vrmLoveVrmaAction.setEffectiveWeight(1.0);
                                         vrmLoveVrmaAction.setEffectiveTimeScale(1.0);
+                                        vrmLoveVrmaAction.enabled = true;
                                         vrmLoveVrmaAction.play();
-                                    } catch(_) {}
+                                        console.log('VRMA action state:', {
+                                            isRunning: vrmLoveVrmaAction.isRunning(),
+                                            isScheduled: vrmLoveVrmaAction.isScheduled(),
+                                            paused: vrmLoveVrmaAction.paused,
+                                            enabled: vrmLoveVrmaAction.enabled,
+                                            time: vrmLoveVrmaAction.time,
+                                            weight: vrmLoveVrmaAction.getEffectiveWeight()
+                                        });
+                                    } catch(e) {
+                                        console.warn('Error playing VRMA action:', e);
+                                    }
                                 }
                                 lovePoseTimeoutId = setTimeout(() => {
                                     vrmLovePoseActive = false; targetLovePoseWeight = 0;
@@ -3878,11 +3890,23 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                                 if (vrmLoveVrmaAction) {
                                     try {
                                         console.log('Playing VRMA love action');
+                                        vrmLoveVrmaAction.stop();
                                         vrmLoveVrmaAction.reset();
                                         vrmLoveVrmaAction.setEffectiveWeight(1.0);
                                         vrmLoveVrmaAction.setEffectiveTimeScale(1.0);
+                                        vrmLoveVrmaAction.enabled = true;
                                         vrmLoveVrmaAction.play();
-                                    } catch(_) {}
+                                        console.log('VRMA action state:', {
+                                            isRunning: vrmLoveVrmaAction.isRunning(),
+                                            isScheduled: vrmLoveVrmaAction.isScheduled(),
+                                            paused: vrmLoveVrmaAction.paused,
+                                            enabled: vrmLoveVrmaAction.enabled,
+                                            time: vrmLoveVrmaAction.time,
+                                            weight: vrmLoveVrmaAction.getEffectiveWeight()
+                                        });
+                                    } catch(e) {
+                                        console.warn('Error playing VRMA action:', e);
+                                    }
                                 }
                                 lovePoseTimeoutId = setTimeout(() => {
                                     vrmLovePoseActive = false; targetLovePoseWeight = 0;
@@ -4108,6 +4132,57 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
         }
 
         // VRM Functions
+        function cleanupVRM() {
+            try {
+                if (!vrmModel) return;
+
+            // Stop and uncache animation bindings
+            try {
+                if (vrmMixer && vrmModel && vrmModel.scene) {
+                    vrmMixer.stopAllAction();
+                    vrmMixer.uncacheRoot(vrmModel.scene);
+                }
+            } catch (_) {}
+
+            if (vrmScene) {
+                vrmScene.traverse((child) => {
+                    if (child.geometry) child.geometry.dispose();
+                    if (child.material) {
+                        if (Array.isArray(child.material)) {
+                            child.material.forEach(material => material.dispose());
+                        } else {
+                            child.material.dispose();
+                        }
+                    }
+                });
+            }
+
+            if (vrmRenderer) {
+                vrmRenderer.dispose();
+            }
+
+            vrmModel = null;
+            vrmScene = null;
+            vrmCamera = null;
+            vrmRenderer = null;
+            vrmMixer = null;
+            vrmClock = null;
+            vrmLipSyncMorphTarget = null;
+            vrmLoveVrmaAction = null;
+            if (vrmBlinkTimeout) { try { clearTimeout(vrmBlinkTimeout); } catch (_) {} vrmBlinkTimeout = null; }
+
+            // Detach mouse move handler if present
+            const canvas = document.getElementById('vrm-canvas'); // Retrieve canvas to remove handler
+            if (canvas && canvas.__vrmMouseMoveHandler) { // If a handler was attached
+                try { canvas.removeEventListener('mousemove', canvas.__vrmMouseMoveHandler); } catch {} // Remove handler
+                canvas.__vrmMouseMoveHandler = null; // Clear reference
+            }
+
+        } catch (error) {
+            console.warn('Error cleaning up VRM:', error);
+        }
+    }
+
         async function initVRM() {
             try {
                 const container = document.getElementById('vrm-container');
@@ -4218,25 +4293,134 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                         });
                         // Prefer VRMAnimation (vrma) from userData if provided by plugin
                         let clip = null;
+                        // Check multiple possible locations for VRMA data
+                        let vrma = null;
+
+                        // Try userData first
                         if (vrmaGltf?.userData?.vrmAnimations && Array.isArray(vrmaGltf.userData.vrmAnimations) && vrmaGltf.userData.vrmAnimations.length > 0) {
-                            console.log('Found VRMAnimation entries:', vrmaGltf.userData.vrmAnimations.length);
-                            const vrma = vrmaGltf.userData.vrmAnimations[0];
-                            // Prefer instance method on VRMAnimation to retarget to this VRM
-                            if (vrma && typeof vrma.createAnimationClip === 'function') {
-                                clip = vrma.createAnimationClip(vrm);
-                            } else if (window.VRMAnimation && typeof window.VRMAnimation.createAnimationClip === 'function') {
-                                // Static helper fallback if available
-                                clip = window.VRMAnimation.createAnimationClip(vrma, vrm);
-                            } else if (vrma?.clip) {
-                                // As a last resort, try a direct clip exposed on the object
-                                clip = vrma.clip;
+                            vrma = vrmaGltf.userData.vrmAnimations[0];
+                        }
+                        // Try extensions
+                        else if (vrmaGltf?.extensions?.VRMC_vrm_animation) {
+                            vrma = vrmaGltf.extensions.VRMC_vrm_animation;
+                        }
+                        // Try parser userData
+                        else if (vrmaGltf?.parser?.userData?.vrmAnimations) {
+                            vrma = vrmaGltf.parser.userData.vrmAnimations[0];
+                        }
+
+                        if (vrma) {
+                            console.log('Found VRMA data');
+                            console.log('VRMA object:', vrma);
+                            console.log('VRMA constructor:', vrma.constructor?.name);
+                            console.log('VRMA object keys:', Object.keys(vrma || {}));
+                            console.log('VRMA humanoidTracks type:', typeof vrma.humanoidTracks);
+                            console.log('VRMA humanoidTracks length:', vrma.humanoidTracks ? (Array.isArray(vrma.humanoidTracks) ? vrma.humanoidTracks.length : 'not array') : 'undefined');
+
+                            // Debug the VRMA structure more deeply
+                            if (vrma.humanoidTracks) {
+                                console.log('HumanoidTracks raw:', vrma.humanoidTracks);
+                                
+                                // Check if it's a Map
+                                if (vrma.humanoidTracks instanceof Map) {
+                                    console.log('HumanoidTracks is a Map, size:', vrma.humanoidTracks.size);
+                                    const mapKeys = Array.from(vrma.humanoidTracks.keys());
+                                    console.log('HumanoidTracks Map keys:', mapKeys);
+                                    if (mapKeys.length > 0) {
+                                        const firstKey = mapKeys[0];
+                                        console.log('First track key:', firstKey);
+                                        console.log('First track value:', vrma.humanoidTracks.get(firstKey));
+                                    }
+                                } else if (typeof vrma.humanoidTracks === 'object') {
+                                    // Check Object.keys vs Object.values
+                                    const keys = Object.keys(vrma.humanoidTracks);
+                                    const values = Object.values(vrma.humanoidTracks);
+                                    console.log('HumanoidTracks Object.keys():', keys);
+                                    console.log('HumanoidTracks Object.values() length:', values.length);
+                                    
+                                    // Check if it has enumerable properties
+                                    console.log('HumanoidTracks own property names:', Object.getOwnPropertyNames(vrma.humanoidTracks));
+                                    
+                                    // Try to iterate
+                                    if (values.length > 0) {
+                                        console.log('First track in values:', values[0]);
+                                    }
+                                }
+                                
+                                console.log('HumanoidTracks content preview:', vrma.humanoidTracks.slice ? vrma.humanoidTracks.slice(0, 2) : 'not sliceable');
+                                if (Array.isArray(vrma.humanoidTracks) && vrma.humanoidTracks.length > 0) {
+                                    console.log('First track structure:', Object.keys(vrma.humanoidTracks[0] || {}));
+                                }
+                            }
+
+                            // Also check for alternative track structures
+                            if (vrma.humanoidAnimationTracks) {
+                                console.log('Found humanoidAnimationTracks instead');
+                            }
+                            if (vrma.tracks) {
+                                console.log('Found tracks property');
+                            }
+                            
+                            // Check if vrma has the createAnimationClip method
+                            console.log('Has createAnimationClip method:', typeof vrma.createAnimationClip);
+                        } else {
+                            console.warn('No VRMA data found in any expected location');
+                            console.log('Available locations checked:', {
+                                userData: !!vrmaGltf?.userData,
+                                extensions: !!vrmaGltf?.extensions,
+                                parser: !!vrmaGltf?.parser
+                            });
+                        }
+
+                        // Prefer instance method on VRMAnimation to retarget to this VRM
+                        if (!clip && vrma && typeof vrma.createAnimationClip === 'function') {
+                            try { 
+                                console.log('Trying vrma.createAnimationClip(vrm)...');
+                                clip = vrma.createAnimationClip(vrm); 
+                                if (clip) {
+                                    console.log('Successfully created clip via vrma.createAnimationClip');
+                                }
+                            } catch(e) { 
+                                console.warn('vrma.createAnimationClip failed:', e);
+                                console.warn('Error stack:', e.stack);
                             }
                         }
-                        // Fallback to first animation clip attached to gltf
-                        if (!clip && Array.isArray(vrmaGltf.animations) && vrmaGltf.animations.length > 0) {
-                            console.log('Falling back to gltf.animations[0]');
-                            clip = vrmaGltf.animations[0];
+                        // Static helper fallback if available
+                        if (!clip && window.VRMAnimation && typeof window.VRMAnimation.createAnimationClip === 'function') {
+                            try { 
+                                console.log('Trying VRMAnimation.createAnimationClip(vrma, vrm)...');
+                                clip = window.VRMAnimation.createAnimationClip(vrma, vrm); 
+                                if (clip) {
+                                    console.log('Successfully created clip via VRMAnimation.createAnimationClip');
+                                }
+                            } catch(e) { 
+                                console.warn('VRMAnimation.createAnimationClip failed:', e);
+                                console.warn('Error stack:', e.stack);
+                            }
                         }
+                        // Direct clip property or getter fallbacks
+                        if (!clip && vrma && vrma.clip) { 
+                            try { 
+                                clip = vrma.clip;
+                                console.log('Got clip from vrma.clip property');
+                            } catch(_) {} 
+                        }
+                        if (!clip && vrma && typeof vrma.getClip === 'function') { 
+                            try { 
+                                clip = vrma.getClip();
+                                console.log('Got clip from vrma.getClip() method');
+                            } catch(_) {} 
+                        }
+                        // Synthesise THREE.AnimationClip if tracks array present
+                        if (!clip) {
+                            console.log('Trying to build clip manually from VRMA object...');
+                            const built = buildClipFromVRMAObject(vrma, vrm);
+                            if (built) { 
+                                clip = built;
+                                console.log('Successfully built clip manually');
+                            }
+                        }
+
                         if (clip) {
                             // Retarget track names to VRM bone UUIDs if needed
                             const boundClip = retargetClipToVRM(clip, vrm) || clip;
@@ -4246,6 +4430,18 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                             loveVrmaAction.setEffectiveTimeScale(1.0);
                             loveVrmaAction.loop = window.THREE.LoopOnce;
                             console.log('VRMA clip prepared. Tracks:', Array.isArray(boundClip.tracks) ? boundClip.tracks.length : 'unknown');
+                            if (Array.isArray(boundClip.tracks) && boundClip.tracks.length > 0) {
+                                console.log('Sample track names:', boundClip.tracks.slice(0, 3).map(t => t.name));
+                                
+                                // Verify bone exists for first few tracks
+                                console.log('Verifying bones exist for tracks:');
+                                for (let i = 0; i < Math.min(5, boundClip.tracks.length); i++) {
+                                    const track = boundClip.tracks[i];
+                                    const trackUUID = track.name.split('.')[0];
+                                    const bone = vrm.scene.getObjectByProperty('uuid', trackUUID);
+                                    console.log(`Track ${i}: UUID=${trackUUID}, bone found=${!!bone}, boneName=${bone?.name || 'N/A'}`);
+                                }
+                            }
                         } else {
                             console.warn('No animation clip found in VRMA');
                         }
@@ -4372,6 +4568,207 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                         return out;
                     } catch (_) { return sourceClip; }
                 }
+
+                // Build a THREE.AnimationClip directly from a VRMAnimation object when helper APIs are unavailable
+                function buildClipFromVRMAObject(vrmaObj, vrmInstance) {
+                    try {
+                        if (!vrmaObj) return null;
+                        const human = vrmInstance?.humanoid; if (!human) return null;
+                        const THREE_NS = window.THREE;
+                        const outTracks = [];
+                        const isTyped = (x) => x && typeof x === 'object' && typeof x.BYTES_PER_ELEMENT === 'number';
+                        const asFloatArray = (x) => {
+                            if (!x) return null;
+                            if (Array.isArray(x)) return Float32Array.from(x);
+                            if (isTyped(x)) return new Float32Array(x);
+                            return null;
+                        };
+                        // Try multiple possible locations for tracks
+                        let tracksContainer = vrmaObj.humanoidTracks;
+
+                        // Fallback to alternative track structures
+                        if (!tracksContainer || (Array.isArray(tracksContainer) && tracksContainer.length === 0)) {
+                            if (vrmaObj.humanoidAnimationTracks) {
+                                tracksContainer = vrmaObj.humanoidAnimationTracks;
+                                console.log('Using humanoidAnimationTracks as fallback');
+                            } else if (vrmaObj.tracks) {
+                                tracksContainer = vrmaObj.tracks;
+                                console.log('Using tracks as fallback');
+                            } else if (vrmaObj.animations && Array.isArray(vrmaObj.animations)) {
+                                tracksContainer = vrmaObj.animations;
+                                console.log('Using animations as fallback');
+                            }
+                        }
+
+                        // Handle VRMA 1.0 structure: { translation: Map, rotation: Map }
+                        if (tracksContainer && typeof tracksContainer === 'object' && !Array.isArray(tracksContainer) && 
+                            (tracksContainer.translation instanceof Map || tracksContainer.rotation instanceof Map)) {
+                            console.log('Detected VRMA 1.0 structure with translation/rotation Maps');
+                            
+                            // Process rotation tracks
+                            if (tracksContainer.rotation instanceof Map) {
+                                console.log('Processing rotation tracks, count:', tracksContainer.rotation.size);
+                                for (const [boneName, trackData] of tracksContainer.rotation) {
+                                    try {
+                                        const node = (typeof human.getRawBoneNode === 'function') 
+                                            ? human.getRawBoneNode(boneName) 
+                                            : human.getNormalizedBoneNode(boneName);
+                                        if (!node) {
+                                            console.warn('VRMA build: bone not found for', boneName);
+                                            continue;
+                                        }
+                                        
+                                        let times = trackData.times;
+                                        let values = trackData.values;
+                                        
+                                        times = asFloatArray(times) || (Array.isArray(times) ? Float32Array.from(times) : null);
+                                        values = asFloatArray(values) || (Array.isArray(values) ? Float32Array.from(values) : null);
+                                        
+                                        if (!times || !values || times.length === 0 || values.length === 0) {
+                                            console.warn('VRMA build: invalid times/values for', boneName);
+                                            continue;
+                                        }
+                                        
+                                        const trackName = node.uuid + '.quaternion';
+                                        const track = new THREE_NS.QuaternionKeyframeTrack(trackName, times, values);
+                                        outTracks.push(track);
+                                    } catch (e) {
+                                        console.warn('Error processing rotation track for', boneName, ':', e);
+                                    }
+                                }
+                            }
+                            
+                            // Process translation tracks (usually just hips)
+                            if (tracksContainer.translation instanceof Map) {
+                                console.log('Processing translation tracks, count:', tracksContainer.translation.size);
+                                for (const [boneName, trackData] of tracksContainer.translation) {
+                                    try {
+                                        const node = (typeof human.getRawBoneNode === 'function') 
+                                            ? human.getRawBoneNode(boneName) 
+                                            : human.getNormalizedBoneNode(boneName);
+                                        if (!node) {
+                                            console.warn('VRMA build: bone not found for translation', boneName);
+                                            continue;
+                                        }
+                                        
+                                        let times = trackData.times;
+                                        let values = trackData.values;
+                                        
+                                        times = asFloatArray(times) || (Array.isArray(times) ? Float32Array.from(times) : null);
+                                        values = asFloatArray(values) || (Array.isArray(values) ? Float32Array.from(values) : null);
+                                        
+                                        if (!times || !values || times.length === 0 || values.length === 0) continue;
+                                        
+                                        const trackName = node.uuid + '.position';
+                                        const track = new THREE_NS.VectorKeyframeTrack(trackName, times, values);
+                                        outTracks.push(track);
+                                    } catch (e) {
+                                        console.warn('Error processing translation track for', boneName, ':', e);
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Convert tracksContainer to array, handling Map, Array, and Object (for other formats)
+                        let list = [];
+                        if (Array.isArray(tracksContainer)) {
+                            list = tracksContainer;
+                        } else if (tracksContainer instanceof Map) {
+                            list = Array.from(tracksContainer.values());
+                            console.log('Converted Map to array, length:', list.length);
+                        } else if (tracksContainer && typeof tracksContainer === 'object' && 
+                                   !(tracksContainer.translation instanceof Map || tracksContainer.rotation instanceof Map)) {
+                            list = Object.values(tracksContainer);
+                        }
+                        
+                        if (list && list.length > 0) {
+                            try { console.log('First humanoidTrack keys:', Object.keys(list[0] || {})); } catch (_) {}
+                        } else if (tracksContainer && typeof tracksContainer === 'object') {
+                            try { 
+                                if (tracksContainer instanceof Map) {
+                                    const firstKey = Array.from(tracksContainer.keys())[0];
+                                    console.log('First humanoidTrack Map key:', firstKey);
+                                } else {
+                                    const firstKey = Object.keys(tracksContainer)[0]; 
+                                    console.log('First humanoidTrack obj key:', firstKey);
+                                }
+                            } catch(_) {}
+                        }
+                        for (let i = 0; i < list.length; i++) {
+                            const ht = list[i];
+                            if (!ht) continue;
+                            const hName = ht.humanoidName || ht.name || ht.bone || ht.node || (ht.target && (ht.target.humanoidName || ht.target.name));
+                            if (!hName) continue;
+                            const node = (typeof human.getRawBoneNode === 'function') ? human.getRawBoneNode(hName) : human.getNormalizedBoneNode(hName);
+                            if (!node) { try { if (i === 0) console.warn('VRMA build: bone not found for', hName); } catch(_) {} continue; }
+                            // Collect times
+                            let times = ht.times || ht.timeSamples || ht.timestamps || ht.time || (Array.isArray(ht.keyframes) ? ht.keyframes.map(k => k.time) : null);
+                            times = asFloatArray(times) || (Array.isArray(times) ? Float32Array.from(times) : null);
+                            // Collect values (quaternions): flatten if nested or map from keyframes with x,y,z,w
+                            let values = ht.values || ht.rotations || ht.quaternions || (ht.data && (ht.data.values || ht.data.rotations || ht.data.quaternions)) || null;
+                            if (!values && Array.isArray(ht.keyframes)) {
+                                const qArr = [];
+                                for (const kf of ht.keyframes) {
+                                    const r = (kf.rotation || kf.quaternion || kf.value || kf);
+                                    if (Array.isArray(r)) { qArr.push(r[0], r[1], r[2], r[3]); }
+                                    else if (r && typeof r === 'object' && 'x' in r && 'y' in r && 'z' in r && 'w' in r) { qArr.push(r.x, r.y, r.z, r.w); }
+                                }
+                                values = qArr;
+                            }
+                            // If nested arrays, flatten
+                            if (Array.isArray(values) && values.length > 0 && Array.isArray(values[0])) { values = values.flat(); }
+                            values = asFloatArray(values) || (Array.isArray(values) ? Float32Array.from(values) : null);
+                            // If no times but we have values and duration, synthesize evenly spaced times
+                            if ((!times || times.length === 0) && values && values.length >= 4 && typeof vrmaObj.duration === 'number' && vrmaObj.duration > 0) {
+                                const numKeys = Math.floor(values.length / 4);
+                                const out = new Float32Array(numKeys);
+                                for (let k = 0; k < numKeys; k++) out[k] = (vrmaObj.duration * k) / Math.max(1, numKeys - 1);
+                                times = out;
+                            }
+                            if (!times || times.length === 0) { try { if (i === 0) console.warn('VRMA build: missing times for', hName); } catch(_) {} continue; }
+                            if (!values || values.length < times.length * 4) { try { if (i === 0) console.warn('VRMA build: values length mismatch for', hName, 'times', times.length, 'values', values ? values.length : 0); } catch(_) {} continue; }
+                            // Collect values (quaternions): flatten if nested or map from keyframes with x,y,z,w
+                            const trackName = `${node.uuid}.quaternion`;
+                            const track = new THREE_NS.QuaternionKeyframeTrack(trackName, times, values);
+                            outTracks.push(track);
+                        }
+                        // Process expression tracks (morph targets / blend shapes)
+                        if (vrmaObj.expressionTracks) {
+                            const expressionManager = vrmInstance?.expressionManager;
+                            if (expressionManager && vrmaObj.expressionTracks instanceof Map) {
+                                console.log('Processing expression tracks, count:', vrmaObj.expressionTracks.size);
+                                for (const [expressionName, trackData] of vrmaObj.expressionTracks) {
+                                    try {
+                                        const expression = expressionManager.getExpression(expressionName);
+                                        if (!expression) {
+                                            console.warn('VRMA build: expression not found:', expressionName);
+                                            continue;
+                                        }
+                                        
+                                        let times = trackData.times;
+                                        let values = trackData.values;
+                                        
+                                        times = asFloatArray(times) || (Array.isArray(times) ? Float32Array.from(times) : null);
+                                        values = asFloatArray(values) || (Array.isArray(values) ? Float32Array.from(values) : null);
+                                        
+                                        if (!times || !values || times.length === 0 || values.length === 0) continue;
+                                        
+                                        // VRM expressions need to be controlled via expressionManager.setValue()
+                                        // For now, we'll skip these in the manual builder as they need special handling
+                                        console.log('Note: Expression track', expressionName, 'requires VRMAnimation API for proper playback');
+                                    } catch (e) {
+                                        console.warn('Error processing expression track for', expressionName, ':', e);
+                                    }
+                                }
+                            }
+                        }
+                        
+                        if (outTracks.length === 0) return null;
+                        const duration = (typeof vrmaObj.duration === 'number' && vrmaObj.duration > 0) ? vrmaObj.duration : -1;
+                        console.log('Built animation clip with', outTracks.length, 'tracks, duration:', duration);
+                        return new THREE_NS.AnimationClip(vrmaObj.name || 'vrma-built', duration, outTracks);
+                    } catch (e) { console.warn('buildClipFromVRMAObject failed:', e); return null; }
+                }
                 const convertUnityToThree = (q) => {
                     // JSON localRotation order is [x, y, z, w]. We treat it as a Unity quaternion.
                     // If conversion is enabled, flip X and Z to account for handedness differences.
@@ -4456,10 +4853,28 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
 
                     if (vrmClock) {
                         const delta = vrmClock.getDelta();
-                        if (vrmMixer) vrmMixer.update(delta);
-                        // Update VRM per frame so expressions and physics are applied
+                        // Update VRM BEFORE mixer so it doesn't override animation
+                        // VRM update handles expressions, look-at, and physics
                         if (vrmModel && typeof vrmModel.update === 'function') {
                             try { vrmModel.update(delta); } catch (_) {}
+                        }
+                        // Update mixer AFTER VRM so animation has final control over bones
+                        if (vrmMixer) {
+                            vrmMixer.update(delta);
+                            // Debug animation state periodically
+                            if (window.debugAnimationFrames === undefined) window.debugAnimationFrames = 0;
+                            window.debugAnimationFrames++;
+                            if (window.debugAnimationFrames % 60 === 0 && vrmLoveVrmaAction) {
+                                const actionState = {
+                                    isRunning: vrmLoveVrmaAction.isRunning(),
+                                    isScheduled: vrmLoveVrmaAction.isScheduled(),
+                                    time: vrmLoveVrmaAction.time.toFixed(2),
+                                    weight: vrmLoveVrmaAction.getEffectiveWeight()
+                                };
+                                if (actionState.isRunning) {
+                                    console.log('Animation running:', actionState, '- Manual pose control DISABLED');
+                                }
+                            }
                         }
                         // Idle head/eye movement by drifting the look target when mouse is idle
                         if (lookTarget && vrmCamera) { // Ensure target and camera exist
@@ -4496,7 +4911,8 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                     try { if (rightLowerArm && dRLower && neutral.RLower) { rightLowerArm.quaternion.copy(neutral.RLower.clone().multiply(dRLower)); } } catch(_){}
                     try { if (leftHand && dLHand && neutral.LHand) { leftHand.quaternion.copy(neutral.LHand.clone().multiply(dLHand)); } } catch(_){}
                     try { if (rightHand && dRHand && neutral.RHand) { rightHand.quaternion.copy(neutral.RHand.clone().multiply(dRHand)); } } catch(_){}
-                } else {
+                } else if (!(vrmLoveVrmaAction && vrmLoveVrmaAction.isRunning())) {
+                    // Only apply manual pose control if VRMA animation is NOT running
                         const w = lovePoseWeight; // Shorthand for love pose
                         const wt = thinkPoseWeight; // Shorthand for think pose
                         const applyLimbs = !POSE_CONFIG.love.expressionsOnly; // Skip love limb offsets when expressions-only is enabled
@@ -4748,48 +5164,6 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
 
             } catch (error) {
                 console.error('Failed to load VRM model:', error);
-            }
-        }
-
-        function cleanupVRM() {
-            try {
-                if (!vrmModel) return;
-
-                if (vrmScene) {
-                    vrmScene.traverse((child) => {
-                        if (child.geometry) child.geometry.dispose();
-                        if (child.material) {
-                            if (Array.isArray(child.material)) {
-                                child.material.forEach(material => material.dispose());
-                            } else {
-                                child.material.dispose();
-                            }
-                        }
-                    });
-                }
-
-                if (vrmRenderer) {
-                    vrmRenderer.dispose();
-                }
-
-                vrmModel = null;
-                vrmScene = null;
-                vrmCamera = null;
-                vrmRenderer = null;
-                vrmMixer = null;
-                vrmClock = null;
-                vrmLipSyncMorphTarget = null;
-                if (vrmBlinkTimeout) { try { clearTimeout(vrmBlinkTimeout); } catch (_) {} vrmBlinkTimeout = null; }
-
-                // Detach mouse move handler if present
-                const canvas = document.getElementById('vrm-canvas'); // Retrieve canvas to remove handler
-                if (canvas && canvas.__vrmMouseMoveHandler) { // If a handler was attached
-                    try { canvas.removeEventListener('mousemove', canvas.__vrmMouseMoveHandler); } catch {} // Remove handler
-                    canvas.__vrmMouseMoveHandler = null; // Clear reference
-                }
-
-            } catch (error) {
-                console.warn('Error cleaning up VRM:', error);
             }
         }
 
