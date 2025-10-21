@@ -2420,6 +2420,44 @@ function saveWAVFile(wavBlob) {
                         required: ["filename", "content"]
                     }
                 }
+            },
+            {
+                type: "function",
+                function: {
+                    name: "runBrowserAgent",
+                    description: "Executes browser automation tasks using natural language. Can navigate websites, fill forms, click buttons, extract information, and perform complex multi-step web interactions.",
+                    parameters: {
+                        type: "object",
+                        properties: {
+                            task: {
+                                type: "string",
+                                description: "Natural language description of the browser task to perform (e.g., 'Go to amazon.com and search for wireless headphones', 'Navigate to github.com and find the trending repositories')"
+                            }
+                        },
+                        required: ["task"]
+                    }
+                }
+            },
+            {
+                type: "function",
+                function: {
+                    name: "runDeepResearch",
+                    description: "Performs comprehensive multi-step web research on a topic, gathering information from multiple sources and generating a detailed research report with citations and findings.",
+                    parameters: {
+                        type: "object",
+                        properties: {
+                            researchTask: {
+                                type: "string",
+                                description: "The research topic or question to investigate (e.g., 'What are the latest developments in quantum computing?', 'Compare the best electric vehicles available in 2024')"
+                            },
+                            maxParallelBrowsers: {
+                                type: "number",
+                                description: "Optional: Maximum number of parallel browser instances to use for faster research (default: 3, max: 5)"
+                            }
+                        },
+                        required: ["researchTask"]
+                    }
+                }
             }
         ];
 
@@ -2527,6 +2565,12 @@ function saveWAVFile(wavBlob) {
                         break;
                     case "uploadToGoogleDrive":
                         result = await handleGoogleDriveUpload(args);
+                        break;
+                    case "runBrowserAgent":
+                        result = await handleBrowserAgent(args);
+                        break;
+                    case "runDeepResearch":
+                        result = await handleDeepResearch(args);
                         break;
                     default:
                         // Tool not found
@@ -7436,6 +7480,126 @@ ${fullText.substring(0, 6000)}...${minimalImageInfo}`;
                 return {
                     success: false,
                     message: `Failed to upload file to Google Drive: ${error.message}`
+                };
+            }
+        }
+
+        // MCP Browser-Use Integration Handlers
+        async function handleBrowserAgent({ task }) {
+            try {
+                console.log('handleBrowserAgent - Task:', task);
+                
+                // Validate task parameter
+                if (!task || typeof task !== 'string' || task.trim() === '') {
+                    return {
+                        success: false,
+                        message: 'Task description is required and must be a non-empty string.'
+                    };
+                }
+                
+                // Call the MCP browser server HTTP endpoint
+                const response = await fetch('http://127.0.0.1:5001/api/browser-agent', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ task: task })
+                });
+                
+                // Check if request was successful
+                if (!response.ok) {
+                    const errorData = await response.json().catch(() => ({ error: response.statusText }));
+                    throw new Error(errorData.error || `HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                // Parse response data
+                const data = await response.json();
+                
+                // Return formatted result
+                if (data.success) {
+                    console.log('Browser agent completed successfully');
+                    return {
+                        success: true,
+                        message: `Browser Agent Result:\n\n${data.result}`
+                    };
+                } else {
+                    throw new Error(data.error || 'Unknown error occurred');
+                }
+                
+            } catch (error) {
+                console.error('Browser agent error:', error);
+                return {
+                    success: false,
+                    message: `Browser automation failed: ${error.message}\n\nPlease ensure:\n1. The MCP browser server is running (python mcp_browser_server.py)\n2. Environment variables are configured correctly\n3. The browser-use MCP server is accessible`
+                };
+            }
+        }
+
+        async function handleDeepResearch({ researchTask, maxParallelBrowsers }) {
+            try {
+                console.log('handleDeepResearch - Task:', researchTask);
+                
+                // Validate research task parameter
+                if (!researchTask || typeof researchTask !== 'string' || researchTask.trim() === '') {
+                    return {
+                        success: false,
+                        message: 'Research task description is required and must be a non-empty string.'
+                    };
+                }
+                
+                // Prepare request body with optional parameters
+                const requestBody = {
+                    research_task: researchTask
+                };
+                
+                // Add optional max parallel browsers parameter if provided
+                if (maxParallelBrowsers !== undefined && maxParallelBrowsers !== null) {
+                    // Validate and constrain the value
+                    const browsers = parseInt(maxParallelBrowsers);
+                    if (isNaN(browsers) || browsers < 1) {
+                        return {
+                            success: false,
+                            message: 'maxParallelBrowsers must be a positive number'
+                        };
+                    }
+                    // Cap at 5 to prevent resource exhaustion
+                    requestBody.max_parallel_browsers = Math.min(browsers, 5);
+                }
+                
+                // Call the MCP browser server HTTP endpoint for deep research
+                const response = await fetch('http://127.0.0.1:5001/api/deep-research', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(requestBody)
+                });
+                
+                // Check if request was successful
+                if (!response.ok) {
+                    const errorData = await response.json().catch(() => ({ error: response.statusText }));
+                    throw new Error(errorData.error || `HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                // Parse response data
+                const data = await response.json();
+                
+                // Return formatted result
+                if (data.success) {
+                    console.log('Deep research completed successfully');
+                    return {
+                        success: true,
+                        message: `Deep Research Report:\n\n${data.result}`
+                    };
+                } else {
+                    throw new Error(data.error || 'Unknown error occurred');
+                }
+                
+            } catch (error) {
+                console.error('Deep research error:', error);
+                return {
+                    success: false,
+                    message: `Deep research failed: ${error.message}\n\nPlease ensure:\n1. The MCP browser server is running (python mcp_browser_server.py)\n2. MCP_RESEARCH_TOOL_SAVE_DIR is configured in environment\n3. The browser-use MCP server is accessible\n4. You have sufficient system resources for parallel browsers`
                 };
             }
         }
