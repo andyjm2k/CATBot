@@ -4639,7 +4639,9 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                             }
                             
                             // Process translation tracks (usually just hips)
-                            if (tracksContainer.translation instanceof Map) {
+                            // DISABLED: Skip translation tracks to prevent model position changes
+                            // This keeps the model at its configured position in the viewing window
+                            if (false && tracksContainer.translation instanceof Map) {
                                 console.log('Processing translation tracks, count:', tracksContainer.translation.size);
                                 for (const [boneName, trackData] of tracksContainer.translation) {
                                     try {
@@ -4666,6 +4668,8 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                                         console.warn('Error processing translation track for', boneName, ':', e);
                                     }
                                 }
+                            } else {
+                                console.log('Translation tracks skipped to preserve model position');
                             }
                         }
                         
