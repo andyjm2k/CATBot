@@ -11,12 +11,19 @@ import os
 from typing import Optional
 from pathlib import Path
 
+# Import dotenv to load .env file
+from dotenv import load_dotenv
+
 # Import Flask for creating HTTP server endpoints
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
 # Import our MCP browser client wrapper
 from mcp_browser_client import MCPBrowserClient
+
+# Load environment variables from .env file
+# This will load from .env in the current directory or parent directories
+load_dotenv()
 
 # Configure logging for the HTTP server
 logging.basicConfig(
@@ -30,8 +37,9 @@ app = Flask(__name__)
 # Enable CORS for all routes to allow frontend access
 CORS(app)
 
-# Global client instance to maintain persistent connection
-mcp_client: Optional[MCPBrowserClient] = None
+# Note: We don't maintain a global persistent client because Flask's synchronous
+# nature with asyncio.run() creates new event loops per request, which conflicts
+# with persistent async context managers. Each request creates a fresh connection.
 
 
 def get_env_config():
@@ -73,39 +81,24 @@ def get_env_config():
     return config
 
 
-async def get_or_create_client():
+def create_client_config():
     """
-    Get or create the global MCP client instance.
-    Maintains a persistent connection to improve performance.
+    Create MCP client configuration.
+    Returns the configuration needed to instantiate a client.
     
     Returns:
-        MCPBrowserClient instance.
+        Tuple of (env_config, mcp_browser_use_dir)
     """
-    global mcp_client
+    # Load environment configuration
+    env_config = get_env_config()
     
-    # Check if client exists and is connected
-    if mcp_client is None or mcp_client.session is None:
-        logger.info("Creating new MCP client connection...")
-        # Load environment configuration
-        env_config = get_env_config()
-        
-        # Determine mcp-browser-use directory
-        mcp_browser_use_dir = os.environ.get(
-            'MCP_BROWSER_USE_DIR',
-            str(Path(__file__).parent / "mcp-browser-use")
-        )
-        
-        # Create new client instance with configuration
-        # use_uv=True is the default and recommended approach
-        mcp_client = MCPBrowserClient(
-            env_vars=env_config,
-            use_uv=True,
-            mcp_browser_use_dir=mcp_browser_use_dir
-        )
-        # Establish connection to MCP server
-        await mcp_client.connect()
+    # Determine mcp-browser-use directory
+    mcp_browser_use_dir = os.environ.get(
+        'MCP_BROWSER_USE_DIR',
+        str(Path(__file__).parent / "mcp-browser-use")
+    )
     
-    return mcp_client
+    return env_config, mcp_browser_use_dir
 
 
 @app.route('/api/browser-agent', methods=['POST'])
@@ -141,9 +134,17 @@ def browser_agent_endpoint():
         logger.info(f"Received browser-agent request: {task[:100]}...")
         
         # Run async function in event loop
+        # Create a fresh client for each request to avoid event loop conflicts
         async def run_task():
-            client = await get_or_create_client()
-            return await client.run_browser_agent(task)
+            env_config, mcp_browser_use_dir = create_client_config()
+            
+            # Use async context manager for proper lifecycle management
+            async with MCPBrowserClient(
+                env_vars=env_config,
+                use_uv=True,
+                mcp_browser_use_dir=mcp_browser_use_dir
+            ) as client:
+                return await client.run_browser_agent(task)
         
         # Execute the task and get result
         result = asyncio.run(run_task())
@@ -199,12 +200,20 @@ def deep_research_endpoint():
         logger.info(f"Received deep-research request: {research_task[:100]}...")
         
         # Run async function in event loop
+        # Create a fresh client for each request to avoid event loop conflicts
         async def run_research():
-            client = await get_or_create_client()
-            return await client.run_deep_research(
-                research_task, 
-                max_parallel_browsers
-            )
+            env_config, mcp_browser_use_dir = create_client_config()
+            
+            # Use async context manager for proper lifecycle management
+            async with MCPBrowserClient(
+                env_vars=env_config,
+                use_uv=True,
+                mcp_browser_use_dir=mcp_browser_use_dir
+            ) as client:
+                return await client.run_deep_research(
+                    research_task, 
+                    max_parallel_browsers
+                )
         
         # Execute the research and get result
         result = asyncio.run(run_research())
@@ -232,52 +241,38 @@ def health_check():
     Response:
         {
             "status": "healthy",
-            "mcp_connected": true/false
+            "mcp_available": true/false
         }
     """
-    # Check if MCP client is connected
-    is_connected = mcp_client is not None and mcp_client.session is not None
+    # Check if MCP can be configured (doesn't maintain persistent connection)
+    try:
+        env_config, mcp_browser_use_dir = create_client_config()
+        mcp_available = bool(env_config and mcp_browser_use_dir)
+    except Exception:
+        mcp_available = False
     
     return jsonify({
         'status': 'healthy',
-        'mcp_connected': is_connected
+        'mcp_available': mcp_available
     })
 
 
 @app.route('/api/disconnect', methods=['POST'])
 def disconnect_endpoint():
     """
-    Endpoint to manually disconnect the MCP client.
-    Useful for cleanup or reconnecting with new configuration.
+    Endpoint for compatibility - no persistent connection to disconnect.
+    Each request creates a fresh connection.
     
     Response:
         {
             "success": true,
-            "message": "Disconnected successfully"
+            "message": "No persistent connection (fresh connection per request)"
         }
     """
-    global mcp_client
-    
-    try:
-        # Disconnect client if it exists
-        if mcp_client:
-            async def disconnect():
-                await mcp_client.disconnect()
-            
-            asyncio.run(disconnect())
-            mcp_client = None
-        
-        return jsonify({
-            'success': True,
-            'message': 'Disconnected successfully'
-        })
-    
-    except Exception as e:
-        logger.error(f"Error disconnecting: {e}")
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
+    return jsonify({
+        'success': True,
+        'message': 'No persistent connection maintained. Each request uses a fresh connection.'
+    })
 
 
 def main():

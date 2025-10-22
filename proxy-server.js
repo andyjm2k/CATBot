@@ -182,6 +182,35 @@ app.get('/v1/proxy/search', async (req, res) => {
     }
 });
 
+// Proxy endpoint for Autogen service
+app.post('/v1/proxy/autogen', async (req, res) => {
+    try {
+        const { input } = req.body;
+        
+        if (!input) {
+            return res.status(400).json({ error: 'Input parameter is required' });
+        }
+
+        console.log('Proxying request to Autogen service:', input);
+
+        // Forward request to the autogen service
+        const response = await axios.post('http://localhost:8084/chat', {
+            input: input
+        }, {
+            timeout: 60000 // 60 second timeout for autogen processing
+        });
+
+        console.log('Autogen response received:', response.data);
+        res.json(response.data);
+    } catch (error) {
+        console.error('Autogen proxy error:', error.message);
+        res.status(500).json({ 
+            error: 'Failed to call autogen service',
+            details: error.message 
+        });
+    }
+});
+
 // MCP server management
 const mcpClients = new Map();
 const mcpServers = new Map();

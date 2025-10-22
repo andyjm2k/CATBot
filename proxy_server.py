@@ -20,11 +20,22 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import uvicorn
 
+# Import AutoGen components for team-based chat
+try:
+    from autogen_agentchat.teams import SelectorGroupChat
+    from autogen_core import Component, FunctionCall, ComponentLoader
+    AUTOGEN_AVAILABLE = True
+    print("✅ AutoGen imports successful")
+except ImportError as e:
+    print(f"⚠️  AutoGen not available: {e}")
+    AUTOGEN_AVAILABLE = False
+    SelectorGroupChat = None
+    Component = None
+    ComponentLoader = None
+
 # Import MCP SDK (with error handling)
 try:
-    from mcp.client.session import ClientSession
-    from mcp import stdio_client
-    from mcp.client.stdio import StdioServerParameters
+    from mcp import ClientSession, stdio_client, StdioServerParameters
     MCP_AVAILABLE = True
 except ImportError as e:
     print(f"MCP import error: {e}")
@@ -54,6 +65,10 @@ class ToolCallRequest(BaseModel):
 mcp_clients = {}
 mcp_servers = {}
 SERVERS_FILE = Path(__file__).parent / "mcp_servers.json"
+TEAM_CONFIG_FILE = Path(__file__).parent / "team-config.json"
+
+# Global AutoGen team instance
+autogen_team = None
 
 # MCP Client Manager class to handle transport lifecycle
 class MCPClientManager:
@@ -210,12 +225,50 @@ def save_servers():
     except Exception as e:
         print(f"Error saving servers to disk: {e}")
 
+# Load AutoGen team from config
+def load_autogen_team():
+    """Load AutoGen team from team-config.json."""
+    global autogen_team
+    
+    if not AUTOGEN_AVAILABLE:
+        print("⚠️  AutoGen not available, skipping team load")
+        return None
+    
+    try:
+        if not TEAM_CONFIG_FILE.exists():
+            print(f"⚠️  Team config file not found: {TEAM_CONFIG_FILE}")
+            return None
+            
+        print(f"📂 Loading AutoGen team from {TEAM_CONFIG_FILE}...")
+        
+        with open(TEAM_CONFIG_FILE, 'r', encoding='utf-8') as f:
+            team_config = json.load(f)
+        
+        # Load the team from the configuration using ComponentLoader
+        loader = ComponentLoader()
+        team = loader.load_component(team_config)
+        
+        print(f"✅ AutoGen team loaded successfully: {team_config.get('label', 'Unknown')}")
+        return team
+        
+    except Exception as e:
+        import traceback
+        print(f"❌ Error loading AutoGen team: {e}")
+        print(traceback.format_exc())
+        return None
+
 # Load servers on startup
 try:
     load_servers()
     print(f"✅ Loaded {len(mcp_servers)} MCP servers from disk")
 except Exception as e:
     print(f"Warning: Could not load servers on startup: {e}")
+
+# Load AutoGen team on startup
+try:
+    autogen_team = load_autogen_team()
+except Exception as e:
+    print(f"Warning: Could not load AutoGen team on startup: {e}")
 
 # Web proxy endpoint for fetching content
 @app.get("/v1/proxy/fetch")
@@ -344,6 +397,113 @@ async def proxy_search(query: str):
     except Exception as e:
         print(f"Search error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to perform search: {str(e)}")
+
+# AutoGen team chat endpoint (integrated directly)
+@app.post("/v1/proxy/autogen")
+async def autogen_chat(request: Request):
+    """Run AutoGen team conversation directly (no separate service needed)."""
+    global autogen_team
+    
+    try:
+        body = await request.json()
+        input_text = body.get('input')
+        
+        if not input_text:
+            raise HTTPException(status_code=400, detail="Input parameter is required")
+
+        print(f"🤖 AutoGen team request: {input_text[:100]}...")
+
+        # Check if AutoGen is available and team is loaded
+        if not AUTOGEN_AVAILABLE:
+            raise HTTPException(
+                status_code=503,
+                detail="AutoGen not available. Please install: pip install autogen-agentchat autogen-ext"
+            )
+        
+        if autogen_team is None:
+            # Try to load the team
+            print("🔄 Loading AutoGen team for the first time...")
+            autogen_team = load_autogen_team()
+            if autogen_team is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail="AutoGen team not loaded. Check team-config.json exists and is valid."
+                )
+        else:
+            # Check if the team config file has been modified and reload if needed
+            try:
+                config_mtime = TEAM_CONFIG_FILE.stat().st_mtime
+                if not hasattr(autogen_team, '_config_mtime') or autogen_team._config_mtime != config_mtime:
+                    print("🔄 Team config file changed, reloading AutoGen team...")
+                    new_team = load_autogen_team()
+                    if new_team is not None:
+                        autogen_team = new_team
+                        autogen_team._config_mtime = config_mtime
+                    else:
+                        print("⚠️  Failed to reload team, using existing team")
+            except Exception as e:
+                print(f"⚠️  Error checking team config modification time: {e}")
+
+        try:
+            # Run the team conversation
+            print(f"🚀 Running AutoGen team with input: {input_text[:100]}...")
+            result = await autogen_team.run(task=input_text)
+            
+            # Extract messages and final answer from result
+            messages = []
+            if hasattr(result, 'messages'):
+                messages = [
+                    {
+                        "source": msg.source if hasattr(msg, 'source') else 'unknown',
+                        "content": msg.content if hasattr(msg, 'content') else str(msg)
+                    }
+                    for msg in result.messages
+                ]
+            
+            # Format all messages into a readable conversation summary
+            conversation_summary = "=== AutoGen Team Workflow ===\n\n"
+            
+            if messages:
+                for i, msg in enumerate(messages, 1):
+                    source = msg.get('source', 'unknown')
+                    content = msg.get('content', '')
+                    conversation_summary += f"[{i}] {source}:\n{content}\n\n"
+                
+                conversation_summary += "=== End of Workflow ===\n\n"
+                conversation_summary += "Please review the above conversation and provide a concise summary of the final result."
+            else:
+                conversation_summary = "No messages returned from AutoGen team."
+            
+            print(f"✅ AutoGen team completed with {len(messages)} messages")
+            
+            return {
+                "output": conversation_summary,
+                "response": conversation_summary,  # Alternative field name for compatibility
+                "messages": messages,
+                "message_count": len(messages)
+            }
+            
+        except Exception as e:
+            import traceback
+            error_trace = traceback.format_exc()
+            print(f"❌ AutoGen team execution error: {e}")
+            print(f"   Traceback: {error_trace}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"AutoGen team execution failed: {str(e)}"
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        print(f"❌ AutoGen endpoint error: {e}")
+        print(f"   Traceback: {error_trace}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to process AutoGen request: {str(e)}"
+        )
 
 # MCP server management endpoints
 @app.post("/v1/mcp/servers")

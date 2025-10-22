@@ -6,6 +6,11 @@ This should be more compatible with the MCP protocol.
 import os
 import sys
 import subprocess
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+# This will load from .env in the current directory or parent directories
+load_dotenv()
 
 def main():
     """Start the browser-use MCP server using the command line interface."""

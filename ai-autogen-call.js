@@ -1,58 +1,33 @@
 window.runWorkflow = async function(contentPrompt) {
     console.log('ai-autogen-call.js - runWorkflow called with:', contentPrompt);
     
-    const userId = 'guestuser@gmail.com'; // Replace with actual user ID
-    
     try {
-        // First create a session
-        const sessionResponse = await fetch('http://127.0.0.1:8081/api/sessions', {
+        // Call the autogen API through the proxy server to avoid CORS issues
+        const response = await fetch('http://localhost:8002/v1/proxy/autogen', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
             },
             body: JSON.stringify({
-                user_id: userId,
-                name: 'New Session',
-                status: 'active'
+                input: contentPrompt
             })
         });
 
-        if (!sessionResponse.ok) {
-            throw new Error(`HTTP error! status: ${sessionResponse.status} - ${sessionResponse.statusText}`);
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status} - ${response.statusText}`);
         }
 
-        const sessionData = await sessionResponse.json();
-        const sessionId = sessionData.data.id;
-        const workflowId = '2'; // Replace with actual workflow ID
-
-        // Now run the workflow with the session ID
-        const workflowResponse = await fetch(`http://127.0.0.1:8081/api/sessions/${sessionId}/workflow/${workflowId}/run`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                user_id: userId,
-                session_id: sessionId,
-                content: contentPrompt,
-                type: 'user',
-                status: 'active',
-                connection_id: 'connection_1'
-            })
-        });
-
-        if (!workflowResponse.ok) {
-            throw new Error(`HTTP error! status: ${workflowResponse.status} - ${workflowResponse.statusText}`);
-        }
-
-        const data = await workflowResponse.json();
-        console.log('Workflow response:', data);
+        const data = await response.json();
+        console.log('Autogen API response:', data);
         
         // Extract the actual content from the response
-        if (data.data && data.data.response) {
-            return data.data.response;
-        } else if (data.data && data.data.content) {
-            return data.data.content;
+        // Adjust this based on the actual response structure from the new API
+        if (data.response) {
+            return data.response;
+        } else if (data.output) {
+            return data.output;
+        } else if (data.result) {
+            return data.result;
         } else if (data.message) {
             return data.message;
         } else {
