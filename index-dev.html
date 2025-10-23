@@ -358,8 +358,65 @@
             margin-bottom: 15px;
         }
 
-        /* Pulse effect on response window while awaiting API response */
-        #response-output.responding {
+        /* Message history container */
+        #message-history {
+            margin-bottom: 15px;
+            height: 600px;
+            overflow-y: auto;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 10px;
+            background-color: #f9f9f9;
+        }
+
+        /* Individual message styling */
+        .message {
+            margin-bottom: 15px;
+            padding: 10px 15px;
+            border-radius: 8px;
+            line-height: 1.5;
+            word-wrap: break-word;
+        }
+
+        /* User message styling */
+        .message.user {
+            background-color: #e3f2fd;
+            border-left: 4px solid #2196F3;
+            margin-left: 20px;
+        }
+
+        /* Assistant message styling */
+        .message.assistant {
+            background-color: #f1f8e9;
+            border-left: 4px solid #8BC34A;
+            margin-right: 20px;
+        }
+
+        /* Message sender name */
+        .message-sender {
+            font-weight: bold;
+            margin-bottom: 5px;
+            font-size: 0.9rem;
+        }
+
+        /* User sender name color */
+        .message.user .message-sender {
+            color: #1976D2;
+        }
+
+        /* Assistant sender name color */
+        .message.assistant .message-sender {
+            color: #689F38;
+        }
+
+        /* Message content */
+        .message-content {
+            color: #333;
+            white-space: pre-wrap;
+        }
+
+        /* Pulse effect on message history while awaiting API response */
+        #message-history.responding {
             border-color: #007BFF;
             animation: responsePulse 1.2s ease-in-out infinite;
             box-shadow: 0 0 0 0 rgba(0, 123, 255, 0.25);
@@ -522,6 +579,14 @@
                     <label for="system-prompt">System Prompt:</label>
                     <textarea id="system-prompt" placeholder="You are a friendly AI assistant called EVA."></textarea>
                     
+                    <label for="user-name">User Name:</label>
+                    <input type="text" id="user-name" value="User" placeholder="Your name">
+                    <span class="helper-text">Your name shown in message history</span>
+                    
+                    <label for="assistant-name">Assistant Name:</label>
+                    <input type="text" id="assistant-name" value="EVA" placeholder="Assistant name">
+                    <span class="helper-text">Assistant name shown in message history</span>
+                    
                     <label for="voice-dropdown">Select Voice:</label>
                     <select id="voice-dropdown">
                         <option value="">Loading voices...</option>
@@ -608,8 +673,9 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
         </div>
         
         <div class="column right-column">
-            <label for="response-output">Response:</label>
-            <textarea id="response-output" rows="30" readonly></textarea>
+            <label for="message-history">Conversation History:</label>
+            <div id="message-history"></div>
+            <textarea id="response-output" rows="30" readonly style="display: none;"></textarea>
 
             <div id="clipboard-preview" style="display: none; margin: 15px 0;">
                 <img id="clipboard-image" style="max-width: 100%; display: none;">
@@ -639,6 +705,9 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
         const sendBtn = document.getElementById('send-btn');
         const userInput = document.getElementById('user-input');
         const responseOutput = document.getElementById('response-output');
+        const messageHistory = document.getElementById('message-history'); // New message history container
+        const userNameInput = document.getElementById('user-name'); // User name input
+        const assistantNameInput = document.getElementById('assistant-name'); // Assistant name input
         const status = document.getElementById('status');
         const endpointInput = document.getElementById('endpoint-url');
         const apiKeyInput = document.getElementById('api-key');
@@ -647,6 +716,66 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
         const SELECTED_VOICE_STORAGE_KEY = 'selectedVoiceURI'; // Persist selected voice for this browser session
         const PROXY_BASE_URL = 'http://localhost:8002';
         let voices = [];
+        
+        // Message history management
+        let displayedMessages = []; // Array to store displayed messages (last 25)
+        
+        // Function to add a message to the history display
+        function addMessageToHistory(role, content) {
+            // Get the configured names or use defaults
+            const userName = userNameInput.value.trim() || 'User';
+            const assistantName = assistantNameInput.value.trim() || 'EVA';
+            
+            // Create message object
+            const message = {
+                role: role, // 'user' or 'assistant'
+                content: content,
+                sender: role === 'user' ? userName : assistantName,
+                timestamp: new Date()
+            };
+            
+            // Add to array and limit to 25 messages
+            displayedMessages.push(message);
+            if (displayedMessages.length > 25) {
+                displayedMessages.shift(); // Remove oldest message
+            }
+            
+            // Update the display
+            renderMessageHistory();
+            
+            // Auto-scroll to bottom
+            messageHistory.scrollTop = messageHistory.scrollHeight;
+        }
+        
+        // Function to render the entire message history
+        function renderMessageHistory() {
+            // Clear the container
+            messageHistory.innerHTML = '';
+            
+            // Render each message
+            displayedMessages.forEach(msg => {
+                const messageDiv = document.createElement('div');
+                messageDiv.className = `message ${msg.role}`;
+                
+                const senderDiv = document.createElement('div');
+                senderDiv.className = 'message-sender';
+                senderDiv.textContent = msg.sender;
+                
+                const contentDiv = document.createElement('div');
+                contentDiv.className = 'message-content';
+                contentDiv.textContent = msg.content;
+                
+                messageDiv.appendChild(senderDiv);
+                messageDiv.appendChild(contentDiv);
+                messageHistory.appendChild(messageDiv);
+            });
+        }
+        
+        // Function to clear message history
+        function clearMessageHistory() {
+            displayedMessages = [];
+            messageHistory.innerHTML = '';
+        }
 
         // Persist voice selection when the user changes the dropdown
         if (voiceDropdown) {
@@ -1884,9 +2013,10 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
                 // Clear previous recordings
                 audioData = [];
                 
-                // Clear the text areas
+                // Clear the text areas and message history
                 userInput.value = '';
                 responseOutput.value = '';
+                clearMessageHistory();
 
                 // Connect the nodes and start recording
                 mediaStreamSource.connect(recorderNode);
@@ -3338,7 +3468,9 @@ function saveWAVFile(wavBlob) {
             console.log('processToolChain - Initialized context:', context);
 
             // Show initial task detection
-            responseOutput.value = `Detected ${tasks.length} tasks in the chain:\n`;
+            const detectionMessage = `Detected ${tasks.length} tasks in the chain:\n`;
+            responseOutput.value = detectionMessage;
+            addMessageToHistory('assistant', detectionMessage); // Add to message history
             tasks.forEach((task, index) => {
                 console.log(`processToolChain - Task ${index + 1}:`, task);
                 responseOutput.value += `${index + 1}. ${task.originalText}\n`;
@@ -3418,6 +3550,7 @@ function saveWAVFile(wavBlob) {
 
             // Update response box with final results
             responseOutput.value = finalOutput;
+            addMessageToHistory('assistant', finalOutput); // Add to message history
             console.log('processToolChain - Final output:', finalOutput);
 
             return finalOutput;
@@ -3500,6 +3633,7 @@ function saveWAVFile(wavBlob) {
                     });
                     
                     responseOutput.value = chainResult;
+                    addMessageToHistory('assistant', chainResult); // Add to message history
                     textToSpeech(chainResult);
                     return;
                 }
@@ -3769,9 +3903,13 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                 tool_choice: 'auto'
             };
 
+            // Add user message to history before sending
+            addMessageToHistory('user', promptText);
+            
             try {
                 // Add pulsing effect to indicate we are waiting for the API
                 responseOutput.classList.add('responding');
+                messageHistory.classList.add('responding'); // Add pulsing effect to message history
                 console.log('Sending request:', {
                     endpoint,
                     model: getCurrentModel(),
@@ -3833,6 +3971,7 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                             if (finalContent) {
                                 chatHistory.push({ role: 'assistant', content: finalContent });
                                 responseOutput.value = finalContent;
+                                addMessageToHistory('assistant', finalContent); // Add to message history
                                 textToSpeech(finalContent);
                         const expressionFile = detectExpressionFromText(finalContent);
                         if (expressionFile && live2dModel) {
@@ -4065,11 +4204,13 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                                 if (confirmText) {
                                     chatHistory.push({ role: 'assistant', content: confirmText });
                                     responseOutput.value = confirmText;
+                                    addMessageToHistory('assistant', confirmText); // Add to message history
                                     textToSpeech(confirmText);
                                 }
                             }
                             // Remove pulsing effect after receiving the final response
                             responseOutput.classList.remove('responding');
+                            messageHistory.classList.remove('responding'); // Remove pulsing effect from message history
                             return;
                         } catch (toolErr) {
                             console.error('Error handling tool calls via LM Studio/OpenAI format:', toolErr);
@@ -4096,19 +4237,24 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                                 
                                 if (result.success) {
                                     responseOutput.value = result.message;
+                                    addMessageToHistory('assistant', result.message); // Add to message history
                                     textToSpeech(result.message);
                                 }
                                 // Remove pulsing effect after tool execution
                                 responseOutput.classList.remove('responding');
+                                messageHistory.classList.remove('responding'); // Remove pulsing effect from message history
                             } catch (error) {
                                 console.error('Tool execution error:', error);
                                 responseOutput.value = `Error executing tool: ${error.message}`;
+                                addMessageToHistory('assistant', `Error executing tool: ${error.message}`); // Add to message history
                                 responseOutput.classList.remove('responding');
+                                messageHistory.classList.remove('responding'); // Remove pulsing effect from message history
                             }
                         } else {
                             // Handle regular message response
                         chatHistory.push({ role: 'assistant', content: cleanContent });
                         responseOutput.value = cleanContent;
+                        addMessageToHistory('assistant', cleanContent); // Add to message history
                             textToSpeech(cleanContent);
                         
                             // Update Live2D expression
@@ -4329,6 +4475,7 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                             }
                         } catch (_) {}
                         responseOutput.classList.remove('responding');
+                        messageHistory.classList.remove('responding'); // Remove pulsing effect from message history
                     }
                 }
                 } else {
@@ -4346,6 +4493,7 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                         if (fallbackText) {
                             chatHistory.push({ role: 'assistant', content: fallbackText });
                             responseOutput.value = fallbackText;
+                            addMessageToHistory('assistant', fallbackText); // Add to message history
                             textToSpeech(fallbackText);
                         }
                     }
@@ -4353,8 +4501,10 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
             } catch (error) {
                 console.error('Error:', error);
                 responseOutput.value = `Error: ${error.message}. Please try again.`;
+                addMessageToHistory('assistant', `Error: ${error.message}. Please try again.`); // Add to message history
             } finally {
                 responseOutput.classList.remove('responding');
+                messageHistory.classList.remove('responding'); // Remove pulsing effect from message history
             }
         }
 
@@ -6115,6 +6265,7 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                     
                     // Update response output
                     responseOutput.value = message;
+                    addMessageToHistory('assistant', message); // Add to message history
                     
                     // Trigger text-to-speech
                     textToSpeech(message);
