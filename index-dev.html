@@ -1856,6 +1856,85 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
             requestAnimationFrame(animateMouth);
         }
 
+        // Function to save tool settings to localStorage
+        function saveToolSettings() {
+            try {
+                const settings = {
+                    userName: userNameInput.value,
+                    assistantName: assistantNameInput.value,
+                    apiKey: apiKeyInput.value,
+                    endpoint: endpointInput.value,
+                    systemPrompt: systemPromptInput.value,
+                    webcamMode: document.getElementById('webcam-toggle').checked,
+                    clipboardMode: document.getElementById('clipboard-toggle').checked,
+                    muteMode: document.getElementById('mute-toggle').checked
+                };
+                localStorage.setItem('toolSettings', JSON.stringify(settings));
+            } catch (error) {
+                console.warn('Error saving tool settings:', error);
+            }
+        }
+
+        // Function to load tool settings from localStorage
+        function loadToolSettings() {
+            try {
+                const savedSettings = localStorage.getItem('toolSettings');
+                if (savedSettings) {
+                    const settings = JSON.parse(savedSettings);
+                    
+                    // Restore User Name and Assistant Name
+                    if (settings.userName !== undefined) {
+                        userNameInput.value = settings.userName;
+                    }
+                    if (settings.assistantName !== undefined) {
+                        assistantNameInput.value = settings.assistantName;
+                    }
+                    
+                    // Restore other settings
+                    if (settings.apiKey !== undefined) {
+                        apiKeyInput.value = settings.apiKey;
+                    }
+                    if (settings.endpoint !== undefined) {
+                        endpointInput.value = settings.endpoint;
+                    }
+                    if (settings.systemPrompt !== undefined) {
+                        systemPromptInput.value = settings.systemPrompt;
+                    }
+                    if (settings.webcamMode !== undefined) {
+                        document.getElementById('webcam-toggle').checked = settings.webcamMode;
+                    }
+                    if (settings.clipboardMode !== undefined) {
+                        document.getElementById('clipboard-toggle').checked = settings.clipboardMode;
+                    }
+                    if (settings.muteMode !== undefined) {
+                        document.getElementById('mute-toggle').checked = settings.muteMode;
+                        isMuted = settings.muteMode; // Update the isMuted variable as well
+                    }
+                    
+                    console.log('Tool settings loaded from localStorage');
+                }
+            } catch (error) {
+                console.warn('Error loading tool settings:', error);
+            }
+        }
+
+        // Function to setup event listeners for persisting tool settings
+        function setupToolSettingsPersistence() {
+            // Add change event listeners to User Name and Assistant Name inputs
+            userNameInput.addEventListener('input', saveToolSettings);
+            assistantNameInput.addEventListener('input', saveToolSettings);
+            
+            // Add change event listeners to other tool settings
+            apiKeyInput.addEventListener('input', saveToolSettings);
+            endpointInput.addEventListener('input', saveToolSettings);
+            systemPromptInput.addEventListener('input', saveToolSettings);
+            document.getElementById('webcam-toggle').addEventListener('change', saveToolSettings);
+            document.getElementById('clipboard-toggle').addEventListener('change', saveToolSettings);
+            document.getElementById('mute-toggle').addEventListener('change', saveToolSettings);
+            
+            console.log('Tool settings persistence enabled');
+        }
+
         // Replace the document load event listener
         document.addEventListener('DOMContentLoaded', async function() {
             try {
@@ -1868,6 +1947,9 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
                     todoList = [];
                     memoryCache = [];
                 }
+
+                // Load persisted tool settings (User Name, Assistant Name, etc.)
+                loadToolSettings();
 
                 // Initialize core features
             loadVoices();
@@ -1901,6 +1983,9 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
                         this.setAttribute('aria-expanded', isExpanded);
                     });
                 }
+
+                // Add event listeners to save tool settings when they change
+                setupToolSettingsPersistence();
             } catch (error) {
                 console.error('Error during initialization:', error);
             }
