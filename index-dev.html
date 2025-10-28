@@ -4154,9 +4154,22 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                             // Execute each tool call and push results
                             for (const tc of message.tool_calls) {
                                 const toolResult = await executeToolCall(tc, context);
+                                
+                                // Format the tool result content properly
+                                let toolResultContent;
+                                if (typeof toolResult === 'string') {
+                                    toolResultContent = toolResult;
+                                } else if (toolResult.content) {
+                                    // If the tool result has content (like from readFile), include it in a readable format
+                                    toolResultContent = `${toolResult.message}\n\nContent:\n${toolResult.content}`;
+                                } else {
+                                    // Otherwise, just stringify the result
+                                    toolResultContent = JSON.stringify(toolResult);
+                                }
+                                
                                 messages.push({
                                     role: 'tool',
-                                    content: typeof toolResult === 'string' ? toolResult : JSON.stringify(toolResult),
+                                    content: toolResultContent,
                                     tool_call_id: tc.id
                                 });
                             }
@@ -4448,9 +4461,63 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                                 });
                                 
                                 if (result.success) {
-                                    responseOutput.value = result.message;
-                                    addMessageToHistory('assistant', result.message); // Add to message history
-                                    textToSpeech(result.message);
+                                    // For file read operations, include the content in the context for the LLM to use
+                                    if (result.content) {
+                                        // Get the tool name from the tool call
+                                        const toolName = toolCall.function?.name || toolCall.name;
+                                        
+                                        // Create a follow-up message that includes the file content for the LLM to process
+                                        const contentMessage = `File content from ${toolName === 'readFile' ? 'reading the file' : 'the operation'}:\n\n${result.content}\n\nBased on this content, please respond to the user's request.`;
+                                        
+                                        // Add tool result to chat history
+                                        chatHistory.push({
+                                            role: 'user',
+                                            content: contentMessage
+                                        });
+                                        
+                                        // Make a follow-up call to let the LLM respond based on the file content
+                                        try {
+                                            const followupResponse = await fetch(endpoint, {
+                                                method: 'POST',
+                                                headers: {
+                                                    'Content-Type': 'application/json',
+                                                    'Authorization': `Bearer ${apiKey}`
+                                                },
+                                                body: JSON.stringify({
+                                                    model: getCurrentModel(),
+                                                    messages: chatHistory,
+                                                    temperature: 0.7
+                                                })
+                                            });
+                                            
+                                            const followupData = await followupResponse.json();
+                                            if (followupData.choices && followupData.choices.length > 0) {
+                                                const followupMessage = followupData.choices[0].message;
+                                                const followupContent = stripThinkTags(followupMessage.content || '');
+                                                
+                                                if (followupContent) {
+                                                    responseOutput.value = followupContent;
+                                                    addMessageToHistory('assistant', followupContent);
+                                                    textToSpeech(followupContent);
+                                                    
+                                                    chatHistory.push({
+                                                        role: 'assistant',
+                                                        content: followupContent
+                                                    });
+                                                }
+                                            }
+                                        } catch (followupError) {
+                                            console.error('Follow-up request failed:', followupError);
+                                            responseOutput.value = result.message;
+                                            addMessageToHistory('assistant', result.message);
+                                            textToSpeech(result.message);
+                                        }
+                                    } else {
+                                        // For operations without content (like write), just show the result message
+                                        responseOutput.value = result.message;
+                                        addMessageToHistory('assistant', result.message);
+                                        textToSpeech(result.message);
+                                    }
                                 }
                                 // Remove pulsing effect after tool execution
                                 responseOutput.classList.remove('responding');
@@ -6643,9 +6710,22 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                             // Execute and add tool results
                             for (const tc of msg.tool_calls) {
                                 const toolResult = await executeToolCall(tc, context);
+                                
+                                // Format the tool result content properly
+                                let toolResultContent;
+                                if (typeof toolResult === 'string') {
+                                    toolResultContent = toolResult;
+                                } else if (toolResult.content) {
+                                    // If the tool result has content (like from readFile), include it in a readable format
+                                    toolResultContent = `${toolResult.message}\n\nContent:\n${toolResult.content}`;
+                                } else {
+                                    // Otherwise, just stringify the result
+                                    toolResultContent = JSON.stringify(toolResult);
+                                }
+                                
                                 subMessages.push({
                                     role: 'tool',
-                                    content: typeof toolResult === 'string' ? toolResult : JSON.stringify(toolResult),
+                                    content: toolResultContent,
                                     tool_call_id: tc.id
                                 });
                             }
