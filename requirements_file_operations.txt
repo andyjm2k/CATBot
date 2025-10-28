@@ -1,0 +1,25 @@
+# File Operations Server Requirements
+# Install with: pip install -r requirements_file_operations.txt
+
+# Web framework for REST API
+fastapi==0.104.1
+uvicorn==0.24.0
+
+# Request/Response validation
+pydantic==2.5.0
+
+# Word document support (.docx)
+python-docx==1.1.0
+
+# Excel file support (.xlsx, .xls)
+openpyxl==3.1.2
+
+# PDF reading support
+PyPDF2==3.0.1
+
+# PDF writing support
+reportlab==4.0.7
+
+# Image processing (png, jpg, jpeg)
+Pillow==10.1.0
+

@@ -1,0 +1,17 @@
+Welcome to the File Operations Feature!
+
+This is a sample file to demonstrate the reading capabilities.
+
+The assistant can now:
+- Read this text file and others (txt, docx, xlsx, pdf, png)
+- Write new files in various formats
+- Process and manipulate document content
+
+Try asking the assistant:
+"Read the content from welcome.txt"
+
+Or create a new file:
+"Write a summary to my_summary.txt with the following: This is my first saved file!"
+
+Enjoy exploring this new capability!
+

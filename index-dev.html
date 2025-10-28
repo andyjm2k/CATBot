@@ -2711,6 +2711,89 @@ function saveWAVFile(wavBlob) {
             }
         }
 
+        // Handler for reading files from the scratch directory
+        async function handleReadFile({ filename }) {
+            try {
+                // Call the proxy server to read the file
+                const response = await fetch('http://localhost:8002/v1/files/read', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ filename })
+                });
+
+                // Parse the response
+                const result = await response.json();
+
+                // Return the result
+                if (result.success) {
+                    return {
+                        success: true,
+                        message: result.message,
+                        content: result.data.content,
+                        type: result.data.type
+                    };
+                } else {
+                    return {
+                        success: false,
+                        message: result.message
+                    };
+                }
+            } catch (error) {
+                // Handle network or parsing errors
+                console.error('Read file error:', error);
+                return {
+                    success: false,
+                    message: `Error reading file: ${error.message}. Make sure the proxy server is running on port 8002.`
+                };
+            }
+        }
+
+        // Handler for writing files to the scratch directory
+        async function handleWriteFile({ filename, content, format }) {
+            try {
+                // Default format to txt if not specified
+                if (!format) {
+                    format = 'txt';
+                }
+
+                // Call the proxy server to write the file
+                const response = await fetch('http://localhost:8002/v1/files/write', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ filename, content, format })
+                });
+
+                // Parse the response
+                const result = await response.json();
+
+                // Return the result
+                if (result.success) {
+                    return {
+                        success: true,
+                        message: result.message,
+                        filepath: result.data?.filepath,
+                        size: result.data?.size
+                    };
+                } else {
+                    return {
+                        success: false,
+                        message: result.message
+                    };
+                }
+            } catch (error) {
+                // Handle network or parsing errors
+                console.error('Write file error:', error);
+                return {
+                    success: false,
+                    message: `Error writing file: ${error.message}. Make sure the proxy server is running on port 8002.`
+                };
+            }
+        }
+
         // Update executeToolCall to include the new handler
         async function executeToolCall(toolCall, context) {
             console.log('executeToolCall - Input:', { toolCall, context });
@@ -2790,6 +2873,12 @@ function saveWAVFile(wavBlob) {
                         break;
                     case "runDeepResearch":
                         result = await handleDeepResearch(args);
+                        break;
+                    case "readFile":
+                        result = await handleReadFile(args);
+                        break;
+                    case "writeFile":
+                        result = await handleWriteFile(args);
                         break;
                     default:
                         // Tool not found
@@ -3837,6 +3926,22 @@ Parameters:
     "fileName": "string (optional custom name for the file in Drive)"
 }
 
+12. readFile
+Description: Reads a file from the scratch directory. Supports txt, docx, xlsx, pdf, and png formats.
+Parameters:
+{
+    "filename": "string (name of the file to read from the scratch directory)"
+}
+
+13. writeFile
+Description: Writes content to a file in the scratch directory. Supports txt, docx, xlsx, and pdf formats.
+Parameters:
+{
+    "filename": "string (name of the file to write)",
+    "content": "string (content to write to the file)",
+    "format": "string (optional: txt|docx|xlsx|pdf, defaults to txt)"
+}
+
 Examples:
 User: "Remember to buy milk"
 Assistant: <tool>manageMemoryCache</tool>
@@ -3894,6 +3999,24 @@ Assistant: <tool>fetchNews</tool>
 {
     "searchTerm": "climate policy",
     "filename": "climate_updates.csv"
+}
+</parameters>
+
+User: "Read the content from report.txt"
+Assistant: <tool>readFile</tool>
+<parameters>
+{
+    "filename": "report.txt"
+}
+</parameters>
+
+User: "Write a summary to summary.docx"
+Assistant: <tool>writeFile</tool>
+<parameters>
+{
+    "filename": "summary.docx",
+    "content": "This is a comprehensive summary of the report...",
+    "format": "docx"
 }
 </parameters>
 

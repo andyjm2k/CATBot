@@ -9,9 +9,11 @@ import json
 import os
 import re
 import time
+import base64
 from typing import Dict, List, Optional, Any
 from pathlib import Path
 from datetime import datetime
+from io import BytesIO
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
@@ -19,6 +21,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import uvicorn
+
+# Import file operations libraries
+try:
+    from docx import Document  # python-docx for Word documents
+    import openpyxl  # openpyxl for Excel files
+    from openpyxl.styles import Font, Alignment  # For Excel formatting
+    import PyPDF2  # PyPDF2 for PDF reading
+    from PIL import Image  # Pillow for image operations
+    FILE_OPS_AVAILABLE = True
+    print("✅ File operations libraries loaded successfully")
+except ImportError as e:
+    print(f"⚠️  File operations libraries not available: {e}")
+    FILE_OPS_AVAILABLE = False
 
 # Import AutoGen components for team-based chat
 try:
@@ -61,11 +76,29 @@ class ToolCallRequest(BaseModel):
     toolName: str
     parameters: Optional[Dict[str, Any]] = None
 
+# Pydantic models for file operations
+class ReadFileRequest(BaseModel):
+    filename: str  # Name of the file to read
+
+class WriteFileRequest(BaseModel):
+    filename: str  # Name of the file to write
+    content: str  # Content to write to the file
+    format: Optional[str] = "txt"  # File format (txt, docx, xlsx, pdf)
+
+class FileResponse(BaseModel):
+    success: bool  # Whether the operation was successful
+    message: str  # Human-readable message
+    data: Optional[Dict[str, Any]] = None  # Optional data payload
+
 # Global state (similar to the Node.js version)
 mcp_clients = {}
 mcp_servers = {}
 SERVERS_FILE = Path(__file__).parent / "mcp_servers.json"
 TEAM_CONFIG_FILE = Path(__file__).parent / "team-config.json"
+SCRATCH_DIR = Path(__file__).parent / "scratch"
+
+# Create scratch directory if it doesn't exist
+SCRATCH_DIR.mkdir(parents=True, exist_ok=True)
 
 # Global AutoGen team instance
 autogen_team = None
@@ -1056,8 +1089,414 @@ async def proxy_whisper(request: Request):
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Failed to proxy Whisper request: {str(e)}")
 
+# ============================================================================
+# FILE OPERATIONS ENDPOINTS
+# ============================================================================
+
+def read_text_file(filepath: Path) -> str:
+    """Read a plain text file and return its content"""
+    try:
+        # Read the file with UTF-8 encoding
+        with open(filepath, 'r', encoding='utf-8') as f:
+            return f.read()
+    except UnicodeDecodeError:
+        # Fallback to latin-1 if UTF-8 fails
+        with open(filepath, 'r', encoding='latin-1') as f:
+            return f.read()
+
+def read_docx_file(filepath: Path) -> str:
+    """Read a Word document and return its text content"""
+    # Load the document using python-docx
+    doc = Document(filepath)
+    # Extract text from all paragraphs
+    paragraphs = [para.text for para in doc.paragraphs]
+    # Join paragraphs with newlines
+    return '\n'.join(paragraphs)
+
+def read_xlsx_file(filepath: Path) -> str:
+    """Read an Excel file and return its content as formatted text"""
+    # Load the workbook
+    wb = openpyxl.load_workbook(filepath, data_only=True)
+    result = []
+    
+    # Process each sheet in the workbook
+    for sheet_name in wb.sheetnames:
+        sheet = wb[sheet_name]
+        result.append(f"=== Sheet: {sheet_name} ===\n")
+        
+        # Process each row in the sheet
+        for row in sheet.iter_rows(values_only=True):
+            # Filter out None values and convert to strings
+            row_data = [str(cell) if cell is not None else '' for cell in row]
+            # Join cells with tabs for better formatting
+            result.append('\t'.join(row_data))
+        
+        result.append('\n')  # Add blank line between sheets
+    
+    # Join all lines with newlines
+    return '\n'.join(result)
+
+def read_pdf_file(filepath: Path) -> str:
+    """Read a PDF file and return its text content"""
+    result = []
+    # Open the PDF file in binary mode
+    with open(filepath, 'rb') as f:
+        # Create a PDF reader object
+        pdf_reader = PyPDF2.PdfReader(f)
+        # Extract text from each page
+        for page_num in range(len(pdf_reader.pages)):
+            page = pdf_reader.pages[page_num]
+            text = page.extract_text()
+            result.append(f"=== Page {page_num + 1} ===\n{text}\n")
+    
+    # Join all pages with newlines
+    return '\n'.join(result)
+
+def read_png_file(filepath: Path) -> Dict[str, Any]:
+    """Read a PNG image and return metadata and base64-encoded data"""
+    # Open the image using PIL
+    img = Image.open(filepath)
+    
+    # Get image metadata
+    metadata = {
+        'width': img.width,
+        'height': img.height,
+        'format': img.format,
+        'mode': img.mode
+    }
+    
+    # Convert image to base64 for transmission
+    buffered = BytesIO()
+    img.save(buffered, format=img.format)
+    img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
+    
+    return {
+        'metadata': metadata,
+        'data': img_base64,
+        'description': f"Image: {img.width}x{img.height} pixels, format: {img.format}"
+    }
+
+def write_text_file(filepath: Path, content: str) -> None:
+    """Write content to a plain text file"""
+    # Write the content with UTF-8 encoding
+    with open(filepath, 'w', encoding='utf-8') as f:
+        f.write(content)
+
+def write_docx_file(filepath: Path, content: str) -> None:
+    """Write content to a Word document"""
+    # Create a new document
+    doc = Document()
+    
+    # Split content into paragraphs and add each to the document
+    for paragraph in content.split('\n'):
+        doc.add_paragraph(paragraph)
+    
+    # Save the document
+    doc.save(filepath)
+
+def write_xlsx_file(filepath: Path, content: str) -> None:
+    """Write content to an Excel file"""
+    # Create a new workbook
+    wb = openpyxl.Workbook()
+    # Get the active sheet
+    ws = wb.active
+    ws.title = "Sheet1"
+    
+    # Split content into rows
+    rows = content.split('\n')
+    
+    # Write each row to the Excel file
+    for row_idx, row_content in enumerate(rows, start=1):
+        # Split row by tabs or commas
+        if '\t' in row_content:
+            cells = row_content.split('\t')
+        else:
+            cells = row_content.split(',')
+        
+        # Write each cell
+        for col_idx, cell_content in enumerate(cells, start=1):
+            cell = ws.cell(row=row_idx, column=col_idx, value=cell_content.strip())
+            
+            # Apply formatting to the first row (header)
+            if row_idx == 1:
+                cell.font = Font(bold=True)
+                cell.alignment = Alignment(horizontal='center')
+    
+    # Auto-adjust column widths
+    for column in ws.columns:
+        max_length = 0
+        column_letter = column[0].column_letter
+        for cell in column:
+            try:
+                if len(str(cell.value)) > max_length:
+                    max_length = len(str(cell.value))
+            except:
+                pass
+        adjusted_width = min(max_length + 2, 50)  # Cap at 50 characters
+        ws.column_dimensions[column_letter].width = adjusted_width
+    
+    # Save the workbook
+    wb.save(filepath)
+
+def write_pdf_file(filepath: Path, content: str) -> None:
+    """Write content to a PDF file using reportlab"""
+    try:
+        # Import reportlab for PDF creation
+        from reportlab.lib.pagesizes import letter
+        from reportlab.pdfgen import canvas as pdf_canvas
+        from reportlab.lib.units import inch
+        
+        # Create a canvas for PDF generation
+        c = pdf_canvas.Canvas(str(filepath), pagesize=letter)
+        width, height = letter
+        
+        # Set up text formatting
+        text_object = c.beginText(1 * inch, height - 1 * inch)
+        text_object.setFont("Helvetica", 12)
+        
+        # Split content into lines and add to PDF
+        lines = content.split('\n')
+        for line in lines:
+            # Handle long lines by wrapping
+            if len(line) > 80:
+                words = line.split(' ')
+                current_line = ''
+                for word in words:
+                    if len(current_line + word) < 80:
+                        current_line += word + ' '
+                    else:
+                        text_object.textLine(current_line)
+                        current_line = word + ' '
+                if current_line:
+                    text_object.textLine(current_line)
+            else:
+                text_object.textLine(line)
+            
+            # Add new page if needed (simple check)
+            if text_object.getY() < 1 * inch:
+                c.drawText(text_object)
+                c.showPage()
+                text_object = c.beginText(1 * inch, height - 1 * inch)
+                text_object.setFont("Helvetica", 12)
+        
+        # Draw the text and save the PDF
+        c.drawText(text_object)
+        c.save()
+        
+    except ImportError:
+        # If reportlab is not available, raise an error
+        raise HTTPException(
+            status_code=500,
+            detail="PDF writing requires reportlab library. Install with: pip install reportlab"
+        )
+
+@app.post("/v1/files/read", response_model=FileResponse)
+async def read_file(request: ReadFileRequest):
+    """
+    Read a file from the scratch directory
+    Supports: txt, docx, xlsx, pdf, png
+    """
+    if not FILE_OPS_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="File operations not available. Install: pip install python-docx openpyxl PyPDF2 reportlab Pillow"
+        )
+    
+    try:
+        # Construct the full file path
+        filepath = SCRATCH_DIR / request.filename
+        
+        # Check if file exists
+        if not filepath.exists():
+            return FileResponse(
+                success=False,
+                message=f"File not found: {request.filename}"
+            )
+        
+        # Determine file extension
+        file_ext = filepath.suffix.lower()
+        
+        # Read file based on extension
+        if file_ext == '.txt':
+            content = read_text_file(filepath)
+            return FileResponse(
+                success=True,
+                message=f"Successfully read {request.filename}",
+                data={'content': content, 'type': 'text'}
+            )
+        
+        elif file_ext == '.docx':
+            content = read_docx_file(filepath)
+            return FileResponse(
+                success=True,
+                message=f"Successfully read {request.filename}",
+                data={'content': content, 'type': 'text'}
+            )
+        
+        elif file_ext in ['.xlsx', '.xls']:
+            content = read_xlsx_file(filepath)
+            return FileResponse(
+                success=True,
+                message=f"Successfully read {request.filename}",
+                data={'content': content, 'type': 'text'}
+            )
+        
+        elif file_ext == '.pdf':
+            content = read_pdf_file(filepath)
+            return FileResponse(
+                success=True,
+                message=f"Successfully read {request.filename}",
+                data={'content': content, 'type': 'text'}
+            )
+        
+        elif file_ext in ['.png', '.jpg', '.jpeg']:
+            image_data = read_png_file(filepath)
+            return FileResponse(
+                success=True,
+                message=f"Successfully read {request.filename}",
+                data={'content': image_data['description'], 'type': 'image', 'image_data': image_data}
+            )
+        
+        else:
+            # Unsupported file type
+            return FileResponse(
+                success=False,
+                message=f"Unsupported file type: {file_ext}. Supported types: txt, docx, xlsx, pdf, png"
+            )
+    
+    except Exception as e:
+        # Handle any errors during file reading
+        return FileResponse(
+            success=False,
+            message=f"Error reading file: {str(e)}"
+        )
+
+@app.post("/v1/files/write", response_model=FileResponse)
+async def write_file(request: WriteFileRequest):
+    """
+    Write content to a file in the scratch directory
+    Supports: txt, docx, xlsx, pdf
+    """
+    if not FILE_OPS_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="File operations not available. Install: pip install python-docx openpyxl PyPDF2 reportlab Pillow"
+        )
+    
+    try:
+        # Construct the full file path
+        filepath = SCRATCH_DIR / request.filename
+        
+        # Determine file extension from filename or format parameter
+        file_ext = filepath.suffix.lower()
+        if not file_ext:
+            # If no extension in filename, use format parameter
+            file_ext = f".{request.format.lower()}"
+            filepath = SCRATCH_DIR / f"{request.filename}{file_ext}"
+        
+        # Write file based on extension
+        if file_ext == '.txt':
+            write_text_file(filepath, request.content)
+        
+        elif file_ext == '.docx':
+            write_docx_file(filepath, request.content)
+        
+        elif file_ext in ['.xlsx', '.xls']:
+            write_xlsx_file(filepath, request.content)
+        
+        elif file_ext == '.pdf':
+            write_pdf_file(filepath, request.content)
+        
+        else:
+            # Unsupported file type
+            return FileResponse(
+                success=False,
+                message=f"Unsupported file type for writing: {file_ext}. Supported types: txt, docx, xlsx, pdf"
+            )
+        
+        # Return success response
+        return FileResponse(
+            success=True,
+            message=f"Successfully wrote {filepath.name}",
+            data={'filepath': str(filepath), 'size': filepath.stat().st_size}
+        )
+    
+    except Exception as e:
+        # Handle any errors during file writing
+        return FileResponse(
+            success=False,
+            message=f"Error writing file: {str(e)}"
+        )
+
+@app.get("/v1/files/list")
+async def list_files():
+    """List all files in the scratch directory"""
+    try:
+        # Get all files in scratch directory
+        files = []
+        for file in SCRATCH_DIR.iterdir():
+            if file.is_file():
+                files.append({
+                    'name': file.name,
+                    'size': file.stat().st_size,
+                    'modified': file.stat().st_mtime,
+                    'extension': file.suffix
+                })
+        
+        # Sort files by modification time (newest first)
+        files.sort(key=lambda x: x['modified'], reverse=True)
+        
+        return {
+            'success': True,
+            'count': len(files),
+            'files': files,
+            'scratch_dir': str(SCRATCH_DIR)
+        }
+    
+    except Exception as e:
+        # Handle any errors during directory listing
+        return {
+            'success': False,
+            'message': f"Error listing files: {str(e)}"
+        }
+
+@app.delete("/v1/files/delete/{filename}")
+async def delete_file(filename: str):
+    """Delete a file from the scratch directory"""
+    try:
+        # Construct the full file path
+        filepath = SCRATCH_DIR / filename
+        
+        # Check if file exists
+        if not filepath.exists():
+            return FileResponse(
+                success=False,
+                message=f"File not found: {filename}"
+            )
+        
+        # Delete the file
+        filepath.unlink()
+        
+        return FileResponse(
+            success=True,
+            message=f"Successfully deleted {filename}"
+        )
+    
+    except Exception as e:
+        # Handle any errors during file deletion
+        return FileResponse(
+            success=False,
+            message=f"Error deleting file: {str(e)}"
+        )
+
+# ============================================================================
+# END FILE OPERATIONS ENDPOINTS
+# ============================================================================
+
 if __name__ == "__main__":
     # Start the server
+    print("🚀 Starting AI Assistant Proxy Server with File Operations...")
+    print(f"📁 Scratch directory: {SCRATCH_DIR}")
     uvicorn.run(
         "proxy_server:app",
         host="0.0.0.0",
