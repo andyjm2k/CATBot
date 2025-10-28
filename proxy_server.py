@@ -978,6 +978,84 @@ async def health_check():
     """Health check endpoint."""
     return {"status": "healthy", "timestamp": time.time()}
 
+# Whisper proxy endpoint to handle CORS
+@app.post("/v1/audio/transcriptions")
+async def proxy_whisper(request: Request):
+    """Proxy Whisper transcription requests to handle CORS."""
+    try:
+        # Get the form data from the request
+        form_data = await request.form()
+        
+        # Get the Whisper endpoint (defaulting to localhost:8001)
+        whisper_endpoint = os.getenv('WHISPER_ENDPOINT', 'http://localhost:8001/v1/audio/transcriptions')
+        
+        print(f"📝 Proxying Whisper request to: {whisper_endpoint}")
+        
+        # Get Authorization header from the request
+        auth_header = request.headers.get('Authorization', '')
+        
+        # Prepare the files and data for forwarding
+        files = {}
+        data = {}
+        
+        for key, value in form_data.items():
+            if hasattr(value, 'read'):  # This is a file
+                # Read the file content
+                file_content = await value.read()
+                files[key] = (value.filename, file_content, value.content_type)
+                print(f"  📎 File: {value.filename} ({len(file_content)} bytes)")
+            else:  # This is a regular form field
+                data[key] = value
+                print(f"  📄 Field: {key} = {value}")
+        
+        # Forward the request to the Whisper service
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                whisper_endpoint,
+                files=files,
+                data=data,
+                headers={'Authorization': auth_header} if auth_header else {}
+            )
+        
+        print(f"✅ Whisper response status: {response.status_code}")
+        print(f"📄 Response content type: {response.headers.get('content-type', 'unknown')}")
+        
+        # Check if the response is successful
+        if response.status_code != 200:
+            print(f"❌ Whisper service returned error: {response.status_code}")
+            print(f"   Response text: {response.text}")
+            return JSONResponse(
+                content={"error": f"Whisper service error: {response.text}"},
+                status_code=response.status_code
+            )
+        
+        # Try to parse the JSON response
+        try:
+            response_data = response.json()
+            print(f"✅ Parsed JSON response: {response_data}")
+            return JSONResponse(content=response_data, status_code=200)
+        except Exception as json_error:
+            print(f"❌ Failed to parse JSON response: {json_error}")
+            print(f"   Raw response text: {response.text[:200]}")
+            # Return the raw text if JSON parsing fails
+            return JSONResponse(
+                content={"text": response.text},
+                status_code=200
+            )
+    
+    except httpx.ConnectError as e:
+        print(f"❌ Connection error: Could not connect to Whisper service at {whisper_endpoint}")
+        print(f"   Make sure the Whisper service is running on port 8001")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Could not connect to Whisper service. Make sure it's running on port 8001."
+        )
+    except Exception as e:
+        print(f"❌ Whisper proxy error: {e}")
+        import traceback
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to proxy Whisper request: {str(e)}")
+
 if __name__ == "__main__":
     # Start the server
     uvicorn.run(

@@ -2013,10 +2013,10 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
                 // Clear previous recordings
                 audioData = [];
                 
-                // Clear the text areas and message history
+                // Clear the text areas (keep message history intact)
                 userInput.value = '';
                 responseOutput.value = '';
-                clearMessageHistory();
+                // clearMessageHistory(); // Commented out to preserve chat history when using STT
 
                 // Connect the nodes and start recording
                 mediaStreamSource.connect(recorderNode);
@@ -2147,7 +2147,8 @@ function saveWAVFile(wavBlob) {
 
         async function sendAudioToWhisper(audioBlob) {
             const apiKey = apiKeyInput.value.trim();
-            const whisperEndpoint = 'http://localhost:8001/v1/audio/transcriptions';
+            // Use the proxy server endpoint which has CORS configured
+            const whisperEndpoint = 'http://localhost:8002/v1/audio/transcriptions';
 
             const formData = new FormData();
             formData.append('file', audioBlob, 'recording.wav');
@@ -2165,11 +2166,14 @@ function saveWAVFile(wavBlob) {
                 const data = await response.json();
                 console.log('Whisper response:', data);
                 if (data.text) {
-                    // Clear the input before adding new text
-                    userInput.value = data.text + ' ';
+                    // Set the input with the transcribed text
+                    const transcribedText = data.text.trim();
+                    userInput.value = transcribedText + ' ';
                     status.textContent = "Transcription successful.";
-                    // Immediately send the transcribed text to OpenAI
-                    fetchOpenAIResponse(userInput.value.trim());
+                    
+                    // Send the transcribed text to OpenAI
+                    // Note: fetchOpenAIResponse will add the message to chat history
+                    fetchOpenAIResponse(transcribedText);
                 } else {
                     console.error('Unexpected response format:', data);
                     status.textContent = "Transcription failed. Please try again.";

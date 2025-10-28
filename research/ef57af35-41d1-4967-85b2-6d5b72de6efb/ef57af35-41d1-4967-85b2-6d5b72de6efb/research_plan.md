@@ -1,0 +1,38 @@
+# Research Plan
+
+- [ ] Define scope, core concepts and key metrics
+- [ ] Clarify terms (EV, NEV, BEV, PHEV, FCEV), geographic scope (mainland China market, exports), and timeframe (e.g., 2015–2025 and projections to 2030).
+- [ ] Specify primary metrics to track: sales volumes, production capacity, market share, penetration rate (% of new vehicle sales), export volumes and destinations, price bands, battery capacity (GWh), average vehicle BOM cost, and charging infrastructure (stations/chargers per 100 km or per 1,000 vehicles).
+- [ ] Identify required outputs (quantitative forecast, scenario analysis, policy recommendations for Australia).
+- [ ] Map the growth trajectory and drivers of the Chinese EV market
+- [ ] Collect historical and recent data (annual and monthly) on production, sales, and registrations from sources such as CAAM, China MIIT, National Bureau of Statistics, BloombergNEF, IEA, and manufacturers’ reports.
+- [ ] Analyze policy drivers (subsidies, NEV quotas, vehicle purchase tax, local incentives, city restrictions), infrastructure investments (charging network roll-out), and macro factors (urbanization, income).
+- [ ] Output: timeline and decomposition of growth drivers with quantitative contribution estimates.
+- [ ] Profile supply chain, technology and major market players
+- [ ] Map the EV value chain in China: vehicle OEMs (BYD, SAIC, Geely, NIO, Xpeng, Tesla Shanghai), battery producers (CATL, BYD, Gotion), power electronics and semiconductor suppliers, materials (lithium, nickel, cobalt), and component suppliers.
+- [ ] Assess technology trends and cost curves: battery chemistry shifts (LFP vs NMC), pack cost per kWh, electrified powertrain components, vehicle software/OTA, and local content shares.
+- [ ] Output: supply-chain map, concentration and dependency analysis, and technology roadmap.
+- [ ] Quantify China’s EV export strategy and competitive positioning
+- [ ] Gather trade data on Chinese EV exports by model, destination (Southeast Asia, Europe, Middle East, Latin America, Africa), and price tier; use customs data and industry reports.
+- [ ] Analyze pricing strategies, localization (CKD/CBU), brand positioning, after-sales networks, and regulatory compliance (safety, emissions, homologation).
+- [ ] Output: assessment of Chinese EV competitiveness in export markets and likely global expansion pathways.
+- [ ] Assess implications for the Australian automotive market and value chain
+- [ ] Identify direct impacts: import competition (price and model mix), used car flows, dealer/service network pressures, and potential changes in consumer preferences for EVs.
+- [ ] Identify indirect impacts and opportunities: demand for Australian minerals (lithium, nickel, rare earths), participation in battery supply chains, green hydrogen and component exports, EV recycling and second-life markets.
+- [ ] Map which Australian stakeholders are affected (OEMs, importers, dealers, mining companies, energy utilities, charging providers, regulators).
+- [ ] Analyze policy, trade and regulatory interactions
+- [ ] Review China’s export-related policies and Australia’s trade policy, tariffs, vehicle standards, EV incentives, emissions targets and critical minerals strategy.
+- [ ] Examine non-tariff barriers, safety and homologation requirements, vehicle import rules, and potential retaliation or protection measures.
+- [ ] Output: list of regulatory levers Australia can use and likely constraints under WTO/ASEAN/China relationships.
+- [ ] Develop quantitative scenarios and economic impact analysis
+- [ ] Build 3–4 scenarios (e.g., Status Quo, Rapid Chinese Export Growth, Protectionist Response, Australian EV Build-out) with timelines to 2030.
+- [ ] For each scenario, forecast Australian market outcomes: EV penetration, import shares, price impacts, employment changes in automotive and mining sectors, trade balance effects, and fiscal impacts.
+- [ ] Use sensitivity analysis on key variables (Chinese export volume growth, price declines, Australian incentives).
+- [ ] Conduct stakeholder interviews, case studies and risk assessment
+- [ ] Interview Australian industry stakeholders (dealers, importers, mining firms, battery manufacturers, utilities), policymakers and independent experts; also consult China-market specialists.
+- [ ] Prepare case studies of comparable markets that experienced Chinese EV competition (e.g., Southeast Asian markets, parts of Europe) to extract lessons.
+- [ ] Identify key risks (supply chain disruptions, technology lock-in, commodity price volatility, geopolitical escalation) and mitigants.
+- [ ] Synthesize findings and produce actionable recommendations
+- [ ] Consolidate evidence into strategic recommendations for Australian industry and policymakers: trade and procurement policy, incentives for domestic EV uptake, critical minerals strategy, support for local battery and component manufacturing, skills and workforce plans, industrial partnerships with Chinese firms, and standards/homologation reforms.
+- [ ] Deliverables: executive summary, data annex, scenario models, stakeholder map, and an implementation roadmap with short-, medium- and long-term actions and suggested indicators to monitor.
+- [ ] Propose a timeline and responsibilities for follow-up monitoring and periodic reassessment (e.g., quarterly data updates, annual strategic review).
