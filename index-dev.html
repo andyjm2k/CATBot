@@ -1187,6 +1187,13 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
         let ttsLipSyncIntervalId = null; // Interval used by SpeechSynthesis fallback
         let ttsRafId = 0; // requestAnimationFrame id used by audio analyser loop
         let ttsCleanupFns = []; // Set of cleanup callbacks for active audio graph/listeners
+        let ttsAnalyserNode = null; // Shared analyser used for PCM16 streaming lip sync
+        let ttsAnalyserGainNode = null; // Gain node feeding analyser output to speakers
+        let ttsAnalyserDataArray = null; // Reusable byte buffer for analyser samples
+        let ttsAnalyserLoopActive = false; // Tracks whether analyser-driven lip sync loop is running
+        let ttsStreamActive = false; // Flag indicating an active Chatterbox PCM stream
+        let ttsPcmActiveSources = 0; // Count of PCM buffer sources currently playing
+        let ttsAnalyserStopTimer = null; // Timer used to delay cleanup after audio ends
 
         // Global VRMA actions
         let vrmLoveVrmaAction = null; // Prepared AnimationAction for love VRMA
@@ -2367,6 +2374,142 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
             }; // End return object
         } // End createWebMOpusMSE
         
+        function ensureChatterboxLipSyncGraph() { // Ensure analyser graph exists for PCM16 playback
+            if (!window.__opus) { window.__opus = {}; } // Initialize opus container if missing
+            let ctx = window.__opus.audioCtx; // Reuse existing audio context when available
+            if (!ctx) { // Create context if we do not already have one
+                ctx = new (window.AudioContext || window.webkitAudioContext)(); // Create audio context
+                window.__opus.audioCtx = ctx; // Persist context for reuse
+                window.__opus.playhead = 0; // Initialize playhead tracking
+            }
+
+            if (!ttsAnalyserNode || ttsAnalyserNode.context !== ctx) { // Rebuild analyser chain when context changes
+                try { if (ttsAnalyserNode) ttsAnalyserNode.disconnect(); } catch (_) {} // Detach old analyser if present
+                try { if (ttsAnalyserGainNode) ttsAnalyserGainNode.disconnect(); } catch (_) {} // Detach old gain node
+                ttsAnalyserNode = ctx.createAnalyser(); // Create analyser node for amplitude tracking
+                ttsAnalyserNode.fftSize = 1024; // Match analyser resolution with audio-element path
+                ttsAnalyserNode.smoothingTimeConstant = 0.7; // Apply smoothing to reduce jitter
+                ttsAnalyserGainNode = ctx.createGain(); // Gain node to feed analyser output to speakers
+                ttsAnalyserGainNode.gain.value = 1.0; // Unity gain to preserve original volume
+                ttsAnalyserNode.connect(ttsAnalyserGainNode); // Route analyser output through gain
+                ttsAnalyserGainNode.connect(ctx.destination); // Connect gain to destination so audio is audible
+            }
+
+            if (!ttsAnalyserDataArray || ttsAnalyserDataArray.length !== ttsAnalyserNode.fftSize) { // Ensure buffer matches analyser size
+                ttsAnalyserDataArray = new Uint8Array(ttsAnalyserNode.fftSize); // Allocate reusable buffer
+            }
+
+            if (ttsAnalyserStopTimer) { // Clear pending stop timers when new audio is starting
+                clearTimeout(ttsAnalyserStopTimer);
+                ttsAnalyserStopTimer = null;
+            }
+
+            return window.__opus.audioCtx; // Return prepared audio context
+        } // End ensureChatterboxLipSyncGraph
+
+        function startLipSyncFromAnalyserNode() { // Start analyser-driven lip sync loop
+            try {
+                if (!ttsAnalyserNode) return; // Guard when analyser is unavailable
+
+                if (!ttsAnalyserDataArray || ttsAnalyserDataArray.length !== ttsAnalyserNode.fftSize) { // Ensure buffer exists
+                    ttsAnalyserDataArray = new Uint8Array(ttsAnalyserNode.fftSize); // Allocate buffer for analyser samples
+                }
+
+                if (ttsAnalyserLoopActive) return; // Avoid spawning duplicate RAF loops
+
+                let smoothed = 0; // Smoothed RMS envelope
+                const attack = 0.6; // Attack coefficient for rising amplitude
+                const release = 0.15; // Release coefficient for falling amplitude
+                const threshold = 0.03; // Minimum RMS required before opening the mouth
+
+                const step = () => { // Per-frame analyser sampling callback
+                    if (!ttsAnalyserNode) { // Abort if analyser was disposed
+                        ttsAnalyserLoopActive = false;
+                        ttsRafId = 0;
+                        return;
+                    }
+
+                    ttsAnalyserNode.getByteTimeDomainData(ttsAnalyserDataArray); // Sample current waveform
+                    let sum = 0; // Accumulator for RMS energy
+                    for (let i = 0; i < ttsAnalyserDataArray.length; i++) { // Iterate over analyser buffer
+                        const v = (ttsAnalyserDataArray[i] - 128) / 128; // Convert byte sample to [-1, 1]
+                        sum += v * v; // Accumulate squared amplitude
+                    }
+
+                    const rms = Math.sqrt(sum / ttsAnalyserDataArray.length); // Compute RMS amplitude
+                    if (rms > smoothed) { // Attack branch
+                        smoothed += (rms - smoothed) * attack;
+                    } else { // Release branch
+                        smoothed += (rms - smoothed) * release;
+                    }
+
+                    const scaled = smoothed <= threshold ? 0 : Math.min(1, (smoothed - threshold) * 6.0); // Map to [0,1]
+
+                    if (live2dModel) { // Apply to Live2D mouth
+                        live2dModel.internalModel.coreModel.setParameterValueById('ParamMouthOpenY', scaled);
+                    }
+
+                    const vrmModeToggle = document.getElementById('vrm-mode'); // Cache VRM toggle reference
+                    if (vrmModel && vrmModeToggle && vrmModeToggle.checked) { // Apply to VRM mouth when active
+                        animateVRMLipSync(scaled);
+                    }
+
+                    if (ttsStreamActive || ttsPcmActiveSources > 0 || smoothed > 0.0005) { // Keep looping while audio is active
+                        ttsRafId = requestAnimationFrame(step);
+                    } else { // Otherwise stop and reset mouth
+                        ttsRafId = 0;
+                        ttsAnalyserLoopActive = false;
+                        if (live2dModel) {
+                            live2dModel.internalModel.coreModel.setParameterValueById('ParamMouthOpenY', 0);
+                        }
+                        if (vrmModel && vrmModeToggle && vrmModeToggle.checked) {
+                            animateVRMLipSync(0);
+                        }
+                    }
+                }; // End step function
+
+                ttsAnalyserLoopActive = true; // Mark loop active so we do not start duplicates
+                step(); // Kick off analyser sampling immediately
+            } catch (e) {
+                console.warn('startLipSyncFromAnalyserNode failed:', e); // Log analyser errors but do not crash
+            }
+        } // End startLipSyncFromAnalyserNode
+
+        function stopChatterboxLipSync(immediate = false) { // Stop analyser-based lip sync with optional delay
+            if (immediate) {
+                ttsStreamActive = false; // Clear stream-active flag immediately
+                ttsPcmActiveSources = 0; // Reset active source count
+                if (ttsAnalyserStopTimer) { // Clear pending delayed stops
+                    clearTimeout(ttsAnalyserStopTimer);
+                    ttsAnalyserStopTimer = null;
+                }
+                if (ttsRafId) { // Cancel any pending animation frame
+                    try { cancelAnimationFrame(ttsRafId); } catch (_) {}
+                    ttsRafId = 0;
+                }
+                ttsAnalyserLoopActive = false; // Mark loop inactive
+                if (live2dModel) { // Close Live2D mouth
+                    live2dModel.internalModel.coreModel.setParameterValueById('ParamMouthOpenY', 0);
+                }
+                const vrmModeToggle = document.getElementById('vrm-mode');
+                if (vrmModel && vrmModeToggle && vrmModeToggle.checked) { // Close VRM mouth
+                    animateVRMLipSync(0);
+                }
+                return; // Exit after immediate cleanup
+            }
+
+            if (ttsAnalyserStopTimer) { // Clear existing timer before scheduling new one
+                clearTimeout(ttsAnalyserStopTimer);
+            }
+
+            ttsAnalyserStopTimer = setTimeout(() => { // Delay cleanup slightly to allow tail audio to finish
+                if (ttsStreamActive || ttsPcmActiveSources > 0) { // Abort if audio resumed
+                    return;
+                }
+                stopChatterboxLipSync(true); // Otherwise perform immediate cleanup
+            }, 250);
+        } // End stopChatterboxLipSync
+
         // Play PCM16 delta chunk using Web Audio API (mirrors existing schedule pattern)
         function playPcm16Delta(base64, sampleRate = 24000, channels = 1) { // Function to decode and play PCM16 audio chunk
             const bin = atob(base64); // Decode base64 to binary string
@@ -2386,7 +2529,11 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
             } // End normalization loop
             
             // Reuse existing AudioContext and playhead scheduling pattern
-            const ctx = window.__opus?.audioCtx || new (window.AudioContext || window.webkitAudioContext)(); // Get or create audio context
+            const ctx = ensureChatterboxLipSyncGraph(); // Prepare shared audio context and analyser chain
+            if (ctx.state === 'suspended') { // Resume context if autoplay policies suspended it
+                try { ctx.resume(); } catch (_) {} // Ignore resume errors (will resume on user gesture)
+            }
+
             const buf = ctx.createBuffer(channels, len, sampleRate); // Create audio buffer with specified channels, length, and sample rate
             
             // Set channel data from decoded PCM
@@ -2407,8 +2554,26 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
             // Create and schedule audio source (same pattern as existing schedule function)
             const src = ctx.createBufferSource(); // Create buffer source node
             src.buffer = buf; // Set decoded buffer
-            src.connect(ctx.destination); // Connect to audio output
-            
+            if (ttsAnalyserNode) { // Route through analyser when available for lip sync
+                src.connect(ttsAnalyserNode);
+            } else {
+                src.connect(ctx.destination); // Fallback directly to destination if analyser missing
+            }
+
+            ttsPcmActiveSources += 1; // Track active sources so we know when playback has finished
+            const handleEnded = () => { // Cleanup when buffer playback completes
+                if (src) {
+                    try { src.removeEventListener('ended', handleEnded); } catch (_) {}
+                }
+                if (ttsPcmActiveSources > 0) {
+                    ttsPcmActiveSources -= 1;
+                }
+                if (ttsPcmActiveSources === 0) { // Schedule mouth close once final buffer finishes
+                    stopChatterboxLipSync(false);
+                }
+            };
+            src.addEventListener('ended', handleEnded, { once: true }); // Ensure cleanup runs only once
+
             // Keep the same playhead logic (reuse from existing scheduler)
             window.__opus.playhead = Math.max(ctx.currentTime, window.__opus.playhead || 0); // Calculate start time with playhead overlap
             src.start(window.__opus.playhead); // Schedule playback at playhead position
@@ -2463,6 +2628,7 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
                     const errText = await res.text().catch(() => ''); // Attempt to read error body
                     console.error('❌ Chatterbox TTS error:', res.status, errText); // Log details for diagnostics
                     // Fallback to browser speech if available
+                    stopChatterboxLipSync(true); // Ensure any analyser-driven lip sync is reset
                     textToSpeechFallback(text); // Use backup speaker for continuity
                     return; // Exit early
                 } // End error response branch
@@ -2473,24 +2639,24 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
                 
                 if (!isSSE) { // If not SSE format
                     console.warn('⚠️ Expected SSE format but got:', ct, '- falling back to browser TTS'); // Log format mismatch
+                    stopChatterboxLipSync(true); // Reset lip sync state before fallback
                     textToSpeechFallback(text); // Fall back to browser TTS
                     return; // Exit early
                 } // End SSE check
                 
-                // Ensure audio context is available (reuse existing or create new)
-                if (!window.__opus?.audioCtx) { // Check if audio context exists
-                    window.__opus = window.__opus || {}; // Initialize __opus object if needed
-                    window.__opus.audioCtx = new (window.AudioContext || window.webkitAudioContext)(); // Create new audio context
-                    window.__opus.playhead = 0; // Initialize playhead
-                } // End audio context check
-                
-                // Initialize playhead if not already set
+                // Prepare analyser-driven lip sync graph for PCM streaming
+                stopChatterboxLipSync(true); // Reset any previous PCM lip sync loop before starting a new stream
+                const pcmCtx = ensureChatterboxLipSyncGraph(); // Ensure audio context and analyser exist
+                if (pcmCtx.state === 'suspended') { // Resume context if required by autoplay policies
+                    try { pcmCtx.resume(); } catch (_) {} // Swallow resume errors; user interaction will resume if needed
+                }
+                ttsStreamActive = true; // Mark stream active so analyser loop stays alive between chunks
+                startLipSyncFromAnalyserNode(); // Start analyser-driven lip sync updates
+                ttsCleanupFns.push(() => stopChatterboxLipSync(true)); // Ensure cleanup when speech is cancelled elsewhere
+
                 if (window.__opus.playhead === undefined) { // Check if playhead exists
                     window.__opus.playhead = 0; // Initialize playhead to 0
                 } // End playhead initialization
-                
-                // Audio context is automatically resumed on first user action (send button, Enter key, record button)
-                // No need to resume here - resumeAudioContextOnce() handles it
                 
                 // Capture sample_rate and channels from speech.audio.info event
                 let ttsSampleRate = 24000; // Default sample rate (fallback)
@@ -2510,16 +2676,22 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
                     onDelta: (b64) => playPcm16Delta(b64, ttsSampleRate, ttsChannels), // Decode and play each PCM16 delta chunk
                     onDone: () => { // Handle stream completion
                         console.log('🎵 SSE stream complete (PCM16)'); // Log completion
+                        ttsStreamActive = false; // Mark stream inactive so lip sync can wind down
+                        stopChatterboxLipSync(false); // Allow mouth to close after buffers finish
                         // Reset playhead for next stream (optional)
                         // window.__opus.playhead = 0; // Uncomment if you want to reset between streams
                     }, // End onDone handler
                     onError: (e) => { // Handle parsing errors
                         console.error('❌ SSE parsing error:', e); // Log error
+                        ttsStreamActive = false; // Mark stream inactive on error
+                        stopChatterboxLipSync(false); // Schedule cleanup for analyser-driven lip sync
                         textToSpeechFallback(text); // Fall back to browser TTS if error occurs
                     } // End onError handler
                 }); // End streamSSE call
             } catch (e) { // Catch any runtime errors
                 console.error('❌ Chatterbox TTS failed:', e); // Log the error cause
+                ttsStreamActive = false; // Ensure stream-active flag is cleared on failure
+                stopChatterboxLipSync(false); // Schedule analyser cleanup so mouth closes gracefully
                 // Fallback to browser speech if available
                 textToSpeechFallback(text); // Ensure speech still happens
             } // End try/catch
