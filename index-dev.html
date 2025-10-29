@@ -512,6 +512,14 @@
             max-height: 90vh;
             overflow-y: auto;
             box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+            position: relative;
+            transition: transform 0.3s ease, margin-left 0.3s ease;
+            margin-left: 0;
+        }
+
+        .conversation-sidebar.collapsed {
+            transform: translateX(-100%);
+            margin-left: -250px;
         }
 
         .conversation-sidebar h3 {
@@ -616,6 +624,37 @@
             border-radius: 3px;
             margin: 0;
         }
+
+        /* Sidebar Toggle Button */
+        .sidebar-toggle-btn {
+            position: fixed;
+            left: 10px;
+            top: 50%;
+            transform: translateY(-50%);
+            background: #007BFF;
+            color: white;
+            border: none;
+            border-radius: 0 5px 5px 0;
+            padding: 15px 8px;
+            cursor: pointer;
+            z-index: 1000;
+            box-shadow: 2px 0 8px rgba(0, 0, 0, 0.2);
+            transition: left 0.3s ease;
+            width: auto;
+            min-width: auto;
+        }
+
+        .sidebar-toggle-btn:hover {
+            background: #0056b3;
+        }
+
+        .sidebar-toggle-btn.sidebar-open {
+            left: 270px;
+        }
+
+        .sidebar-toggle-btn i {
+            font-size: 1.2rem;
+        }
     </style>
     <!-- Replace the script section in the head -->
     <script src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js"></script>
@@ -646,11 +685,122 @@
     <!-- Dependencies for PDF to PowerPoint conversion -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/pptxgenjs@3.12.0/dist/pptxgen.bundle.js"></script>
+    
+    <!-- Import Map to resolve bare module specifiers for OggOpusDecoder -->
+    <script type="importmap">
+    {
+      "imports": {
+        "@wasm-audio-decoders/common": "./node_modules/@wasm-audio-decoders/common/index.js",
+        "@eshaz/web-worker": "./node_modules/@eshaz/web-worker/browser.js",
+        "opus-decoder": "./node_modules/opus-decoder/index.js",
+        "codec-parser": "./node_modules/codec-parser/index.js",
+        "simple-yenc": "./node_modules/simple-yenc/dist/esm.js"
+      }
+    }
+    </script>
+    
+    <!-- Opus decoder for client-side Opus audio decoding (worker-based, no WASM) -->
+    <script type="module">
+      // ---- Opus decoder bootstrap (JS-only + WebWorker, no WASM needed) ----
+      async function initOpusDecoder() {
+        // Import the small ESM wrapper
+        const mod = await import('./libs/ogg-opus-decoder/OggOpusDecoder.js');
+
+        // Normalize export shapes across versions
+        const OggOpusDecoder = mod?.default || mod?.OggOpusDecoder;
+        if (!OggOpusDecoder) throw new Error('OggOpusDecoder export not found');
+
+        // Tell the wrapper where to find the decoder script and the worker script.
+        // Most builds accept these two hints:
+        const initOpts = {
+          // The actual decoder bundle (no CORS because same-origin)
+          decoderURL: './libs/ogg-opus-decoder/ogg-opus-decoder.min.js',
+          // The worker wrapper that postMessages PCM back to us
+          workerURL: './libs/ogg-opus-decoder/OggOpusDecoderWebWorker.js'
+        };
+
+        // Some builds don't need/accept init(); we try both paths safely.
+        if (typeof OggOpusDecoder.init === 'function') {
+          try { await OggOpusDecoder.init(initOpts); } catch { /* ok if not required */ }
+        }
+
+        // Audio scheduling helpers
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        let playhead = 0;
+        const schedule = (channelData, sampleRate) => {
+          // Validate channelData structure
+          if (!channelData || !Array.isArray(channelData) || channelData.length === 0) {
+            console.warn('⚠️ Invalid channelData:', channelData);
+                        return;
+                    }
+          // Handle both Float32Array[] and nested array structures
+          const firstChannel = channelData[0];
+          if (!firstChannel || firstChannel.length === 0) {
+            console.warn('⚠️ Empty channel data');
+            return;
+          }
+          
+          const ch = channelData.length; // Number of channels
+          const len = firstChannel.length; // Samples per channel
+          const buf = audioCtx.createBuffer(ch, len, sampleRate); // Create audio buffer
+          
+          // Copy channel data into buffer
+          for (let i = 0; i < ch; i++) {
+            buf.getChannelData(i).set(channelData[i]); // Set channel data from decoded audio
+          }
+          
+          // Create and schedule audio source
+          const src = audioCtx.createBufferSource(); // Create buffer source node
+          src.buffer = buf; // Set decoded buffer
+          src.connect(audioCtx.destination); // Connect to audio output
+          const t = Math.max(audioCtx.currentTime, playhead); // Calculate start time
+          src.start(t); // Schedule playback
+          playhead = t + buf.duration - 0.02; // Update playhead with 20ms overlap to hide seams
+          
+          console.log('🔊 Scheduled audio chunk:', len, 'samples,', sampleRate, 'Hz,', ch, 'channels, duration:', buf.duration.toFixed(3), 's');
+        };
+
+        // Decoder instance - OggOpusDecoder with onDecode callback for streaming playback
+        const decoder = new OggOpusDecoder({
+          onDecode: ({ channelData, sampleRate }) => {
+            // Call schedule function to play decoded audio
+            schedule(channelData, sampleRate);
+          },
+          decoderURL: './libs/ogg-opus-decoder/ogg-opus-decoder.min.js',
+          workerURL: './libs/ogg-opus-decoder/OggOpusDecoderWebWorker.js'
+        });
+
+        // Expose to your SSE pipeline
+        window.__opus = {
+          ready: true,
+          decoder,
+          audioCtx,
+          schedule, // Expose schedule function for audio playback
+          resume: () => audioCtx.resume(),
+          playhead: 0 // Initialize playhead for PCM16 scheduling
+        };
+        console.log('✅ Opus decoder ready (worker, JS-only)');
+      }
+
+      try { await initOpusDecoder(); }
+      catch (e) {
+        console.error('❌ Opus decoder init failed:', e);
+        // Optional fallback to the big ML bundle:
+        // 1) swap decoderURL to ./libs/ogg-opus-decoder/ogg-opus-decoder.opus-ml.min.js
+        // 2) re-run initOpusDecoder()
+        window.__opus = { ready: false };
+      }
+    </script>
 </head>
 <body>
+    <!-- Sidebar Toggle Button -->
+    <button class="sidebar-toggle-btn sidebar-open" id="sidebar-toggle-btn" title="Toggle Conversations">
+        <i class="fas fa-chevron-left"></i>
+    </button>
+
     <div class="container">
         <!-- Conversation Sidebar -->
-        <div class="conversation-sidebar">
+        <div class="conversation-sidebar" id="conversation-sidebar">
             <h3>Conversations</h3>
             <button class="new-conversation-btn" id="new-conversation-btn">
                 <i class="fas fa-plus"></i> New Chat
@@ -719,6 +869,44 @@
                     <select id="voice-dropdown">
                         <option value="">Loading voices...</option>
                     </select>
+
+                    <hr style="margin: 20px 0; border: 0; border-top: 1px solid #ddd;">
+
+                    <label for="tts-service-toggle">TTS Service:</label>
+                    <div class="toggle-container">
+                        <input type="radio" id="tts-service-microsoft" name="tts-service" value="microsoft" checked>
+                        <label for="tts-service-microsoft">Microsoft</label>
+                        <input type="radio" id="tts-service-openai" name="tts-service" value="openai">
+                        <label for="tts-service-openai">OpenAI-compatible (Chatterbox)</label>
+                    </div>
+                    <span class="helper-text">Choose between Microsoft browser TTS or local Chatterbox TTS API</span>
+
+                    <label for="tts-endpoint-url">TTS API Endpoint:</label>
+                    <input type="text" id="tts-endpoint-url" value="http://localhost:4123/v1" placeholder="http://localhost:4123/v1">
+                    <span class="helper-text">Endpoint for OpenAI-compatible TTS service (Chatterbox default: http://localhost:4123/v1)</span>
+
+                    <label for="tts-model-dropdown">TTS Model:</label>
+                    <select id="tts-model-dropdown">
+                        <option value="tts-1">tts-1</option>
+                        <option value="tts-1-hd">tts-1-hd</option>
+                    </select>
+                    <span class="helper-text">Model for OpenAI-compatible TTS (tts-1 is faster, tts-1-hd is higher quality)</span>
+
+                    <label for="tts-voice-dropdown">TTS Voice:</label>
+                    <div style="display: flex; gap: 10px; align-items: center;">
+                        <select id="tts-voice-dropdown" style="flex: 1;">
+                            <option value="alloy">alloy</option>
+                            <option value="echo">echo</option>
+                            <option value="fable">fable</option>
+                            <option value="onyx">onyx</option>
+                            <option value="nova">nova</option>
+                            <option value="shimmer">shimmer</option>
+                        </select>
+                        <button type="button" id="refresh-tts-voices-btn" style="width: auto; margin: 0; padding: 8px 12px;" title="Refresh voices from TTS endpoint">
+                            <i class="fas fa-sync-alt"></i>
+                        </button>
+                    </div>
+                    <span class="helper-text">Voice for OpenAI-compatible TTS (or your cloned voices from Chatterbox). Click refresh to load voices from the TTS endpoint.</span>
 
                     <div id="webcam-preview-container" style="display: none;">
                         <label>Webcam Preview:</label>
@@ -841,9 +1029,35 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
         const apiKeyInput = document.getElementById('api-key');
         const systemPromptInput = document.getElementById('system-prompt');
         const voiceDropdown = document.getElementById('voice-dropdown');
+        const ttsServiceMicrosoft = document.getElementById('tts-service-microsoft'); // Microsoft TTS service radio
+        const ttsServiceOpenAI = document.getElementById('tts-service-openai'); // OpenAI-compatible TTS service radio
+        const ttsEndpointInput = document.getElementById('tts-endpoint-url'); // TTS endpoint input
+        const ttsModelDropdown = document.getElementById('tts-model-dropdown'); // TTS model dropdown
+        const ttsVoiceDropdown = document.getElementById('tts-voice-dropdown'); // TTS voice dropdown
+        const refreshTtsVoicesBtn = document.getElementById('refresh-tts-voices-btn'); // Refresh TTS voices button
         const SELECTED_VOICE_STORAGE_KEY = 'selectedVoiceURI'; // Persist selected voice for this browser session
         const PROXY_BASE_URL = 'http://localhost:8002';
         let voices = [];
+        let audioContextResumed = false; // Flag to track if audio context has been resumed after first user action
+        
+        // Resume audio context on first user action (required for autoplay policy and lip sync)
+        async function resumeAudioContextOnce() { // Function to resume audio context once after first user gesture
+            if (audioContextResumed) return; // Exit early if already resumed
+            audioContextResumed = true; // Mark as resumed
+            
+            try { // Guard resume operations
+                // Resume Opus decoder audio context if available
+                if (window.__opus?.audioCtx && window.__opus.audioCtx.state === 'suspended') { // Check if Opus decoder context is suspended
+                    await window.__opus.resume(); // Resume audio context to satisfy autoplay policy
+                    console.log('✅ Audio context resumed (Opus decoder)'); // Log successful resume
+                } // End Opus decoder resume check
+                
+                // Resume any other audio contexts that might be created for lip sync
+                // This ensures audio can play automatically after user gesture
+            } catch (e) { // Catch resume errors
+                console.warn('⚠️ Failed to resume audio context:', e); // Log resume failure (non-critical)
+            } // End resume try/catch
+        } // End resumeAudioContextOnce
         
         // Message history management
         let displayedMessages = []; // Array to store displayed messages (last 25)
@@ -1553,6 +1767,81 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
             return baseModel;
         }
 
+        // Fetch TTS voices from OpenAI-compatible endpoint (e.g., Chatterbox)
+        async function fetchTtsVoices() {
+            try {
+                // Get the TTS endpoint
+                const endpoint = (ttsEndpointInput && ttsEndpointInput.value && ttsEndpointInput.value.trim()) 
+                    ? ttsEndpointInput.value.trim().replace(/\/$/, '') 
+                    : 'http://localhost:4123/v1';
+                
+                // Use proxy server to handle CORS
+                const proxyUrl = `${PROXY_BASE_URL}/v1/proxy/tts/voices?endpoint=${encodeURIComponent(endpoint)}`;
+                
+                console.log('Fetching voices through proxy:', proxyUrl);
+                
+                // Fetch voices from the TTS endpoint through proxy
+                const response = await fetch(proxyUrl, {
+                    method: 'GET',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
+                
+                if (!response.ok) {
+                    console.error('Failed to fetch voices:', response.status, response.statusText);
+                    return;
+                }
+                
+                const responseData = await response.json();
+                console.log('Fetched voices:', responseData);
+                
+                // Extract voices array from the response (handle both array and object formats)
+                let voicesData = responseData;
+                if (responseData && typeof responseData === 'object' && responseData.voices) {
+                    // Response is an object with a 'voices' property
+                    voicesData = responseData.voices;
+                } else if (!Array.isArray(responseData)) {
+                    // Response is neither an array nor an object with voices property
+                    console.warn('Unexpected voices response format:', responseData);
+                    voicesData = [];
+                }
+                
+                // Clear existing options
+                ttsVoiceDropdown.innerHTML = '';
+                
+                // Add default OpenAI voices first
+                const defaultVoices = ['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer'];
+                defaultVoices.forEach(voice => {
+                    const option = document.createElement('option');
+                    option.value = voice;
+                    option.textContent = voice;
+                    ttsVoiceDropdown.appendChild(option);
+                });
+                
+                // Add fetched voices from Chatterbox
+                if (Array.isArray(voicesData)) {
+                    console.log(`Adding ${voicesData.length} voices from Chatterbox`);
+                    voicesData.forEach(voice => {
+                        const option = document.createElement('option');
+                        option.value = voice.name;
+                        // Show filename if metadata is not available
+                        const displayName = voice.name + (voice.metadata?.language ? ` (${voice.metadata.language})` : 
+                            (voice.filename ? ` - ${voice.filename}` : ''));
+                        option.textContent = displayName;
+                        ttsVoiceDropdown.appendChild(option);
+                    });
+                } else {
+                    console.warn('Voices data is not an array:', voicesData);
+                }
+                
+                console.log('TTS voices updated successfully');
+                saveToolSettings(); // Save the updated voice list state
+            } catch (error) {
+                console.error('Error fetching TTS voices:', error);
+            }
+        }
+
         // Populate voice list for Text-to-Speech
         function loadVoices() {
             // Fetch available voices and rebuild the dropdown without losing the user's selection
@@ -1692,8 +1981,11 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
             try { if (ttsRafId) { cancelAnimationFrame(ttsRafId); ttsRafId = 0; } } catch (_) {}
             try { ttsCleanupFns.forEach(fn => { try { fn(); } catch(_){} }); ttsCleanupFns = []; } catch (_) {}
 
-            // Prefer server TTS when API key is present so we can drive true amplitude-based lip sync
-            if (typeof apiKey === 'string' && apiKey.trim().length > 0) { // If an API key is available
+            // Check TTS service selection - use OpenAI-compatible TTS when selected or when API key is present
+            const useOpenAITTS = (ttsServiceOpenAI && ttsServiceOpenAI.checked) || 
+                                 (typeof apiKey === 'string' && apiKey.trim().length > 0 && !ttsServiceMicrosoft.checked); // Use OpenAI TTS if OpenAI-compatible is selected or API key is present and Microsoft is not explicitly selected
+            
+            if (useOpenAITTS) { // If OpenAI-compatible TTS should be used
                 speakWithOpenAITTS(text); // Use OpenAI TTS which returns audio bytes we can analyze
                 return; // Do not proceed with browser SpeechSynthesis path
             }
@@ -1808,62 +2100,562 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
             }
         }
 
-        // Speak using OpenAI TTS endpoint and drive lip sync from the actual audio waveform
-        async function speakWithOpenAITTS(text) { // Asynchronous function to fetch and play TTS audio
+        // Robust SSE reader that handles keep-alives, multi-line data, CRLF
+        async function streamSSE(response, { onInit, onDelta, onDone, onError, onInfo }) { // Function to parse Server-Sent Events stream
+            const reader = response.body.getReader(); // Get stream reader
+            const decoder = new TextDecoder(); // Create text decoder that tolerates chunk splits
+            let buf = ''; // Buffer for incomplete SSE events
+            
+            try { // Guard SSE parsing
+                while (true) { // Loop until stream ends
+                    const { value, done } = await reader.read(); // Read next chunk
+                    if (done) break; // Exit when stream completes
+                    buf += decoder.decode(value, { stream: true }); // Decode partial chunk and add to buffer
+                    
+                    // SSE events end with a blank line (\n\n)
+                    let idx; // Index of double newline
+                    while ((idx = buf.indexOf('\n\n')) !== -1) { // Find complete SSE event
+                        const rawEvent = buf.slice(0, idx); // Extract complete event
+                        buf = buf.slice(idx + 2); // Remove processed event from buffer
+                        
+                        // Ignore comments/heartbeats starting with ":" lines
+                        const lines = rawEvent.split(/\r?\n/).filter(l => !l.startsWith(':')); // Split by newline and filter comments
+                        
+                        // Concatenate multiple data: lines (valid SSE format)
+                        let eventName = null; // Event type from event: line
+                        const dataParts = []; // Array to collect data: lines
+                        for (const line of lines) { // Process each line of the event
+                            if (line.startsWith('event:')) { // Check for event type declaration
+                                eventName = line.slice(6).trim(); // Extract event name
+                            } else if (line.startsWith('data:')) { // Check for data line
+                                dataParts.push(line.slice(5).trim()); // Extract data (remove 'data:' prefix)
+                            } // End data line check
+                        } // End line processing loop
+                        
+                        if (dataParts.length === 0) continue; // Skip events with no data
+                        const dataStr = dataParts.join('\n'); // Join multiple data lines
+                        if (dataStr === '[DONE]') { // Check for OpenAI-style completion
+                            onDone?.(); // Call completion handler
+                            return; // Exit parser
+                        } // End [DONE] check
+                        
+                        // Expect JSON object per Chatterbox docs
+                        let evt; // Parsed event object
+                        try { // Guard JSON parsing
+                            evt = JSON.parse(dataStr); // Parse JSON from data string
+                        } catch { // Catch JSON parse errors
+                            continue; // Skip invalid JSON events
+                        } // End JSON parse try/catch
+                        
+                        // OpenAI-compatible naming from Chatterbox docs:
+                        //   speech.audio.info   (metadata: sample_rate, channels, bits_per_sample)
+                        //   speech.audio.init   (base64 WebM init segment)
+                        //   speech.audio.delta  (base64 in evt.audio)
+                        //   speech.audio.done
+                        // Log all event types for debugging
+                        console.log('🎵 SSE event received, type:', evt?.type, 'has audio:', !!evt?.audio); // Debug log
+                        
+                        if (evt?.type === 'speech.audio.info') { // Check for metadata/info event
+                            console.log('🎵 Received audio info:', evt); // Log metadata (sample_rate, channels, etc.)
+                            onInfo?.(evt); // Pass metadata (sample_rate, channels, etc.) to handler
+                        } else if (evt?.type === 'speech.audio.init' && evt?.audio) { // Check for init segment event
+                            console.log('🎵 Received init event, size:', evt.audio.length); // Log init event
+                            onInit?.(evt.audio); // Pass base64 init segment to handler
+                        } else if (evt?.type === 'speech.audio.delta' && evt?.audio) { // Check for audio delta event
+                            onDelta?.(evt.audio); // Pass base64 string to handler
+                        } else if (evt?.type === 'speech.audio.done') { // Check for completion event
+                            console.log('🎵 Received done event'); // Log completion
+                            onDone?.(evt.usage); // Call completion handler with usage info
+                            return; // Exit parser
+                        } else { // Unknown event type
+                            console.warn('🎵 Unknown SSE event type:', evt?.type, 'Full event:', evt); // Log unknown event
+                        } // End event type check
+                    } // End event parsing loop
+                } // End stream reading loop
+                onDone?.(); // Call completion handler when stream ends
+            } catch (e) { // Catch SSE parsing errors
+                onError?.(e); // Call error handler
+            } // End try/catch
+        } // End streamSSE
+        
+        // MSE appender for WebM/Opus (or MP3)
+        function makeMSEPlayer(mimeType = 'audio/webm;codecs=opus') { // Function to create MediaSource player
+            if (!window.MediaSource || !MediaSource.isTypeSupported(mimeType)) { // Check if MSE is supported
+                return null; // Return null if unsupported (caller will fall back to blob/AudioContext path)
+            } // End MSE support check
+            
+            const audio = new Audio(); // Create audio element
+            const mediaSource = new MediaSource(); // Create MediaSource for streaming
+            audio.src = URL.createObjectURL(mediaSource); // Set source to object URL
+            audio.preload = 'auto'; // Enable preload
+            audio.crossOrigin = 'anonymous'; // Allow WebAudio connection
+            
+            let sourceBuffer; // SourceBuffer for appending chunks
+            let initAppended = false; // Track if init segment has been appended
+            let started = false; // Track if playback has started
+            
+            mediaSource.addEventListener('sourceopen', () => { // When MediaSource opens
+                sourceBuffer = mediaSource.addSourceBuffer(mimeType); // Create source buffer with specified MIME type
+                sourceBuffer.mode = 'sequence'; // Set mode to prevent timestamp gaps
+            }); // End sourceopen handler
+            
+            // Function to append init segment (must be called first)
+            const appendInit = (u8) => { // Function to append initialization segment
+                return new Promise((resolve) => { // Return promise that resolves when init is appended
+                    const doAppend = () => { // Inner function to perform append
+                        if (!sourceBuffer) { // If source buffer not yet created
+                            setTimeout(doAppend, 10); // Wait a bit and retry
+                            return; // Exit function
+                        } // End sourceBuffer check
+                        
+                        if (sourceBuffer.updating) { // If buffer is currently updating
+                            sourceBuffer.addEventListener('updateend', doAppend, { once: true }); // Wait for update to complete
+                            return; // Exit function
+                        } // End updating check
+                        
+                        try { // Guard append operation
+                            sourceBuffer.appendBuffer(u8); // Append init segment to buffer
+                            console.log('🎵 Init segment appended, size:', u8.length); // Log init append
+                            initAppended = true; // Mark init as appended
+                            // Wait for append to complete before resolving
+                            sourceBuffer.addEventListener('updateend', () => { // When append completes
+                                console.log('🎵 Init segment append complete'); // Log completion
+                                resolve(); // Resolve promise to signal init is ready
+                            }, { once: true }); // One-time listener
+                        } catch (e) { // Catch append errors
+                            console.warn('Init append error, will retry:', e); // Log warning
+                            setTimeout(doAppend, 10); // Retry append after short delay
+                        } // End append try/catch
+                    }; // End doAppend function
+                    
+                    doAppend(); // Start append process
+                }); // End Promise constructor
+            }; // End appendInit function
+            
+            // Function to append delta chunks (audio frames)
+            const append = (u8) => { // Function to append audio chunk
+                const doAppend = () => { // Inner function to perform append
+                    if (!sourceBuffer) { // If source buffer not yet created
+                        setTimeout(doAppend, 10); // Wait a bit and retry
+                        return; // Exit function
+                    } // End sourceBuffer check
+                    
+                    if (!initAppended) { // If init hasn't been appended yet
+                        console.warn('⚠️ Attempted to append delta before init segment, waiting...'); // Log warning
+                        setTimeout(doAppend, 10); // Wait and retry
+                        return; // Exit function
+                    } // End init check
+                    
+                    if (sourceBuffer.updating) { // If buffer is currently updating
+                        sourceBuffer.addEventListener('updateend', doAppend, { once: true }); // Wait for update to complete
+                        return; // Exit function
+                    } // End updating check
+                    
+                    try { // Guard append operation
+                        sourceBuffer.appendBuffer(u8); // Append chunk to buffer
+                        
+                        // Start playback after first delta chunk (init + first delta = ready)
+                        if (!started && initAppended) { // If playback hasn't started and init is ready
+                            started = true; // Mark as started
+                            sourceBuffer.addEventListener('updateend', () => { // When buffer update completes
+                                audio.play().then(() => { // Start audio playback
+                                    console.log('🎵 Audio playback started (MSE)'); // Log playback start
+                                    startLipSyncFromAudioElement(audio); // Hook up lip sync
+                                }).catch((e) => { // Catch play errors
+                                    console.warn('Audio play error (may be autoplay restriction):', e); // Log warning
+                                }); // End play promise chain
+                            }, { once: true }); // One-time listener
+                        } // End playback start check
+                    } catch (e) { // Catch append errors
+                        console.warn('Append error, will retry:', e); // Log warning
+                        setTimeout(doAppend, 10); // Retry append after short delay
+                    } // End append try/catch
+                }; // End doAppend function
+                
+                doAppend(); // Start append process
+            }; // End append function
+            
+            const end = () => { // Function to end stream
+                try { // Guard endOfStream call
+                    if (mediaSource.readyState === 'open') { // Check if source is still open
+                        mediaSource.endOfStream(); // Signal end of stream
+                    } // End readyState check
+                } catch {} // Ignore errors
+            }; // End end function
+            
+            // Handle cleanup when audio ends
+            audio.addEventListener('ended', () => { // When playback finishes
+                URL.revokeObjectURL(audio.src); // Release object URL
+                // Cleanup MediaSource
+                try { if (mediaSource.readyState === 'open') mediaSource.endOfStream(); } catch(_){}
+                // Cleanup lip sync intervals
+                try { if (ttsLipSyncIntervalId) { clearInterval(ttsLipSyncIntervalId); ttsLipSyncIntervalId = null; } } catch(_){}
+                try { if (ttsRafId) { cancelAnimationFrame(ttsRafId); ttsRafId = 0; } } catch(_){}
+                try { ttsCleanupFns.forEach(fn => { try { fn(); } catch(_){} }); } catch(_){}
+                ttsCleanupFns = []; // Clear cleanup functions
+                // Reset avatar mouth
+                if (live2dModel) { live2dModel.internalModel.coreModel.setParameterValueById('ParamMouthOpenY', 0); }
+                if (vrmModel && document.getElementById('vrm-mode').checked) { animateVRMLipSync(0); }
+            }); // End ended handler
+            
+            // Register cleanup for external cancellations
+            ttsCleanupFns.push(() => {
+                try { audio.pause(); } catch(_){}
+                try { if (mediaSource.readyState === 'open') mediaSource.endOfStream(); } catch(_){}
+                try { mediaSource.removeEventListener('error', () => {}); } catch(_){}
+                try { URL.revokeObjectURL(audio.src); } catch(_){}
+            }); // End cleanup registration
+            
+            return { audio, appendInit, append, end }; // Return player interface with init handler
+        } // End makeMSEPlayer
+        
+        // Minimal MSE player (WebM/Opus) for SSE init/delta
+        function createWebMOpusMSE() { // Function to create MediaSource player for WebM/Opus streaming
+            if (!('MediaSource' in window)) return null; // Return null if MediaSource is not supported
+            
+            const audio = new Audio(); // Create audio element for playback
+            audio.preload = 'auto'; // Enable preload
+            audio.crossOrigin = 'anonymous'; // Allow CORS for audio analysis (lip sync)
+            const ms = new MediaSource(); // Create MediaSource instance
+            audio.src = URL.createObjectURL(ms); // Set source to object URL
+            
+            const q = []; // ArrayBuffers waiting to append
+            let sb, started = false, ended = false; // SourceBuffer, playback state, and end flag
+            
+            const appendNext = () => { // Function to append next chunk from queue
+                if (!sb || sb.updating) return; // Exit if no source buffer or already updating
+                if (!q.length) { // If queue is empty
+                    if (ended && ms.readyState === 'open') ms.endOfStream(); // End stream if done
+                    return; // Exit if queue empty
+                } // End empty queue check
+                sb.appendBuffer(q.shift()); // Append next chunk from queue
+            }; // End appendNext function
+            
+            ms.addEventListener('sourceopen', () => { // When MediaSource opens
+                sb = ms.addSourceBuffer('audio/webm;codecs=opus'); // Create source buffer for WebM/Opus
+                sb.mode = 'sequence'; // Set mode to sequence for monotonic timestamps
+                sb.addEventListener('updateend', appendNext); // Queue next chunk when update completes
+            }); // End sourceopen handler
+            
+            const b64ToU8 = (b64) => { // Helper function to decode base64 to Uint8Array
+                const bin = atob(b64); // Decode base64 to binary string
+                const u8 = new Uint8Array(bin.length); // Create byte array
+                for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i); // Convert character code to byte
+                return u8; // Return decoded bytes
+            }; // End b64ToU8 function
+            
+            return {
+                audio, // Return audio element for external access (lip-sync, etc.)
+                appendInit(b64) { // Function to append init segment
+                    q.push(b64ToU8(b64).buffer); // Decode and add init segment to queue
+                    appendNext(); // Try to append if source buffer is ready
+                    if (!started) { // If playback hasn't started
+                        started = true; // Mark as started
+                        audio.play().catch(() => { // Start audio playback
+                            console.warn('Autoplay blocked — start after user gesture.'); // Log autoplay block warning
+                        }); // End play promise catch
+                    } // End started check
+                }, // End appendInit method
+                appendDelta(b64) { // Function to append delta chunks
+                    q.push(b64ToU8(b64).buffer); // Decode and add chunk to queue
+                    appendNext(); // Try to append if source buffer is ready
+                }, // End appendDelta method
+                end() { // Function to end stream
+                    ended = true; // Mark stream as ended
+                    appendNext(); // Final append attempt
+                } // End end method
+            }; // End return object
+        } // End createWebMOpusMSE
+        
+        // Play PCM16 delta chunk using Web Audio API (mirrors existing schedule pattern)
+        function playPcm16Delta(base64, sampleRate = 24000, channels = 1) { // Function to decode and play PCM16 audio chunk
+            const bin = atob(base64); // Decode base64 to binary string
+            const len = bin.length / 2; // Calculate number of int16 samples (mono, 2 bytes per sample)
+            const i16 = new Int16Array(len); // Create Int16Array for signed 16-bit samples
+            
+            // Convert little-endian bytes to int16 samples
+            for (let i = 0, o = 0; i < len; i++, o += 2) { // Loop through samples (2 bytes each)
+                // little-endian 16-bit signed conversion
+                i16[i] = (bin.charCodeAt(o) | (bin.charCodeAt(o + 1) << 8)); // Combine bytes (little-endian)
+            } // End byte conversion loop
+            
+            // Convert Int16 to Float32 [-1, 1] range
+            const f32 = new Float32Array(len); // Create Float32Array for normalized samples
+            for (let i = 0; i < len; i++) { // Loop through samples
+                f32[i] = Math.max(-1, Math.min(1, i16[i] / 32768)); // Normalize to [-1, 1] range and clamp
+            } // End normalization loop
+            
+            // Reuse existing AudioContext and playhead scheduling pattern
+            const ctx = window.__opus?.audioCtx || new (window.AudioContext || window.webkitAudioContext)(); // Get or create audio context
+            const buf = ctx.createBuffer(channels, len, sampleRate); // Create audio buffer with specified channels, length, and sample rate
+            
+            // Set channel data from decoded PCM
+            if (channels === 1) { // If mono channel
+                buf.getChannelData(0).set(f32); // Set single channel data
+            } else { // If multi-channel (stereo or more)
+                // Split interleaved samples into channel arrays
+                const samplesPerChannel = len / channels; // Calculate samples per channel
+                for (let ch = 0; ch < channels; ch++) { // Loop through each channel
+                    const channelData = new Float32Array(samplesPerChannel); // Create channel data array
+                    for (let i = 0; i < samplesPerChannel; i++) { // Loop through samples in channel
+                        channelData[i] = f32[i * channels + ch]; // Extract interleaved sample for this channel
+                    } // End sample extraction loop
+                    buf.getChannelData(ch).set(channelData); // Set channel data
+                } // End channel loop
+            } // End channel data assignment
+            
+            // Create and schedule audio source (same pattern as existing schedule function)
+            const src = ctx.createBufferSource(); // Create buffer source node
+            src.buffer = buf; // Set decoded buffer
+            src.connect(ctx.destination); // Connect to audio output
+            
+            // Keep the same playhead logic (reuse from existing scheduler)
+            window.__opus.playhead = Math.max(ctx.currentTime, window.__opus.playhead || 0); // Calculate start time with playhead overlap
+            src.start(window.__opus.playhead); // Schedule playback at playhead position
+            window.__opus.playhead += buf.duration - 0.02; // Update playhead with 20ms overlap to hide seams
+            
+            console.log('🔊 Scheduled PCM16 chunk:', len, 'samples,', sampleRate, 'Hz,', channels, 'channels, duration:', buf.duration.toFixed(3), 's'); // Log playback info
+        } // End playPcm16Delta
+        
+        // Speak using Chatterbox TTS endpoint with streaming PCM16 decoding
+        async function speakWithOpenAITTS(text) { // Asynchronous function to fetch and play TTS audio via Chatterbox
             try { // Begin error handling scope
-                if (!text || !apiKey) return; // Guard for missing input or credentials
+                if (!text) return; // Guard for missing input
                 
                 // Remove emojis and asterisks from text before sending to TTS API
                 text = removeEmojis(text.replace(/\*/g, ''));
                 
-                const endpoint = (typeof openaiEndpoint === 'string' && openaiEndpoint.trim()) ? `${openaiEndpoint.replace(/\/$/, '')}/v1/audio/speech` : 'https://api.openai.com/v1/audio/speech'; // Compute speech endpoint
-                const modelId = (typeof ttsModel === 'string' && ttsModel.trim()) ? ttsModel : 'tts-1'; // Choose model id with default
-                const voiceId = (typeof ttsVoice === 'string' && ttsVoice.trim()) ? ttsVoice : 'alloy'; // Choose voice id with default
+                // Get TTS settings from UI elements - require Chatterbox endpoint
+                if (!ttsEndpointInput || !ttsEndpointInput.value || !ttsEndpointInput.value.trim()) { // Check if endpoint is configured
+                    console.error('❌ Chatterbox TTS endpoint not configured'); // Log error
+                    textToSpeechFallback(text); // Fall back to browser TTS
+                    return; // Exit early
+                } // End endpoint check
+                
+                const endpoint = `${ttsEndpointInput.value.trim().replace(/\/$/, '')}/v1/audio/speech`; // Use Chatterbox TTS endpoint with SSE format
+                const modelId = (ttsModelDropdown && ttsModelDropdown.value) ? ttsModelDropdown.value : 'tts-1'; // Get model from dropdown or default
+                const voiceId = (ttsVoiceDropdown && ttsVoiceDropdown.value) ? ttsVoiceDropdown.value : 'alloy'; // Get voice from dropdown or default
 
-                const reqBody = { // Build request payload for OpenAI speech
-                    model: modelId, // TTS model to synthesize speech
+                const reqBody = { // Build request payload for Chatterbox SSE streaming with PCM16
+                    model: modelId, // TTS model (optional for Chatterbox)
                     voice: voiceId, // Voice preset
                     input: text, // The text to speak (emojis already removed)
-                    response_format: 'mp3' // Request mp3 audio for broader support
+                    stream: true, // Enable streaming
+                    stream_format: 'sse', // Use SSE format for browser-friendly streaming
+                    container: 'raw', // Request raw PCM format
+                    codec: 'pcm16' // Request PCM16 codec format
                 }; // End payload
 
-                const res = await fetch(endpoint, { // Issue HTTP request for speech
+                // Build headers for Chatterbox SSE streaming (no Authorization needed for local Chatterbox)
+                const headers = { // Set content headers for SSE streaming
+                    'Content-Type': 'application/json', // JSON body content type
+                    'Accept': 'text/event-stream' // Request SSE format response
+                }; // End headers
+
+                // Use SSE streaming approach for lower latency
+                const res = await fetch(endpoint, { // Issue HTTP request for speech to Chatterbox
                     method: 'POST', // Use POST method per API spec
-                    headers: { // Set authorization and content headers
-                        'Authorization': `Bearer ${apiKey}`, // Bearer token for OpenAI
-                        'Content-Type': 'application/json' // JSON body content type
-                    }, // End headers
+                    headers: headers, // Set headers for SSE streaming
                     body: JSON.stringify(reqBody) // Attach serialized JSON body
                 }); // End fetch
 
                 if (!res.ok) { // If response indicates failure
                     const errText = await res.text().catch(() => ''); // Attempt to read error body
-                    console.error('OpenAI TTS error:', res.status, errText); // Log details for diagnostics
+                    console.error('❌ Chatterbox TTS error:', res.status, errText); // Log details for diagnostics
                     // Fallback to browser speech if available
                     textToSpeechFallback(text); // Use backup speaker for continuity
                     return; // Exit early
                 } // End error response branch
-
-                const arrayBuf = await res.arrayBuffer(); // Read audio bytes as ArrayBuffer
-                const blob = new Blob([arrayBuf], { type: 'audio/mpeg' }); // Create audio Blob with mp3 type
-                const url = URL.createObjectURL(blob); // Create object URL for audio element source
-
-                const audio = new Audio(); // Create HTML audio element
-                audio.src = url; // Assign synthesized audio URL
-                audio.preload = 'auto'; // Allow browser to preload audio
-                audio.crossOrigin = 'anonymous'; // Allow connecting to WebAudio graph
-
-                // Start per-frame lip sync using audio amplitude before playback
-                startLipSyncFromAudioElement(audio); // Hook analyzer and begin loop
-
-                await audio.play(); // Begin playback of voiced audio
+                
+                // Stop sniffing content-type for audio - SSE always comes as text/event-stream
+                const ct = (res.headers.get('content-type') || '').toLowerCase(); // Get content type from headers
+                const isSSE = ct.includes('text/event-stream'); // Check if response is SSE format
+                
+                if (!isSSE) { // If not SSE format
+                    console.warn('⚠️ Expected SSE format but got:', ct, '- falling back to browser TTS'); // Log format mismatch
+                    textToSpeechFallback(text); // Fall back to browser TTS
+                    return; // Exit early
+                } // End SSE check
+                
+                // Ensure audio context is available (reuse existing or create new)
+                if (!window.__opus?.audioCtx) { // Check if audio context exists
+                    window.__opus = window.__opus || {}; // Initialize __opus object if needed
+                    window.__opus.audioCtx = new (window.AudioContext || window.webkitAudioContext)(); // Create new audio context
+                    window.__opus.playhead = 0; // Initialize playhead
+                } // End audio context check
+                
+                // Initialize playhead if not already set
+                if (window.__opus.playhead === undefined) { // Check if playhead exists
+                    window.__opus.playhead = 0; // Initialize playhead to 0
+                } // End playhead initialization
+                
+                // Audio context is automatically resumed on first user action (send button, Enter key, record button)
+                // No need to resume here - resumeAudioContextOnce() handles it
+                
+                // Capture sample_rate and channels from speech.audio.info event
+                let ttsSampleRate = 24000; // Default sample rate (fallback)
+                let ttsChannels = 1; // Default channels (mono, fallback)
+                
+                // Wire SSE events to PCM16 decoder
+                await streamSSE(res, { // Start SSE parsing with callbacks
+                    onInfo: (evt) => { // Handle metadata/info event
+                        ttsSampleRate = evt.sample_rate || evt.sampleRate || 24000; // Capture sample rate from metadata
+                        ttsChannels = evt.channels || 1; // Capture channel count from metadata
+                        console.log('🎵 PCM16 audio info - sample_rate:', ttsSampleRate, 'channels:', ttsChannels); // Log audio info
+                    }, // End onInfo handler
+                    onInit: (b64) => { // Handle init event (if any - PCM16 may not need init)
+                        console.log('🎵 Received init event (PCM16 may not require init)'); // Log init event
+                        // PCM16 typically doesn't need init segment, but handle if provided
+                    }, // End onInit handler
+                    onDelta: (b64) => playPcm16Delta(b64, ttsSampleRate, ttsChannels), // Decode and play each PCM16 delta chunk
+                    onDone: () => { // Handle stream completion
+                        console.log('🎵 SSE stream complete (PCM16)'); // Log completion
+                        // Reset playhead for next stream (optional)
+                        // window.__opus.playhead = 0; // Uncomment if you want to reset between streams
+                    }, // End onDone handler
+                    onError: (e) => { // Handle parsing errors
+                        console.error('❌ SSE parsing error:', e); // Log error
+                        textToSpeechFallback(text); // Fall back to browser TTS if error occurs
+                    } // End onError handler
+                }); // End streamSSE call
             } catch (e) { // Catch any runtime errors
-                console.error('speakWithOpenAITTS failed:', e); // Log the error cause
+                console.error('❌ Chatterbox TTS failed:', e); // Log the error cause
                 // Fallback to browser speech if available
                 textToSpeechFallback(text); // Ensure speech still happens
             } // End try/catch
-        } // End speakWithOpenAITTS
+        } // End speakWithOpenAITTS (Chatterbox streaming TTS)
 
+        // Play streaming audio using MediaSource API for real-time playback
+        async function playStreamingAudioStream(audioChunks, mimeType = 'audio/webm;codecs=opus') { // Function to play streamed audio chunks in real-time
+            try { // Begin error handling scope
+                // Create audio element and MediaSource
+                const audio = new Audio(); // Create audio element
+                const mediaSource = new MediaSource(); // Create MediaSource for streaming
+                audio.src = URL.createObjectURL(mediaSource); // Set source to object URL
+                audio.preload = 'auto'; // Enable preload
+                audio.crossOrigin = 'anonymous'; // Allow WebAudio connection
+                
+                console.log('🎵 Starting MediaSource audio stream...'); // Log streaming start
+                
+                // Wait for MediaSource to be ready
+                mediaSource.addEventListener('sourceopen', () => { // When MediaSource opens
+                    try { // Guard scope
+                        const sourceBuffer = mediaSource.addSourceBuffer(mimeType); // Create source buffer
+                        sourceBuffer.mode = 'sequence'; // Set mode to prevent timestamp gaps on Chrome builds
+                        
+                        // Flag to track if audio has started playing
+                        let audioStarted = false; // Track if playback has started
+                        let chunkIndex = 0; // Track current chunk index
+                        
+                        // Define the pump function to append chunks from array
+                        const pump = async () => { // Async function to pump chunks
+                            try { // Guard scope
+                                if (chunkIndex < audioChunks.length) { // If more chunks are available
+                                    const chunk = audioChunks[chunkIndex]; // Get next chunk from array
+                                    sourceBuffer.appendBuffer(chunk); // Append chunk to buffer
+                                    console.log('🎵 Chunk appended, size:', chunk.length, `(${chunkIndex + 1}/${audioChunks.length})`); // Log chunk size and progress
+                                    
+                                    // Start audio playback after first chunk to avoid autoplay guard
+                                    if (!audioStarted) { // If audio hasn't started yet
+                                        audioStarted = true; // Mark as started
+                                        audio.play().then(() => { // When audio starts playing
+                                            console.log('🎵 Audio playback started (streaming)'); // Log playback start
+                                            startLipSyncFromAudioElement(audio); // Hook up lip sync
+                                        }).catch(e => { // Catch play errors
+                                            console.error('Audio play error:', e); // Log error
+                                        }); // End play promise chain
+                                    } // End audio start check
+                                    
+                                    chunkIndex++; // Move to next chunk
+                                    
+                                    // Wait for buffer update before next append
+                                    sourceBuffer.addEventListener('updateend', pump, { once: true }); // Schedule next chunk
+                                } else { // If all chunks have been appended
+                                    console.log('🎵 Stream complete, ending MediaSource'); // Log completion
+                                    mediaSource.endOfStream(); // Signal end of stream
+                                } // End chunks check
+                            } catch (e) { // Catch errors in pump
+                                console.error('Error in pump loop:', e); // Log error
+                                mediaSource.endOfStream(); // Signal end on error
+                            } // End try/catch in pump
+                        }; // End pump function
+                        
+                        pump(); // Start the pump process
+                    } catch (e) { // Catch MediaSource errors
+                        console.error('MediaSource setup error:', e); // Log error
+                    } // End try/catch
+                }); // End sourceopen event listener
+                
+                // Handle cleanup when audio ends
+                audio.onended = () => { // When playback finishes
+                    URL.revokeObjectURL(audio.src); // Release object URL
+                    // Cleanup MediaSource
+                    try { if (mediaSource.readyState === 'open') mediaSource.endOfStream(); } catch(_){}
+                    // Cleanup lip sync intervals
+                    try { if (ttsLipSyncIntervalId) { clearInterval(ttsLipSyncIntervalId); ttsLipSyncIntervalId = null; } } catch(_){}
+                    try { if (ttsRafId) { cancelAnimationFrame(ttsRafId); ttsRafId = 0; } } catch(_){}
+                    try { ttsCleanupFns.forEach(fn => { try { fn(); } catch(_){} }); } catch(_){}
+                    ttsCleanupFns = []; // Clear cleanup functions
+                    // Reset avatar mouth
+                    if (live2dModel) { live2dModel.internalModel.coreModel.setParameterValueById('ParamMouthOpenY', 0); }
+                    if (vrmModel && document.getElementById('vrm-mode').checked) { animateVRMLipSync(0); }
+                }; // End onended handler
+                
+                // Handle media source errors
+                mediaSource.addEventListener('error', (e) => { // When MediaSource errors occur
+                    console.error('MediaSource error:', e); // Log the error
+                }); // End error handler
+                
+                // Register cleanup for external cancellations
+                ttsCleanupFns.push(() => {
+                    try { audio.pause(); } catch(_){}
+                    try { if (mediaSource.readyState === 'open') mediaSource.endOfStream(); } catch(_){}
+                    try { mediaSource.removeEventListener('error', () => {}); } catch(_){}
+                    try { URL.revokeObjectURL(audio.src); } catch(_){}
+                }); // End cleanup registration
+                
+            } catch (error) { // Catch setup errors
+                console.error('Error setting up streaming audio:', error); // Log error
+                throw error; // Re-throw to trigger fallback
+            } // End try/catch
+        } // End playStreamingAudioStream
+
+        // Play streaming audio chunks as blob (fallback for Safari)
+        async function playStreamingAudio(combinedAudio, mimeType) { // Function to play streamed audio from combined array
+            try {
+                // Create blob from combined audio data
+                const blob = new Blob([combinedAudio], { type: mimeType }); // Create blob with provided MIME type
+                const url = URL.createObjectURL(blob); // Create object URL
+                
+                const audio = new Audio(); // Create audio element
+                audio.src = url; // Set source URL
+                audio.preload = 'auto'; // Enable preload
+                audio.crossOrigin = 'anonymous'; // Allow WebAudio connection
+                
+                // Handle cleanup when audio ends
+                audio.onended = () => { // When playback finishes
+                    URL.revokeObjectURL(url); // Release object URL
+                    // Cleanup lip sync intervals
+                    try { if (ttsLipSyncIntervalId) { clearInterval(ttsLipSyncIntervalId); ttsLipSyncIntervalId = null; } } catch(_){}
+                    try { if (ttsRafId) { cancelAnimationFrame(ttsRafId); ttsRafId = 0; } } catch(_){}
+                    try { ttsCleanupFns.forEach(fn => { try { fn(); } catch(_){} }); } catch(_){}
+                    ttsCleanupFns = []; // Clear cleanup functions
+                    // Reset avatar mouth
+                    if (live2dModel) { live2dModel.internalModel.coreModel.setParameterValueById('ParamMouthOpenY', 0); }
+                    if (vrmModel && document.getElementById('vrm-mode').checked) { animateVRMLipSync(0); }
+                }; // End onended handler
+                
+                // Start lip sync using audio amplitude
+                startLipSyncFromAudioElement(audio); // Hook up lip sync
+                
+                // Start playback
+                await audio.play(); // Begin playing audio
+                console.log('🎵 Audio playback started'); // Log playback start
+            } catch (error) {
+                console.error('Error playing streaming audio:', error); // Log error
+            } // End try/catch
+        } // End playStreamingAudio
+        
         // Browser speech fallback wrapper used when server TTS fails
         function textToSpeechFallback(text) { // Function to call original SpeechSynthesis path
             try { // Begin guard
@@ -2001,7 +2793,11 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
                     systemPrompt: systemPromptInput.value,
                     webcamMode: document.getElementById('webcam-toggle').checked,
                     clipboardMode: document.getElementById('clipboard-toggle').checked,
-                    muteMode: document.getElementById('mute-toggle').checked
+                    muteMode: document.getElementById('mute-toggle').checked,
+                    ttsService: ttsServiceOpenAI.checked ? 'openai' : 'microsoft', // Save TTS service selection
+                    ttsEndpoint: ttsEndpointInput.value, // Save TTS endpoint
+                    ttsModel: ttsModelDropdown.value, // Save TTS model
+                    ttsVoice: ttsVoiceDropdown.value // Save TTS voice
                 };
                 localStorage.setItem('toolSettings', JSON.stringify(settings));
             } catch (error) {
@@ -2045,6 +2841,31 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
                         isMuted = settings.muteMode; // Update the isMuted variable as well
                     }
                     
+                    // Restore TTS settings
+                    if (settings.ttsService !== undefined) {
+                        if (settings.ttsService === 'openai') {
+                            ttsServiceOpenAI.checked = true;
+                        } else {
+                            ttsServiceMicrosoft.checked = true;
+                        }
+                    }
+                    if (settings.ttsEndpoint !== undefined) {
+                        ttsEndpointInput.value = settings.ttsEndpoint;
+                    }
+                    if (settings.ttsModel !== undefined) {
+                        ttsModelDropdown.value = settings.ttsModel;
+                    }
+                    if (settings.ttsVoice !== undefined) {
+                        ttsVoiceDropdown.value = settings.ttsVoice;
+                    }
+                    
+                    // If OpenAI-compatible TTS is selected, fetch available voices
+                    if (settings.ttsService === 'openai' && ttsServiceOpenAI) {
+                        ttsServiceOpenAI.checked = true;
+                        // Fetch voices after a short delay to ensure DOM is ready
+                        setTimeout(() => fetchTtsVoices(), 500);
+                    }
+                    
                     console.log('Tool settings loaded from localStorage');
                 }
             } catch (error) {
@@ -2065,6 +2886,33 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
             document.getElementById('webcam-toggle').addEventListener('change', saveToolSettings);
             document.getElementById('clipboard-toggle').addEventListener('change', saveToolSettings);
             document.getElementById('mute-toggle').addEventListener('change', saveToolSettings);
+            
+            // Add event listeners for TTS settings
+            if (ttsServiceMicrosoft) {
+                ttsServiceMicrosoft.addEventListener('change', () => {
+                    saveToolSettings();
+                    if (ttsServiceOpenAI.checked) fetchTtsVoices(); // Auto-fetch when switching to OpenAI-compatible
+                });
+            }
+            if (ttsServiceOpenAI) {
+                ttsServiceOpenAI.addEventListener('change', () => {
+                    saveToolSettings();
+                    if (ttsServiceOpenAI.checked) fetchTtsVoices(); // Auto-fetch when selecting OpenAI-compatible
+                });
+            }
+            if (ttsEndpointInput) {
+                ttsEndpointInput.addEventListener('input', saveToolSettings);
+                ttsEndpointInput.addEventListener('change', () => {
+                    if (ttsServiceOpenAI && ttsServiceOpenAI.checked) fetchTtsVoices(); // Auto-fetch when endpoint changes
+                });
+            }
+            if (ttsModelDropdown) ttsModelDropdown.addEventListener('change', saveToolSettings);
+            if (ttsVoiceDropdown) ttsVoiceDropdown.addEventListener('change', saveToolSettings);
+            
+            // Add event listener for refresh button
+            if (refreshTtsVoicesBtn) {
+                refreshTtsVoicesBtn.addEventListener('click', fetchTtsVoices);
+            }
             
             console.log('Tool settings persistence enabled');
         }
@@ -2124,10 +2972,18 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
                 // Initialize conversation management system
                 loadConversations();
                 
+                // Load sidebar state
+                loadSidebarState();
+                
                 // New conversation button handler
                 document.getElementById('new-conversation-btn').addEventListener('click', () => {
                     const newConv = createNewConversation('New Conversation');
                     switchToConversation(newConv.id);
+                });
+                
+                // Sidebar toggle button handler
+                document.getElementById('sidebar-toggle-btn').addEventListener('click', () => {
+                    toggleSidebar();
                 });
             } catch (error) {
                 console.error('Error during initialization:', error);
@@ -2197,13 +3053,17 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
         }
 
         // Update these two event listeners
-        startRecordBtn.addEventListener('click', toggleRecording);
+        startRecordBtn.addEventListener('click', async function() { // Handle record button click
+            await resumeAudioContextOnce(); // Resume audio context on first user action (for autoplay and lip sync)
+            toggleRecording(); // Toggle recording state
+        }); // End record button click handler
 
-        document.addEventListener('keydown', (e) => {
-            if (e.key === ';' && !e.repeat && !isRecording) {
+        document.addEventListener('keydown', async (e) => { // Handle keyboard shortcuts
+            if (e.key === ';' && !e.repeat && !isRecording) { // Check for semicolon key (recording shortcut)
                 e.preventDefault(); // Prevent semicolon from being typed
-                toggleRecording();
-            }
+                await resumeAudioContextOnce(); // Resume audio context on first user action (for autoplay and lip sync)
+                toggleRecording(); // Toggle recording state
+            } // End semicolon key check
         });
 
         document.addEventListener('keyup', (e) => {
@@ -2735,6 +3595,49 @@ function saveWAVFile(wavBlob) {
                 
                 saveConversations();
                 renderConversationList();
+            }
+        }
+
+        // Sidebar toggle functionality
+        const SIDEBAR_STATE_KEY = 'conversationSidebarCollapsed';
+        let sidebarCollapsed = false;
+
+        // Function to toggle sidebar
+        function toggleSidebar() {
+            const sidebar = document.getElementById('conversation-sidebar');
+            const toggleBtn = document.getElementById('sidebar-toggle-btn');
+            const toggleIcon = toggleBtn.querySelector('i');
+            
+            sidebarCollapsed = !sidebarCollapsed;
+            
+            if (sidebarCollapsed) {
+                sidebar.classList.add('collapsed');
+                toggleBtn.classList.remove('sidebar-open');
+                toggleIcon.className = 'fas fa-chevron-right';
+            } else {
+                sidebar.classList.remove('collapsed');
+                toggleBtn.classList.add('sidebar-open');
+                toggleIcon.className = 'fas fa-chevron-left';
+            }
+            
+            // Save state to localStorage
+            try {
+                storage.setItem(SIDEBAR_STATE_KEY, sidebarCollapsed.toString());
+            } catch (error) {
+                console.warn('Error saving sidebar state:', error);
+            }
+        }
+
+        // Function to load sidebar state
+        function loadSidebarState() {
+            try {
+                const savedState = storage.getItem(SIDEBAR_STATE_KEY);
+                if (savedState === 'true') {
+                    sidebarCollapsed = false; // Set to false first so toggle works correctly
+                    toggleSidebar(); // This will set it to true and apply the collapsed state
+                }
+            } catch (error) {
+                console.warn('Error loading sidebar state:', error);
             }
         }
 
@@ -5158,30 +6061,32 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
             }
         }
 
-        sendBtn.addEventListener('click', function () {
-            const userText = userInput.value;
-            if (userText.trim() === '') {
-                alert('Please enter some text or record your voice.');
-                return;
-            }
-            fetchOpenAIResponse(userText);
-            userInput.value = '';
-        });
+        sendBtn.addEventListener('click', async function () { // Handle send button click
+            await resumeAudioContextOnce(); // Resume audio context on first user action (for autoplay and lip sync)
+            const userText = userInput.value; // Get user input text
+            if (userText.trim() === '') { // Check if input is empty
+                alert('Please enter some text or record your voice.'); // Show alert if empty
+                return; // Exit early
+            } // End empty check
+            fetchOpenAIResponse(userText); // Send message to OpenAI API
+            userInput.value = ''; // Clear input field
+        }); // End send button click handler
 
         // Handle Enter key submission and Shift+Enter for newlines
-        userInput.addEventListener('keydown', function (event) {
-            if (event.key === 'Enter' && !event.shiftKey) {
+        userInput.addEventListener('keydown', async function (event) { // Handle keyboard input
+            if (event.key === 'Enter' && !event.shiftKey) { // Check if Enter key pressed (not Shift+Enter)
                 event.preventDefault(); // Prevent default newline behavior
-                const userText = userInput.value;
-                if (userText.trim() !== '') {
-                    fetchOpenAIResponse(userText);
-                    userInput.value = '';
-                } else {
-                    alert('Please enter some text or record your voice.');
-                }
-            }
+                await resumeAudioContextOnce(); // Resume audio context on first user action (for autoplay and lip sync)
+                const userText = userInput.value; // Get user input text
+                if (userText.trim() !== '') { // Check if input is not empty
+                    fetchOpenAIResponse(userText); // Send message to OpenAI API
+                    userInput.value = ''; // Clear input field
+                } else { // If input is empty
+                    alert('Please enter some text or record your voice.'); // Show alert
+                } // End empty check
+            } // End Enter key check
             // Shift+Enter allows normal newline behavior (default)
-        });
+        }); // End keyboard input handler
 
         // Update the initLive2D function
         async function initLive2D() {

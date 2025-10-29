@@ -1089,6 +1089,77 @@ async def proxy_whisper(request: Request):
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Failed to proxy Whisper request: {str(e)}")
 
+# TTS voices proxy endpoint to handle CORS
+@app.get("/v1/proxy/tts/voices")
+async def proxy_tts_voices(endpoint: str):
+    """Proxy TTS voices requests to handle CORS."""
+    try:
+        # Construct the voices endpoint URL from the provided base endpoint
+        if not endpoint:
+            raise HTTPException(status_code=400, detail="Endpoint parameter is required")
+        
+        # Remove /v1 if present and construct /voices endpoint
+        # Try multiple possible endpoints
+        base_url = endpoint.rstrip('/').replace('/v1', '')
+        
+        # Try standard /voices endpoint first
+        voices_url = base_url + '/voices'
+        
+        print(f"🎤 Attempting to fetch TTS voices from: {voices_url}")
+        
+        # Fetch voices from the TTS service
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(voices_url)
+        
+        print(f"✅ TTS voices response status: {response.status_code}")
+        
+        # Check if the response is successful
+        if response.status_code != 200:
+            print(f"❌ TTS voices service returned error: {response.status_code}")
+            print(f"   Response text: {response.text}")
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"TTS voices service error: {response.text}"
+            )
+        
+        # Check if response has content
+        response_text = response.text.strip()
+        if not response_text:
+            print("⚠️ Empty response from TTS voices endpoint")
+            # Return empty list if no voices are available
+            return []
+        
+        print(f"📄 Response content (first 200 chars): {response_text[:200]}")
+        
+        # Try to parse the response as JSON
+        try:
+            voices_data = response.json()
+            print(f"✅ Fetched {len(voices_data) if isinstance(voices_data, list) else 'unknown'} voices")
+            return voices_data
+        except Exception as json_error:
+            print(f"⚠️ Could not parse JSON response: {json_error}")
+            print(f"   Response text: {response_text[:500]}")
+            # Return empty list if we can't parse the response
+            return []
+    
+    except httpx.ConnectError as e:
+        print(f"❌ Connection error: Could not connect to TTS service at {endpoint}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Could not connect to TTS service. Make sure it's running."
+        )
+    except httpx.TimeoutException:
+        print(f"❌ Timeout error: TTS service did not respond in time")
+        raise HTTPException(
+            status_code=504,
+            detail="TTS service request timed out"
+        )
+    except Exception as e:
+        print(f"❌ TTS voices proxy error: {e}")
+        import traceback
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to fetch TTS voices: {str(e)}")
+
 # ============================================================================
 # FILE OPERATIONS ENDPOINTS
 # ============================================================================
