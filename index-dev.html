@@ -2543,44 +2543,58 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
         // Play PCM16 delta chunk using Web Audio API (mirrors existing schedule pattern)
         function playPcm16Delta(base64, sampleRate = 24000, channels = 1) { // Function to decode and play PCM16 audio chunk
             const bin = atob(base64); // Decode base64 to binary string
-            const len = bin.length / 2; // Calculate number of int16 samples (mono, 2 bytes per sample)
-            const i16 = new Int16Array(len); // Create Int16Array for signed 16-bit samples
+            const totalSamples = bin.length / 2; // Calculate total number of int16 samples across all channels (2 bytes/sample)
+            if (!Number.isFinite(totalSamples) || totalSamples <= 0) {
+                console.warn('⚠️ Received empty PCM16 chunk');
+                return;
+            }
+
+            const i16 = new Int16Array(totalSamples); // Create Int16Array for signed 16-bit samples
             
             // Convert little-endian bytes to int16 samples
-            for (let i = 0, o = 0; i < len; i++, o += 2) { // Loop through samples (2 bytes each)
+            for (let i = 0, o = 0; i < totalSamples; i++, o += 2) { // Loop through samples (2 bytes each)
                 // little-endian 16-bit signed conversion
                 i16[i] = (bin.charCodeAt(o) | (bin.charCodeAt(o + 1) << 8)); // Combine bytes (little-endian)
             } // End byte conversion loop
-            
+
             // Convert Int16 to Float32 [-1, 1] range
-            const f32 = new Float32Array(len); // Create Float32Array for normalized samples
-            for (let i = 0; i < len; i++) { // Loop through samples
+            const f32 = new Float32Array(totalSamples); // Create Float32Array for normalized samples
+            for (let i = 0; i < totalSamples; i++) { // Loop through samples
                 f32[i] = Math.max(-1, Math.min(1, i16[i] / 32768)); // Normalize to [-1, 1] range and clamp
             } // End normalization loop
-            
+
             // Reuse existing AudioContext and playhead scheduling pattern
             const ctx = ensureChatterboxLipSyncGraph(); // Prepare shared audio context and analyser chain
             if (ctx.state === 'suspended') { // Resume context if autoplay policies suspended it
                 try { ctx.resume(); } catch (_) {} // Ignore resume errors (will resume on user gesture)
             }
 
-            const buf = ctx.createBuffer(channels, len, sampleRate); // Create audio buffer with specified channels, length, and sample rate
-            
+            const safeChannels = Math.max(1, channels | 0); // Ensure channel count is a positive integer
+            const framesPerChannel = Math.floor(totalSamples / safeChannels); // Sample frames available for each channel
+            if (framesPerChannel <= 0) {
+                console.warn('⚠️ PCM16 chunk shorter than declared channel count, skipping playback');
+                return;
+            }
+            const trailingSamples = totalSamples - framesPerChannel * safeChannels;
+            if (trailingSamples !== 0) {
+                console.warn('⚠️ Dropping', trailingSamples, 'sample(s) that do not fit evenly across', safeChannels, 'channels');
+            }
+            const buf = ctx.createBuffer(safeChannels, framesPerChannel, sampleRate); // Create audio buffer with specified channels, length, and sample rate
+
             // Set channel data from decoded PCM
-            if (channels === 1) { // If mono channel
-                buf.getChannelData(0).set(f32); // Set single channel data
+            if (safeChannels === 1) { // If mono channel
+                const channelData = buf.getChannelData(0);
+                channelData.set(f32.subarray(0, framesPerChannel)); // Set single channel data
             } else { // If multi-channel (stereo or more)
                 // Split interleaved samples into channel arrays
-                const samplesPerChannel = len / channels; // Calculate samples per channel
-                for (let ch = 0; ch < channels; ch++) { // Loop through each channel
-                    const channelData = new Float32Array(samplesPerChannel); // Create channel data array
-                    for (let i = 0; i < samplesPerChannel; i++) { // Loop through samples in channel
-                        channelData[i] = f32[i * channels + ch]; // Extract interleaved sample for this channel
+                for (let ch = 0; ch < safeChannels; ch++) { // Loop through each channel
+                    const channelData = buf.getChannelData(ch); // Reference channel buffer directly
+                    for (let i = 0; i < framesPerChannel; i++) { // Loop through samples in channel
+                        channelData[i] = f32[i * safeChannels + ch]; // Extract interleaved sample for this channel
                     } // End sample extraction loop
-                    buf.getChannelData(ch).set(channelData); // Set channel data
                 } // End channel loop
             } // End channel data assignment
-            
+
             // Create and schedule audio source (same pattern as existing schedule function)
             const src = ctx.createBufferSource(); // Create buffer source node
             src.buffer = buf; // Set decoded buffer
@@ -2616,7 +2630,7 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
             src.start(window.__opus.playhead); // Schedule playback at playhead position
             window.__opus.playhead += buf.duration - 0.02; // Update playhead with 20ms overlap to hide seams
             
-            console.log('🔊 Scheduled PCM16 chunk:', len, 'samples,', sampleRate, 'Hz,', channels, 'channels, duration:', buf.duration.toFixed(3), 's'); // Log playback info
+            console.log('🔊 Scheduled PCM16 chunk:', framesPerChannel, 'frames per channel (', totalSamples, 'total samples ),', sampleRate, 'Hz,', safeChannels, 'channels, duration:', buf.duration.toFixed(3), 's'); // Log playback info
         } // End playPcm16Delta
         
         // Speak using Chatterbox TTS endpoint with streaming PCM16 decoding
