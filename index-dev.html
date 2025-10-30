@@ -311,10 +311,11 @@
         }
 
         .collapsible-content.active {
-            max-height: 2000px;
-            padding: 15px;
-            border: 1px solid #ddd;
-            border-top: none;
+            max-height: 70vh; /* Limit expanded height to 70% of the viewport height for small windows */
+            padding: 15px; /* Keep padding when expanded */
+            border: 1px solid #ddd; /* Maintain border when expanded */
+            border-top: none; /* Remove top border to connect with button */
+            overflow-y: auto; /* Enable vertical scrolling when content exceeds max height */
         }
 
         /* Responsive Design */
