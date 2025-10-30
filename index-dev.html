@@ -1195,6 +1195,8 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
         let ttsStreamActive = false; // Flag indicating an active Chatterbox PCM stream
         let ttsPcmActiveSources = 0; // Count of PCM buffer sources currently playing
         let ttsAnalyserStopTimer = null; // Timer used to delay cleanup after audio ends
+		let ttsAbortController = null; // AbortController for active Chatterbox TTS fetch/stream
+		let ttsGeneration = 0; // Monotonic token to discard stale TTS callbacks
 
         // Global VRMA actions
         let vrmLoveVrmaAction = null; // Prepared AnimationAction for love VRMA
@@ -1967,6 +1969,30 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
             return text.replace(emojiRegex, ''); // Remove all emojis and return clean text
         }
 
+        // Helper function to strip any bracketed content including nested pairs
+        function stripBracketedContent(text) { // Remove text inside (), [], {}, <> recursively
+            const patterns = [ /\([^()]*\)/g, /\[[^\[\]]*\]/g, /\{[^{}]*\}/g, /<[^<>]*>/g ]; // One-level patterns for each bracket type
+            let prev = null; // Track previous value to detect stabilization
+            let curr = String(text); // Work on a copy of the input
+            while (curr !== prev) { // Iterate until no further removals occur
+                prev = curr; // Save current state for comparison
+                for (const re of patterns) { curr = curr.replace(re, ''); } // Remove one nesting level for each pattern
+            }
+            return curr; // Return text with bracketed content removed
+        }
+
+        // Canonical sanitizer for all TTS inputs (browser and Chatterbox)
+        function sanitizeTTS(text) { // Normalize TTS text by removing emojis, bracketed content, asterisks, and special symbols
+            if (!text) return text; // Guard against falsy input
+            let t = String(text); // Ensure string type for processing
+            t = removeEmojis(t); // Drop emojis which TTS may speak oddly
+            t = stripBracketedContent(t); // Remove stage directions or asides in brackets
+            t = t.replace(/\*/g, ''); // Remove asterisks used for emphasis or actions
+            t = t.replace(/[^\w\s\.,!\?;:'"\-]/g, ''); // Remove remaining special symbols, keep common punctuation
+            t = t.replace(/\s+/g, ' ').trim(); // Collapse whitespace and trim ends
+            return t; // Provide sanitized text
+        }
+
         // Update the textToSpeech function
         function textToSpeech(text) {
             if (!text) {
@@ -1980,14 +2006,16 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
                 return;
             }
 
-            // Remove emojis from text to avoid TTS attempting to speak them
-            text = removeEmojis(text);
+            // Sanitize text to remove emojis, bracketed sections, asterisks, and special symbols
+            text = sanitizeTTS(text);
 
-            // Cancel any ongoing speech and active lip-sync loops/graphs
+			// Cancel any ongoing speech and active lip-sync loops/graphs
             try { speechSynthesis.cancel(); } catch (_) {}
             try { if (ttsLipSyncIntervalId) { clearInterval(ttsLipSyncIntervalId); ttsLipSyncIntervalId = null; } } catch (_) {}
             try { if (ttsRafId) { cancelAnimationFrame(ttsRafId); ttsRafId = 0; } } catch (_) {}
-            try { ttsCleanupFns.forEach(fn => { try { fn(); } catch(_){} }); ttsCleanupFns = []; } catch (_) {}
+			try { ttsCleanupFns.forEach(fn => { try { fn(); } catch(_){} }); ttsCleanupFns = []; } catch (_) {}
+			try { stopChatterboxLipSync(true); } catch (_) {}
+			try { if (ttsAbortController) { ttsAbortController.abort(); ttsAbortController = null; } } catch (_) {}
 
             // Check TTS service selection - use OpenAI-compatible TTS when selected or when API key is present
             const useOpenAITTS = (ttsServiceOpenAI && ttsServiceOpenAI.checked) || 
@@ -1998,7 +2026,7 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
                 return; // Do not proceed with browser SpeechSynthesis path
             }
 
-            const utterance = new SpeechSynthesisUtterance(text.replace(/\*/g, ''));
+            const utterance = new SpeechSynthesisUtterance(text); // Use sanitized text for browser SpeechSynthesis
             const selectedVoiceIndex = parseInt(voiceDropdown.value);
             
             // Ensure we have voices and a valid selection
@@ -2480,6 +2508,7 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
             if (immediate) {
                 ttsStreamActive = false; // Clear stream-active flag immediately
                 ttsPcmActiveSources = 0; // Reset active source count
+				try { if (window.__opus && typeof window.__opus.playhead !== 'undefined') { window.__opus.playhead = 0; } } catch(_) {}
                 if (ttsAnalyserStopTimer) { // Clear pending delayed stops
                     clearTimeout(ttsAnalyserStopTimer);
                     ttsAnalyserStopTimer = null;
@@ -2573,7 +2602,14 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
                     stopChatterboxLipSync(false);
                 }
             };
-            src.addEventListener('ended', handleEnded, { once: true }); // Ensure cleanup runs only once
+			src.addEventListener('ended', handleEnded, { once: true }); // Ensure cleanup runs only once
+
+			// Ensure we can immediately stop scheduled sources on interruption
+			ttsCleanupFns.push(() => {
+				try { src.removeEventListener('ended', handleEnded); } catch(_) {}
+				try { src.stop(0); } catch(_) {}
+				try { src.disconnect(); } catch(_) {}
+			});
 
             // Keep the same playhead logic (reuse from existing scheduler)
             window.__opus.playhead = Math.max(ctx.currentTime, window.__opus.playhead || 0); // Calculate start time with playhead overlap
@@ -2584,12 +2620,15 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
         } // End playPcm16Delta
         
         // Speak using Chatterbox TTS endpoint with streaming PCM16 decoding
-        async function speakWithOpenAITTS(text) { // Asynchronous function to fetch and play TTS audio via Chatterbox
+		async function speakWithOpenAITTS(text) { // Asynchronous function to fetch and play TTS audio via Chatterbox
+            // Declare localGen and localController outside try block so they're accessible in catch block
+            let localGen = 0; // Generation token for this TTS request (initialized before try block)
+            let localController = null; // Local reference to this request's abort controller
             try { // Begin error handling scope
                 if (!text) return; // Guard for missing input
                 
-                // Remove emojis and asterisks from text before sending to TTS API
-                text = removeEmojis(text.replace(/\*/g, ''));
+                // Sanitize text before sending to TTS API (remove emojis/brackets/asterisks/specials)
+                text = sanitizeTTS(text);
                 
                 // Get TTS settings from UI elements - require Chatterbox endpoint
                 if (!ttsEndpointInput || !ttsEndpointInput.value || !ttsEndpointInput.value.trim()) { // Check if endpoint is configured
@@ -2618,13 +2657,27 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
                     'Accept': 'text/event-stream' // Request SSE format response
                 }; // End headers
 
-                // Use SSE streaming approach for lower latency
-                const res = await fetch(endpoint, { // Issue HTTP request for speech to Chatterbox
+				// Prepare abort + generation token so interruptions cancel immediately and stale callbacks are ignored
+				try { if (ttsAbortController) { ttsAbortController.abort(); } } catch (_) {}
+				localController = new AbortController(); // Create controller for this specific request
+				ttsAbortController = localController; // Store in global variable
+				localGen = (++ttsGeneration); // Assign generation token for this request
+
+				// Use SSE streaming approach for lower latency
+				const res = await fetch(endpoint, { // Issue HTTP request for speech to Chatterbox
                     method: 'POST', // Use POST method per API spec
                     headers: headers, // Set headers for SSE streaming
-                    body: JSON.stringify(reqBody) // Attach serialized JSON body
+					body: JSON.stringify(reqBody), // Attach serialized JSON body
+					signal: localController.signal // Allow immediate cancellation on interrupt (use local reference)
                 }); // End fetch
 
+                // Check if request was aborted before processing response (check local controller first)
+                if (localGen !== ttsGeneration || (localController && localController.signal.aborted)) {
+                    console.log('🛑 Chatterbox TTS request cancelled before response, skipping fallback'); // Log cancellation
+                    stopChatterboxLipSync(true); // Immediately stop lip sync
+                    return; // Exit without fallback
+                }
+                
                 if (!res.ok) { // If response indicates failure
                     const errText = await res.text().catch(() => ''); // Attempt to read error body
                     console.error('❌ Chatterbox TTS error:', res.status, errText); // Log details for diagnostics
@@ -2638,6 +2691,13 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
                 const ct = (res.headers.get('content-type') || '').toLowerCase(); // Get content type from headers
                 const isSSE = ct.includes('text/event-stream'); // Check if response is SSE format
                 
+                // Check if request was aborted before processing format (check local controller first)
+                if (localGen !== ttsGeneration || (localController && localController.signal.aborted)) {
+                    console.log('🛑 Chatterbox TTS request cancelled during format check, skipping fallback'); // Log cancellation
+                    stopChatterboxLipSync(true); // Immediately stop lip sync
+                    return; // Exit without fallback
+                }
+                
                 if (!isSSE) { // If not SSE format
                     console.warn('⚠️ Expected SSE format but got:', ct, '- falling back to browser TTS'); // Log format mismatch
                     stopChatterboxLipSync(true); // Reset lip sync state before fallback
@@ -2645,7 +2705,7 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
                     return; // Exit early
                 } // End SSE check
                 
-                // Prepare analyser-driven lip sync graph for PCM streaming
+				// Prepare analyser-driven lip sync graph for PCM streaming
                 stopChatterboxLipSync(true); // Reset any previous PCM lip sync loop before starting a new stream
                 const pcmCtx = ensureChatterboxLipSyncGraph(); // Ensure audio context and analyser exist
                 if (pcmCtx.state === 'suspended') { // Resume context if required by autoplay policies
@@ -2653,7 +2713,10 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
                 }
                 ttsStreamActive = true; // Mark stream active so analyser loop stays alive between chunks
                 startLipSyncFromAnalyserNode(); // Start analyser-driven lip sync updates
-                ttsCleanupFns.push(() => stopChatterboxLipSync(true)); // Ensure cleanup when speech is cancelled elsewhere
+				ttsCleanupFns.push(() => { // Ensure cleanup when speech is cancelled elsewhere
+					try { stopChatterboxLipSync(true); } catch(_) {}
+					try { if (localController) { localController.abort(); } } catch(_) {}
+				});
 
                 if (window.__opus.playhead === undefined) { // Check if playhead exists
                     window.__opus.playhead = 0; // Initialize playhead to 0
@@ -2664,25 +2727,38 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
                 let ttsChannels = 1; // Default channels (mono, fallback)
                 
                 // Wire SSE events to PCM16 decoder
-                await streamSSE(res, { // Start SSE parsing with callbacks
-                    onInfo: (evt) => { // Handle metadata/info event
+				await streamSSE(res, { // Start SSE parsing with callbacks
+					onInfo: (evt) => { // Handle metadata/info event
+						if (localGen !== ttsGeneration || (localController && localController.signal.aborted)) { return; }
                         ttsSampleRate = evt.sample_rate || evt.sampleRate || 24000; // Capture sample rate from metadata
                         ttsChannels = evt.channels || 1; // Capture channel count from metadata
                         console.log('🎵 PCM16 audio info - sample_rate:', ttsSampleRate, 'channels:', ttsChannels); // Log audio info
                     }, // End onInfo handler
-                    onInit: (b64) => { // Handle init event (if any - PCM16 may not need init)
+					onInit: (b64) => { // Handle init event (if any - PCM16 may not need init)
+						if (localGen !== ttsGeneration || (localController && localController.signal.aborted)) { return; }
                         console.log('🎵 Received init event (PCM16 may not require init)'); // Log init event
                         // PCM16 typically doesn't need init segment, but handle if provided
                     }, // End onInit handler
-                    onDelta: (b64) => playPcm16Delta(b64, ttsSampleRate, ttsChannels), // Decode and play each PCM16 delta chunk
+					onDelta: (b64) => { // Decode and play each PCM16 delta chunk
+						if (localGen !== ttsGeneration || (localController && localController.signal.aborted)) { return; }
+						playPcm16Delta(b64, ttsSampleRate, ttsChannels);
+					},
                     onDone: () => { // Handle stream completion
-                        console.log('🎵 SSE stream complete (PCM16)'); // Log completion
+						if (localGen !== ttsGeneration || (localController && localController.signal.aborted)) { return; }
+						console.log('🎵 SSE stream complete (PCM16)'); // Log completion
                         ttsStreamActive = false; // Mark stream inactive so lip sync can wind down
                         stopChatterboxLipSync(false); // Allow mouth to close after buffers finish
                         // Reset playhead for next stream (optional)
                         // window.__opus.playhead = 0; // Uncomment if you want to reset between streams
                     }, // End onDone handler
                     onError: (e) => { // Handle parsing errors
+                        // Skip fallback if this was an intentional abort (cancellation) or if generation token is stale
+                        if (localGen !== ttsGeneration || (e && e.name === 'AbortError') || (localController && localController.signal.aborted)) {
+                            console.log('🛑 SSE stream cancelled (intentional abort), skipping fallback'); // Log cancellation
+                            ttsStreamActive = false; // Mark stream inactive on abort
+                            stopChatterboxLipSync(true); // Immediately stop lip sync
+                            return; // Exit without fallback
+                        }
                         console.error('❌ SSE parsing error:', e); // Log error
                         ttsStreamActive = false; // Mark stream inactive on error
                         stopChatterboxLipSync(false); // Schedule cleanup for analyser-driven lip sync
@@ -2690,10 +2766,27 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
                     } // End onError handler
                 }); // End streamSSE call
             } catch (e) { // Catch any runtime errors
+                // FIRST: Check if this error is from a stale request (new utterance already started) - this must be checked first
+                if (localGen !== ttsGeneration) {
+                    console.log('🛑 Chatterbox TTS request superseded by new utterance, skipping fallback'); // Log superseded request
+                    ttsStreamActive = false; // Ensure stream-active flag is cleared
+                    stopChatterboxLipSync(true); // Immediately stop lip sync
+                    return; // Exit without fallback
+                }
+                // SECOND: Check if this was an intentional abort (cancellation) - check error name first and use local controller reference
+                const isAbortError = (e && (e.name === 'AbortError' || e.message?.includes('aborted'))) || 
+                                    (localController && localController.signal && localController.signal.aborted && localGen === ttsGeneration);
+                if (isAbortError) {
+                    console.log('🛑 Chatterbox TTS cancelled (intentional abort), skipping fallback'); // Log cancellation
+                    ttsStreamActive = false; // Ensure stream-active flag is cleared on abort
+                    stopChatterboxLipSync(true); // Immediately stop lip sync
+                    return; // Exit without fallback
+                }
+                // Only fallback for real errors (network failures, server errors, etc.)
                 console.error('❌ Chatterbox TTS failed:', e); // Log the error cause
                 ttsStreamActive = false; // Ensure stream-active flag is cleared on failure
                 stopChatterboxLipSync(false); // Schedule analyser cleanup so mouth closes gracefully
-                // Fallback to browser speech if available
+                // Fallback to browser speech if available (only for real errors, not cancellations)
                 textToSpeechFallback(text); // Ensure speech still happens
             } // End try/catch
         } // End speakWithOpenAITTS (Chatterbox streaming TTS)
@@ -2832,8 +2925,8 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
         // Browser speech fallback wrapper used when server TTS fails
         function textToSpeechFallback(text) { // Function to call original SpeechSynthesis path
             try { // Begin guard
-                // Remove emojis and asterisks from text before creating utterance
-                text = removeEmojis(text.replace(/\*/g, ''));
+                // Sanitize text before creating utterance
+                text = sanitizeTTS(text); // Clean text for browser fallback speech
                 const utter = new SpeechSynthesisUtterance(text); // Build utterance instance
                 utter.onend = () => { // Ensure cleanup on browser TTS end
                     try { if (ttsLipSyncIntervalId) { clearInterval(ttsLipSyncIntervalId); ttsLipSyncIntervalId = null; } } catch(_){}

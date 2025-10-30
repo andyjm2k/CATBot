@@ -707,6 +707,24 @@
             }
         }
 
+        // Helper to strip text inside brackets and sanitize for TTS
+        function __stripBracketedStable(text) { // Remove (), [], {}, <> recursively
+            const patterns = [/\([^()]*\)/g, /\[[^\[\]]*\]/g, /\{[^{}]*\}/g, /<[^<>]*>/g]; // One-level patterns
+            let prev = null; // Track previous state
+            let curr = String(text); // Ensure string input
+            while (curr !== prev) { prev = curr; for (const re of patterns) { curr = curr.replace(re, ''); } } // Iterate until stable
+            return curr; // Return bracket-free text
+        }
+        function sanitizeTTS(text) { // Remove brackets, asterisks, and special symbols; normalize spaces
+            if (!text) return text; // Guard for falsy input
+            let t = String(text); // Coerce to string
+            t = __stripBracketedStable(t); // Drop bracketed asides
+            t = t.replace(/\*/g, ''); // Remove asterisks
+            t = t.replace(/[^\w\s\.,!\?;:'"\-]/g, ''); // Remove special symbols, keep common punctuation
+            t = t.replace(/\s+/g, ' ').trim(); // Collapse whitespace
+            return t; // Provide sanitized text
+        }
+
         // Update the textToSpeech function
         function textToSpeech(text) {
             if (!text) {
@@ -723,7 +741,7 @@
             // Cancel any ongoing speech
             speechSynthesis.cancel();
 
-            const utterance = new SpeechSynthesisUtterance(text.replace(/\*/g, ''));
+            const utterance = new SpeechSynthesisUtterance(sanitizeTTS(text));
             const selectedVoiceIndex = parseInt(voiceDropdown.value);
             
             // Ensure we have voices and a valid selection
