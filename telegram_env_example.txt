@@ -23,23 +23,41 @@ TELEGRAM_ADMIN_IDS=your_telegram_user_id
 # OPTIONAL SETTINGS (for basic usage)
 # ==========================================
 
-# Backend URL (default: http://localhost:8002)
-BACKEND_URL=http://localhost:8002
+# Allow everyone to use the bot (set to true to bypass admin list)
+TELEGRAM_ALLOW_ALL=false
 
-# Bot mode: "polling" for development, "webhook" for production
+# Eva proxy server base URL
+TELEGRAM_BACKEND_URL=http://localhost:8002
+
+# Chat endpoint relative to the backend (can also be a full URL)
+TELEGRAM_CHAT_ENDPOINT=/v1/telegram/chat
+
+# Optional overrides passed to the backend
+TELEGRAM_CHAT_MODEL=gpt-4o-mini
+TELEGRAM_BOT_SYSTEM_PROMPT=You are Eva, a helpful AI assistant for Telegram users.
+
+# Conversation tuning
+TELEGRAM_HISTORY_LIMIT=12
+TELEGRAM_CHAT_TIMEOUT=30
+
+# ==========================================
+# ADVANCED SETTINGS (optional)
+# ==========================================
+
+# Override OpenAI-compatible endpoint (useful for Azure/HF/Groq, etc.)
+# TELEGRAM_OPENAI_BASE_URL=https://api.openai.com/v1
+# TELEGRAM_OPENAI_CHAT_PATH=/chat/completions
+
+# OpenAI organization/project routing (optional)
+# OPENAI_ORG_ID=org-123
+# OPENAI_PROJECT_ID=proj-456
+
+# Bot mode: "polling" for development, "webhook" for production (webhook TBD)
 TELEGRAM_MODE=polling
 
-# ==========================================
-# PRODUCTION SETTINGS (webhook mode only)
-# ==========================================
-
-# Your domain with webhook endpoint
+# Placeholder settings for future webhook/Redis support
 # TELEGRAM_WEBHOOK_URL=https://yourdomain.com/v1/telegram/webhook
-
-# Random secret key for webhook validation
 # TELEGRAM_WEBHOOK_SECRET=generate_random_secret_here
-
-# Redis URL for session storage
 # REDIS_URL=redis://localhost:6379/0
 
 # ==========================================
