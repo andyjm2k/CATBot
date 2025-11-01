@@ -90,12 +90,72 @@ class FileResponse(BaseModel):
     message: str  # Human-readable message
     data: Optional[Dict[str, Any]] = None  # Optional data payload
 
+class TelegramChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class TelegramChatRequest(BaseModel):
+    message: str
+    conversation_id: Optional[str] = None
+    user_id: Optional[str] = None
+    history: Optional[List[TelegramChatMessage]] = None
+    system_prompt: Optional[str] = None
+    model: Optional[str] = None
+    temperature: Optional[float] = None
+    max_output_tokens: Optional[int] = None
+
+
+class TelegramChatResponse(BaseModel):
+    reply: str
+    conversation_id: str
+    usage: Optional[Dict[str, Any]] = None
+
 # Global state (similar to the Node.js version)
 mcp_clients = {}
 mcp_servers = {}
 SERVERS_FILE = Path(__file__).parent / "mcp_servers.json"
 TEAM_CONFIG_FILE = Path(__file__).parent / "team-config.json"
 SCRATCH_DIR = Path(__file__).parent / "scratch"
+
+# Telegram chat session storage (simple in-memory cache)
+telegram_conversations: Dict[str, List[Dict[str, str]]] = {}
+
+# Telegram/OpenAI configuration
+TELEGRAM_DEFAULT_MODEL = os.getenv("TELEGRAM_MODEL", os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
+TELEGRAM_SYSTEM_PROMPT = os.getenv(
+    "TELEGRAM_SYSTEM_PROMPT",
+    "You are Eva, a helpful AI assistant that responds concisely for Telegram users.",
+)
+TELEGRAM_HISTORY_LIMIT = int(os.getenv("TELEGRAM_HISTORY_LIMIT", "12"))
+TELEGRAM_CHAT_TIMEOUT = float(os.getenv("TELEGRAM_CHAT_TIMEOUT", "30"))
+TELEGRAM_OPENAI_BASE_URL = os.getenv("TELEGRAM_OPENAI_BASE_URL") or os.getenv(
+    "OPENAI_API_BASE", "https://api.openai.com/v1"
+)
+TELEGRAM_OPENAI_CHAT_PATH = os.getenv("TELEGRAM_OPENAI_CHAT_PATH", "/chat/completions")
+OPENAI_ORG_ID = os.getenv("OPENAI_ORG_ID") or os.getenv("OPENAI_ORGANIZATION")
+OPENAI_PROJECT_ID = os.getenv("OPENAI_PROJECT_ID")
+
+# Helper utilities for Telegram integration
+def build_openai_url(path: str) -> str:
+    """Return absolute URL for OpenAI-compatible endpoints."""
+
+    if path.startswith("http://") or path.startswith("https://"):
+        return path
+
+    base = TELEGRAM_OPENAI_BASE_URL.rstrip("/")
+    if not path.startswith("/"):
+        path = f"/{path}"
+    return f"{base}{path}"
+
+
+def trim_telegram_history(history: List[Dict[str, str]]) -> None:
+    """Trim stored history to the configured limit (in-place)."""
+
+    max_messages = max(TELEGRAM_HISTORY_LIMIT, 1) * 2
+    if len(history) > max_messages:
+        del history[: len(history) - max_messages]
+
 
 # Create scratch directory if it doesn't exist
 SCRATCH_DIR.mkdir(parents=True, exist_ok=True)
@@ -1004,6 +1064,120 @@ async def call_tool(server_id: str, request: ToolCallRequest):
 async def root():
     """Root endpoint."""
     return {"message": "AI Assistant Proxy Server", "version": "2.0.0"}
+
+@app.post("/v1/telegram/chat", response_model=TelegramChatResponse)
+async def telegram_chat_endpoint(request: TelegramChatRequest):
+    """Process a Telegram chat message via OpenAI-compatible API."""
+
+    message_text = (request.message or "").strip()
+    if not message_text:
+        raise HTTPException(status_code=400, detail="message is required")
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=503, detail="OPENAI_API_KEY is not configured on the server")
+
+    conversation_id = request.conversation_id or request.user_id or "default"
+    history = telegram_conversations.setdefault(conversation_id, [])
+
+    if request.history is not None:
+        history = [
+            {"role": msg.role, "content": msg.content}
+            for msg in request.history
+            if msg.content
+        ]
+        telegram_conversations[conversation_id] = history
+        trim_telegram_history(history)
+
+    history.append({"role": "user", "content": message_text})
+    trim_telegram_history(history)
+
+    system_prompt = request.system_prompt
+    if system_prompt is None:
+        system_prompt = TELEGRAM_SYSTEM_PROMPT
+
+    messages: List[Dict[str, str]] = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.extend(history)
+
+    model_name = request.model or TELEGRAM_DEFAULT_MODEL
+    if not model_name:
+        raise HTTPException(status_code=400, detail="No model configured for Telegram chat")
+
+    payload: Dict[str, Any] = {
+        "model": model_name,
+        "messages": messages,
+    }
+
+    if request.temperature is not None:
+        payload["temperature"] = request.temperature
+
+    if request.max_output_tokens is not None:
+        payload["max_tokens"] = request.max_output_tokens
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    if OPENAI_ORG_ID:
+        headers["OpenAI-Organization"] = OPENAI_ORG_ID
+
+    if OPENAI_PROJECT_ID:
+        headers["OpenAI-Project"] = OPENAI_PROJECT_ID
+
+    url = build_openai_url(TELEGRAM_OPENAI_CHAT_PATH)
+
+    try:
+        async with httpx.AsyncClient(timeout=TELEGRAM_CHAT_TIMEOUT) as client:
+            response = await client.post(url, headers=headers, json=payload)
+    except httpx.RequestError as exc:
+        print(f"Telegram chat request error: {exc}")
+        raise HTTPException(status_code=502, detail="Failed to contact language model service") from exc
+
+    if response.status_code != 200:
+        print(f"Telegram chat API error {response.status_code}: {response.text}")
+        detail = response.text
+        try:
+            error_json = response.json()
+            detail = (
+                error_json.get("error", {}).get("message")
+                or error_json.get("message")
+                or detail
+            )
+        except ValueError:
+            pass
+        raise HTTPException(status_code=response.status_code, detail=detail)
+
+    data = response.json()
+    reply = None
+    choices = data.get("choices") or []
+    if choices:
+        message = choices[0].get("message") or {}
+        reply = message.get("content")
+
+    if not reply:
+        reply = "I couldn't generate a response right now. Please try again shortly."
+
+    history.append({"role": "assistant", "content": reply})
+    trim_telegram_history(history)
+
+    usage = data.get("usage") if isinstance(data, dict) else None
+
+    return TelegramChatResponse(
+        reply=reply,
+        conversation_id=conversation_id,
+        usage=usage,
+    )
+
+
+@app.delete("/v1/telegram/chat/{conversation_id}")
+async def telegram_clear_conversation(conversation_id: str):
+    """Clear cached Telegram conversation history for a user."""
+
+    removed = telegram_conversations.pop(conversation_id, None) is not None
+    return {"conversation_id": conversation_id, "cleared": removed}
 
 # Health check endpoint
 @app.get("/health")
