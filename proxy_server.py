@@ -1327,26 +1327,31 @@ async def proxy_whisper(request: Request):
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Failed to proxy Whisper request: {str(e)}")
 
+def build_tts_cors_headers(request: Request) -> Dict[str, str]:
+    """Build CORS headers for TTS proxy responses."""
+    origin = request.headers.get("origin", "http://localhost:8000")
+    requested_headers = request.headers.get("access-control-request-headers")
+    allow_headers = requested_headers or "Content-Type, Authorization"
+    return {
+        "Access-Control-Allow-Origin": origin,
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Headers": allow_headers,
+        "Access-Control-Max-Age": "3600",
+        "Vary": "Origin",
+    }
+
 # TTS voices proxy endpoint to handle CORS
 @app.options("/v1/proxy/tts/voices")
 async def proxy_tts_voices_options(request: Request):
     """Handle OPTIONS preflight requests for TTS voices endpoint."""
-    origin = request.headers.get("origin", "http://localhost:8000")
-    return JSONResponse(
-        content={},
-        headers={
-            "Access-Control-Allow-Origin": origin,
-            "Access-Control-Allow-Methods": "GET, OPTIONS",
-            "Access-Control-Allow-Headers": "*",
-            "Access-Control-Max-Age": "3600",
-        }
-    )
+    return JSONResponse(content={}, headers=build_tts_cors_headers(request))
 
 @app.get("/v1/proxy/tts/voices")
 async def proxy_tts_voices(endpoint: str, request: Request):
     """Proxy TTS voices requests to handle CORS."""
     # Get origin for CORS header
     origin = request.headers.get('origin', 'http://localhost:8000')
+    cors_headers = build_tts_cors_headers(request)
     
     # Log that we received the request
     print(f"📥 Received TTS voices request from origin: {origin}")
@@ -1358,7 +1363,14 @@ async def proxy_tts_voices(endpoint: str, request: Request):
             return JSONResponse(
                 content={"error": "Endpoint parameter is required"},
                 status_code=400,
-                headers={"Access-Control-Allow-Origin": origin}
+                headers=cors_headers
+            )
+
+        if not endpoint.startswith(("http://", "https://")):
+            return JSONResponse(
+                content={"error": "Endpoint must include http:// or https://"},
+                status_code=400,
+                headers=cors_headers
             )
         
         # Normalize the endpoint URL
@@ -1396,14 +1408,14 @@ async def proxy_tts_voices(endpoint: str, request: Request):
                         return JSONResponse(
                             content={"error": f"Could not connect to TTS service at {endpoint}. Tried {voices_url} and {alt_url}"},
                             status_code=503,
-                            headers={"Access-Control-Allow-Origin": origin}
+                            headers=cors_headers
                         )
                 else:
                     print(f"❌ Connection error: {str(conn_err)}")
                     return JSONResponse(
                         content={"error": f"Could not connect to TTS service at {voices_url}: {str(conn_err)}"},
                         status_code=503,
-                        headers={"Access-Control-Allow-Origin": origin}
+                        headers=cors_headers
                     )
         
         # Check if the response is successful
@@ -1413,7 +1425,7 @@ async def proxy_tts_voices(endpoint: str, request: Request):
             return JSONResponse(
                 content={"error": f"TTS voices service error: {response.text[:200]}"},
                 status_code=response.status_code,
-                headers={"Access-Control-Allow-Origin": origin}
+                headers=cors_headers
             )
         
         # Check if response has content
@@ -1423,7 +1435,7 @@ async def proxy_tts_voices(endpoint: str, request: Request):
             # Return empty list with CORS headers
             return JSONResponse(
                 content=[],
-                headers={"Access-Control-Allow-Origin": origin}
+                headers=cors_headers
             )
         
         print(f"📄 Response content (first 200 chars): {response_text[:200]}")
@@ -1435,7 +1447,7 @@ async def proxy_tts_voices(endpoint: str, request: Request):
             # Return data with CORS headers
             return JSONResponse(
                 content=voices_data,
-                headers={"Access-Control-Allow-Origin": origin}
+                headers=cors_headers
             )
         except Exception as json_error:
             print(f"⚠️ Could not parse JSON response: {json_error}")
@@ -1443,7 +1455,7 @@ async def proxy_tts_voices(endpoint: str, request: Request):
             # Return empty list with CORS headers
             return JSONResponse(
                 content=[],
-                headers={"Access-Control-Allow-Origin": origin}
+                headers=cors_headers
             )
     
     except httpx.TimeoutException:
@@ -1451,7 +1463,7 @@ async def proxy_tts_voices(endpoint: str, request: Request):
         return JSONResponse(
             content={"error": "TTS service request timed out"},
             status_code=504,
-            headers={"Access-Control-Allow-Origin": origin}
+            headers=cors_headers
         )
     except Exception as e:
         print(f"❌ TTS voices proxy error: {e}")
@@ -1461,7 +1473,7 @@ async def proxy_tts_voices(endpoint: str, request: Request):
         return JSONResponse(
             content={"error": f"Failed to fetch TTS voices: {str(e)}"},
             status_code=500,
-            headers={"Access-Control-Allow-Origin": origin}
+            headers=cors_headers
         )
 
 # ============================================================================
