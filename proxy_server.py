@@ -17,6 +17,7 @@ from io import BytesIO
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -291,37 +292,45 @@ app.add_middleware(
     expose_headers=["*"],
 )
 
+def build_cors_headers(request: Request) -> Dict[str, str]:
+    """Build CORS headers for the request origin."""
+    origin = request.headers.get("origin", "http://localhost:8000")
+    return {
+        "Access-Control-Allow-Origin": origin,
+        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS, PATCH",
+        "Access-Control-Allow-Headers": "*",
+    }
+
 # Global exception handler to ensure CORS headers are always included
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
     """Handle HTTP exceptions and ensure CORS headers are included."""
-    origin = request.headers.get("origin", "http://localhost:8000")
     return JSONResponse(
         status_code=exc.status_code,
         content={"detail": exc.detail},
-        headers={
-            "Access-Control-Allow-Origin": origin,
-            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS, PATCH",
-            "Access-Control-Allow-Headers": "*",
-        }
+        headers=build_cors_headers(request),
+    )
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """Handle validation errors and ensure CORS headers are included."""
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors()},
+        headers=build_cors_headers(request),
     )
 
 @app.exception_handler(Exception)
 async def general_exception_handler(request: Request, exc: Exception):
     """Handle all other exceptions and ensure CORS headers are included."""
     import traceback
-    origin = request.headers.get("origin", "http://localhost:8000")
     error_trace = traceback.format_exc()
     print(f"❌ Unhandled exception: {exc}")
     print(error_trace)
     return JSONResponse(
         status_code=500,
         content={"detail": f"Internal server error: {str(exc)}"},
-        headers={
-            "Access-Control-Allow-Origin": origin,
-            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS, PATCH",
-            "Access-Control-Allow-Headers": "*",
-        }
+        headers=build_cors_headers(request),
     )
 
 # Helper function to clean HTML text (similar to Node.js version)
@@ -1331,25 +1340,19 @@ async def proxy_whisper(request: Request):
 @app.options("/v1/proxy/tts/voices")
 async def proxy_tts_voices_options(request: Request):
     """Handle OPTIONS preflight requests for TTS voices endpoint."""
-    origin = request.headers.get("origin", "http://localhost:8000")
     return JSONResponse(
         content={},
         headers={
-            "Access-Control-Allow-Origin": origin,
-            "Access-Control-Allow-Methods": "GET, OPTIONS",
-            "Access-Control-Allow-Headers": "*",
+            **build_cors_headers(request),
             "Access-Control-Max-Age": "3600",
-        }
+        },
     )
 
 @app.get("/v1/proxy/tts/voices")
 async def proxy_tts_voices(endpoint: str, request: Request):
     """Proxy TTS voices requests to handle CORS."""
-    # Get origin for CORS header
-    origin = request.headers.get('origin', 'http://localhost:8000')
-    
     # Log that we received the request
-    print(f"📥 Received TTS voices request from origin: {origin}")
+    print(f"📥 Received TTS voices request from origin: {request.headers.get('origin', 'none')}")
     print(f"📥 Request endpoint parameter: {endpoint}")
     
     try:
@@ -1358,53 +1361,69 @@ async def proxy_tts_voices(endpoint: str, request: Request):
             return JSONResponse(
                 content={"error": "Endpoint parameter is required"},
                 status_code=400,
-                headers={"Access-Control-Allow-Origin": origin}
+                headers=build_cors_headers(request),
             )
         
         # Normalize the endpoint URL
         endpoint = endpoint.rstrip('/')
-        
-        # Construct voices URL - if endpoint includes /v1, use /v1/voices, otherwise try /voices
-        if endpoint.endswith('/v1'):
-            voices_url = endpoint + '/voices'
-        elif '/v1' in endpoint:
-            # Endpoint already has /v1 somewhere, append /voices
-            voices_url = endpoint + '/voices'
+        if not endpoint.startswith(("http://", "https://")):
+            endpoint = f"http://{endpoint}"
+
+        candidate_urls = []
+        if endpoint.endswith(("/voices", "/v1/voices", "/tts/voices", "/v1/tts/voices")):
+            candidate_urls.append(endpoint)
         else:
-            # Try /v1/voices first (OpenAI-compatible), then fallback to /voices
-            voices_url = endpoint + '/v1/voices'
+            if endpoint.endswith("/v1"):
+                candidate_urls.extend([f"{endpoint}/voices", f"{endpoint}/tts/voices"])
+            elif endpoint.endswith("/v1/tts"):
+                candidate_urls.append(f"{endpoint}/voices")
+            elif endpoint.endswith("/tts"):
+                candidate_urls.append(f"{endpoint}/voices")
+            else:
+                candidate_urls.extend(
+                    [
+                        f"{endpoint}/v1/voices",
+                        f"{endpoint}/voices",
+                        f"{endpoint}/v1/tts/voices",
+                        f"{endpoint}/tts/voices",
+                    ]
+                )
+
+        seen = set()
+        candidate_urls = [url for url in candidate_urls if not (url in seen or seen.add(url))]
         
-        print(f"🎤 Attempting to fetch TTS voices from: {voices_url}")
+        print(f"🎤 Attempting to fetch TTS voices from: {candidate_urls}")
         
         # Fetch voices from the TTS service
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            try:
-                response = await client.get(voices_url)
-                print(f"✅ TTS voices response status: {response.status_code} from {voices_url}")
-            except httpx.ConnectError as conn_err:
-                # If /v1/voices fails, try /voices
-                if voices_url.endswith('/v1/voices'):
-                    alt_url = endpoint + '/voices'
-                    print(f"⚠️ Connection failed to {voices_url}, trying alternative: {alt_url}")
-                    print(f"   Connection error: {str(conn_err)}")
-                    try:
-                        response = await client.get(alt_url)
-                        voices_url = alt_url
-                        print(f"✅ TTS voices response status: {response.status_code} from {voices_url}")
-                    except httpx.ConnectError as alt_err:
-                        print(f"❌ Both URLs failed. Original: {str(conn_err)}, Alternative: {str(alt_err)}")
-                        return JSONResponse(
-                            content={"error": f"Could not connect to TTS service at {endpoint}. Tried {voices_url} and {alt_url}"},
-                            status_code=503,
-                            headers={"Access-Control-Allow-Origin": origin}
-                        )
-                else:
-                    print(f"❌ Connection error: {str(conn_err)}")
-                    return JSONResponse(
-                        content={"error": f"Could not connect to TTS service at {voices_url}: {str(conn_err)}"},
-                        status_code=503,
-                        headers={"Access-Control-Allow-Origin": origin}
-                    )
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            response = None
+            voices_url = None
+            last_error = None
+            for candidate_url in candidate_urls:
+                try:
+                    response = await client.get(candidate_url)
+                    voices_url = candidate_url
+                    print(f"✅ TTS voices response status: {response.status_code} from {voices_url}")
+                    if response.status_code in {404, 405}:
+                        print(f"⚠️ TTS voices endpoint not found at {voices_url}, trying next candidate.")
+                        continue
+                    break
+                except httpx.ConnectError as conn_err:
+                    last_error = conn_err
+                    print(f"⚠️ Connection failed to {candidate_url}: {str(conn_err)}")
+                    continue
+
+            if response is None:
+                error_detail = (
+                    f"Could not connect to TTS service at {endpoint}. Tried {candidate_urls}"
+                )
+                if last_error:
+                    error_detail = f"{error_detail}. Last error: {last_error}"
+                return JSONResponse(
+                    content={"error": error_detail},
+                    status_code=503,
+                    headers=build_cors_headers(request),
+                )
         
         # Check if the response is successful
         if response.status_code != 200:
@@ -1413,7 +1432,7 @@ async def proxy_tts_voices(endpoint: str, request: Request):
             return JSONResponse(
                 content={"error": f"TTS voices service error: {response.text[:200]}"},
                 status_code=response.status_code,
-                headers={"Access-Control-Allow-Origin": origin}
+                headers=build_cors_headers(request),
             )
         
         # Check if response has content
@@ -1423,7 +1442,7 @@ async def proxy_tts_voices(endpoint: str, request: Request):
             # Return empty list with CORS headers
             return JSONResponse(
                 content=[],
-                headers={"Access-Control-Allow-Origin": origin}
+                headers=build_cors_headers(request),
             )
         
         print(f"📄 Response content (first 200 chars): {response_text[:200]}")
@@ -1435,7 +1454,7 @@ async def proxy_tts_voices(endpoint: str, request: Request):
             # Return data with CORS headers
             return JSONResponse(
                 content=voices_data,
-                headers={"Access-Control-Allow-Origin": origin}
+                headers=build_cors_headers(request),
             )
         except Exception as json_error:
             print(f"⚠️ Could not parse JSON response: {json_error}")
@@ -1443,7 +1462,7 @@ async def proxy_tts_voices(endpoint: str, request: Request):
             # Return empty list with CORS headers
             return JSONResponse(
                 content=[],
-                headers={"Access-Control-Allow-Origin": origin}
+                headers=build_cors_headers(request),
             )
     
     except httpx.TimeoutException:
@@ -1451,7 +1470,7 @@ async def proxy_tts_voices(endpoint: str, request: Request):
         return JSONResponse(
             content={"error": "TTS service request timed out"},
             status_code=504,
-            headers={"Access-Control-Allow-Origin": origin}
+            headers=build_cors_headers(request),
         )
     except Exception as e:
         print(f"❌ TTS voices proxy error: {e}")
@@ -1461,7 +1480,7 @@ async def proxy_tts_voices(endpoint: str, request: Request):
         return JSONResponse(
             content={"error": f"Failed to fetch TTS voices: {str(e)}"},
             status_code=500,
-            headers={"Access-Control-Allow-Origin": origin}
+            headers=build_cors_headers(request),
         )
 
 # ============================================================================
