@@ -1,0 +1,40 @@
+# Research Plan
+
+- [ ] Define scope and identify exact product variant(s).
+- [ ] Confirm model name and bundles (PuppyPi vs PuppyPi Pro; Raspberry Pi version; included LiDAR and robotic arm or optional; ROS1 vs ROS2 support).
+- [ ] Note firmware/software versions, release dates, and any major hardware revisions to time-bound reviews.
+- [ ] Build a multilingual search strategy and keyword set.
+- [ ] English keywords: “Hiwonder PuppyPi review,” “PuppyPi ROS quadruped user feedback,” “PuppyPi ChatGPT integration,” “PuppyPi LiDAR SLAM,” “PuppyPi robotic arm,” “PuppyPi voice interaction,” “PuppyPi problems/issues.”
+- [ ] Chinese keywords (Hiwonder = 幻尔科技): “幻尔科技 PuppyPi 评测,” “PuppyPi 使用体验/测评/评价,” “PuppyPi 语音 视觉 雷达 机械臂,” “PuppyPi ROS 问题.”
+- [ ] Use operators and filters: site:amazon.com, site:github.com, site:discourse.ros.org, time filters (past year), and platform-specific searches (YouTube/Bilibili).
+- [ ] Collect retailer and official-store reviews and Q&A.
+- [ ] Target Hiwonder store, Amazon, AliExpress, RobotShop, Banggood, eBay product pages.
+- [ ] Extract ratings, most recent reviews, verified-purchase flags, Q&A, returns/defects mentions.
+- [ ] Capture metadata: date, variant, attachments used (LiDAR/arm), reviewer profile; archive pages.
+- [ ] Gather long-form independent reviews and demos.
+- [ ] Search YouTube, Bilibili, Vimeo for “PuppyPi review/demo/build,” filter by upload date and view/engagement.
+- [ ] Find blog posts and project writeups on Medium, Hackster, Hackaday, personal blogs, university lab pages.
+- [ ] Transcribe or summarize key sections; note test conditions (surface, lighting, noise), evaluation metrics, and conclusions.
+- [ ] Mine technical and user communities for discussions.
+- [ ] ROS Discourse and ROS Answers, Reddit (r/robotics, r/ROS, r/raspberry_pi, r/RobotLearning), Stack Overflow (ROS/OpenCV tags), Discord/Slack/FB robotics groups.
+- [ ] Look for build logs, troubleshooting threads, “first impressions,” classroom use reports, and comparisons to similar robots.
+- [ ] Record unresolved issues and common workarounds.
+- [ ] Analyze developer repositories and issue trackers.
+- [ ] Review Hiwonder’s GitHub org and related repos (e.g., puppypi_ros, bringup, ai_vision, voice, lidar/slam).
+- [ ] Read Issues/PRs for pain points (install scripts, ROS version compatibility, calibration, servo failures), frequency of updates, maintainer responsiveness.
+- [ ] Note forks and community contributions; track version history and breaking changes.
+- [ ] Conduct feature-by-feature evidence extraction.
+- [ ] AI vision: model(s) used, accuracy/robustness, frame rates on Raspberry Pi, lighting sensitivity, dataset/customization support.
+- [ ] Voice interaction: latency, wake word reliability, microphone quality, offline vs cloud dependence, language support.
+- [ ] LiDAR/SLAM: sensor model, mapping quality, ROS package used (e.g., GMapping/Cartographer), odometry drift, loop closure success.
+- [ ] Robotic arm: payload, repeatability, calibration ease, integration with base locomotion.
+- [ ] ChatGPT “large AI model” integration: exact mechanism (API key, costs, rate limits), on-device vs cloud, reliability, privacy considerations.
+- [ ] Core robot: assembly, documentation, gait stability, terrain handling, servo noise/heat, battery life/charging, durability.
+- [ ] Assess credibility and synthesize sentiment.
+- [ ] Evaluate reviewer expertise, conflicts of interest (sponsored units), and verification.
+- [ ] Weigh recency and relevance to your variant; separate classroom/education use from research/hobbyist contexts.
+- [ ] Cluster recurring pros/cons and failure modes; extract representative quotes and evidence links.
+- [ ] Contextualize and close gaps.
+- [ ] Benchmark against alternatives (e.g., Petoi Bittle X, Yahboom ROS quadrupeds, lower-cost kits; note differences vs higher-end like Unitree Go2 EDU) to calibrate expectations.
+- [ ] If gaps remain (e.g., limited LiDAR or arm feedback), post targeted questions in ROS/Reddit groups and contact Hiwonder support for case studies or references.
+- [ ] Deliverables: an evidence table (source, date, variant, feature, sentiment, quote, link), an annotated bibliography, and a final summary of findings with actionable recommendations.

@@ -664,23 +664,37 @@
     <script src="https://cdn.jsdelivr.net/npm/eventemitter3@4.0.7/umd/eventemitter3.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/index.min.js"></script>
 
-    <!-- Three.js and VRM dependencies (VRM 1.0 via modules) -->
+    <!-- Three.js and VRM dependencies (VRM 1.0 and VRM 0.0 via modules) -->
     <script type="module">
-        import * as THREE_NS from 'https://esm.sh/three@0.150.1';
-        import { GLTFLoader } from 'https://esm.sh/three@0.150.1/examples/jsm/loaders/GLTFLoader.js';
-        import { VRMLoaderPlugin, VRMUtils } from 'https://esm.sh/@pixiv/three-vrm@3.4.3?deps=three@0.150.1';
-        import { VRMAnimation, VRMAnimationLoaderPlugin } from 'https://esm.sh/@pixiv/three-vrm-animation@3.4.3?deps=three@0.150.1';
+        (async () => {
+            try {
+                // Import THREE.js and GLTFLoader
+                const THREE_NS = await import('https://esm.sh/three@0.150.1');
+                const { GLTFLoader } = await import('https://esm.sh/three@0.150.1/examples/jsm/loaders/GLTFLoader.js');
+                
+                // Load VRM library (version 3.x supports both VRM 0.0 and 1.0 models)
+                const vrmModule = await import('https://esm.sh/@pixiv/three-vrm@3.4.3?deps=three@0.150.1');
+                const { VRMAnimation, VRMAnimationLoaderPlugin } = await import('https://esm.sh/@pixiv/three-vrm-animation@3.4.3?deps=three@0.150.1');
 
-        // Expose to global for non-module scripts below (do NOT mutate the module namespace)
-        window.THREE = THREE_NS;
-        window.GLTFLoader = GLTFLoader;
-        window.VRMLoaderPlugin = VRMLoaderPlugin;
-        window.VRMUtils = VRMUtils;
-        window.VRMAnimation = VRMAnimation;
-        window.VRMAnimationLoaderPlugin = VRMAnimationLoaderPlugin;
+                // Expose to global for non-module scripts below (do NOT mutate the module namespace)
+                // THREE.js namespace import gives us the module object directly
+                window.THREE = THREE_NS;
+                window.GLTFLoader = GLTFLoader;
+                // Store VRM loader and utils (same library works for both VRM 0.0 and 1.0)
+                window.VRMLoaderPlugin = vrmModule.VRMLoaderPlugin;
+                window.VRMUtils = vrmModule.VRMUtils;
+                window.VRMAnimation = VRMAnimation;
+                window.VRMAnimationLoaderPlugin = VRMAnimationLoaderPlugin;
 
-        // Signal readiness
-        window.__vrmModulesReady = true;
+                // Signal readiness
+                window.__vrmModulesReady = true;
+                console.log('VRM modules loaded successfully');
+            } catch (error) {
+                console.error('Failed to load VRM modules:', error);
+                window.__vrmModulesReady = false;
+                window.__vrmModulesError = error;
+            }
+        })();
     </script>
     <script src="ai-autogen-call.js"></script>
     <!-- Dependencies for PDF to PowerPoint conversion -->
@@ -896,12 +910,7 @@
                     <label for="tts-voice-dropdown">TTS Voice:</label>
                     <div style="display: flex; gap: 10px; align-items: center;">
                         <select id="tts-voice-dropdown" style="flex: 1;">
-                            <option value="alloy">alloy</option>
-                            <option value="echo">echo</option>
-                            <option value="fable">fable</option>
-                            <option value="onyx">onyx</option>
-                            <option value="nova">nova</option>
-                            <option value="shimmer">shimmer</option>
+                            <option value="Empress">Empress</option>
                         </select>
                         <button type="button" id="refresh-tts-voices-btn" style="width: auto; margin: 0; padding: 8px 12px;" title="Refresh voices from TTS endpoint">
                             <i class="fas fa-sync-alt"></i>
@@ -957,6 +966,13 @@
                     </div>
                     <span class="helper-text">Switch between 2D Live2D and 3D VRM avatar modes</span>
 
+                    <label for="vrm-version-dropdown">VRM Version:</label>
+                    <select id="vrm-version-dropdown">
+                        <option value="1.0">VRM 1.0</option>
+                        <option value="0.0">VRM 0.0</option>
+                    </select>
+                    <span class="helper-text">Select VRM format version (1.0 is newer, 0.0 is legacy)</span>
+
                     <label for="vrm-model-dropdown">VRM Model:</label>
                     <select id="vrm-model-dropdown">
                         <option value="">Loading models...</option>
@@ -966,7 +982,10 @@
                     <label for="vrm-model-list">VRM Model Paths (one per line):</label>
                     <textarea id="vrm-model-list" rows="4" placeholder="./model_avatar/NAME/FILE.vrm
 Example: ./model_avatar/MyVRM/MyModel.vrm
-Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
+Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/Eva.vrm
+./model_avatar/Greyson/Greyson.vrm
+./model_avatar/Bianca/Bianca.vrm
+./model_avatar/Esme/Esme.vrm</textarea>
                     <span class="helper-text">Add new VRM model paths on new lines to make them available in the selector</span>
 
                     <label for="vrm-scale-range">VRM Scale: <span id="vrm-scale-value">1.0</span></label>
@@ -1065,17 +1084,36 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
         
         // Function to add a message to the history display
         function addMessageToHistory(role, content) {
+            // Validate inputs
+            if (!role || (role !== 'user' && role !== 'assistant')) {
+                console.error('addMessageToHistory called with invalid role:', role);
+                return;
+            }
+            
+            // Validate content is a string and not empty
+            if (typeof content !== 'string') {
+                console.error('addMessageToHistory called with invalid content type:', typeof content, content);
+                return;
+            }
+            
+            // Trim content but don't reject empty strings (assistant might send empty responses)
+            content = content.trim();
+            
+            console.log('addMessageToHistory called - role:', role, 'content:', content); // Debug log
+            
             // Get the configured names or use defaults
             const userName = userNameInput.value.trim() || 'User';
             const assistantName = assistantNameInput.value.trim() || 'EVA';
             
-            // Create message object
+            // Create message object - ensure content is set correctly (not sender name)
             const message = {
                 role: role, // 'user' or 'assistant'
-                content: content,
+                content: content, // The actual message content, not the sender name
                 sender: role === 'user' ? userName : assistantName,
                 timestamp: new Date()
             };
+            
+            console.log('Message object created:', { role: message.role, sender: message.sender, content: message.content }); // Debug log
             
             // Add to array and limit to 25 messages
             displayedMessages.push(message);
@@ -1099,7 +1137,15 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
             messageHistory.innerHTML = '';
             
             // Render each message
-            displayedMessages.forEach(msg => {
+            displayedMessages.forEach((msg, index) => {
+                // Debug log to verify message content before rendering
+                console.log(`Rendering message ${index}:`, { 
+                    role: msg.role, 
+                    sender: msg.sender, 
+                    content: msg.content,
+                    contentLength: msg.content ? msg.content.length : 0
+                });
+                
                 const messageDiv = document.createElement('div');
                 messageDiv.className = `message ${msg.role}`;
                 
@@ -1109,7 +1155,13 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
                 
                 const contentDiv = document.createElement('div');
                 contentDiv.className = 'message-content';
-                contentDiv.textContent = msg.content;
+                // Ensure we're setting the actual content, not the sender name
+                if (msg.content && typeof msg.content === 'string') {
+                    contentDiv.textContent = msg.content;
+                } else {
+                    console.warn(`Message ${index} has invalid content:`, msg.content);
+                    contentDiv.textContent = '[No content]';
+                }
                 
                 messageDiv.appendChild(senderDiv);
                 messageDiv.appendChild(contentDiv);
@@ -1166,6 +1218,7 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
         let vrmThinkPoseActive = false; // Whether the thinking pose is active
         let thinkPoseTimeoutId = null; // Auto-release timer for thinking pose
         let thinkPoseWeight = 0; // Current blend for thinking pose
+        let vrmVersion = '1.0'; // Selected VRM version ('1.0' or '0.0')
         let targetThinkPoseWeight = 0; // Target blend for thinking pose
         let vrmCryPoseActive = false; // Whether the cry pose is active
         let cryPoseTimeoutId = null; // Auto-release timer for cry pose
@@ -1351,11 +1404,11 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
 
             try {
                 // Ensure VRM ES modules have loaded and THREE globals are present
-                if (!window.__vrmModulesReady || !window.THREE || !THREE.GLTFLoader || !THREE.VRMLoaderPlugin) {
+                if (!window.__vrmModulesReady || !window.THREE || !window.GLTFLoader || !window.VRMLoaderPlugin) {
                     await new Promise((resolve) => {
                         const start = Date.now();
                         const timer = setInterval(() => {
-                            if (window.__vrmModulesReady && window.THREE && THREE.GLTFLoader && THREE.VRMLoaderPlugin) {
+                            if (window.__vrmModulesReady && window.THREE && window.GLTFLoader && window.VRMLoaderPlugin) {
                                 clearInterval(timer);
                                 resolve();
                             } else if (Date.now() - start > 5000) {
@@ -1821,7 +1874,7 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
                 ttsVoiceDropdown.innerHTML = '';
                 
                 // Add default OpenAI voices first
-                const defaultVoices = ['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer'];
+                const defaultVoices = ['Empress'];
                 defaultVoices.forEach(voice => {
                     const option = document.createElement('option');
                     option.value = voice;
@@ -2661,6 +2714,9 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
                     input: text, // The text to speak (emojis already removed)
                     stream: true, // Enable streaming
                     stream_format: 'sse', // Use SSE format for browser-friendly streaming
+                    streaming_chunk_size: 150, // Request 10 byte chunks
+                    streaming_strategy: 'word', // Request word-based streaming strategy
+                    streaming_quality: 'fast', // Request fast quality streaming
                     container: 'raw', // Request raw PCM format
                     codec: 'pcm16' // Request PCM16 codec format
                 }; // End payload
@@ -3065,6 +3121,7 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
         // Function to save tool settings to localStorage
         function saveToolSettings() {
             try {
+                const vrmVersionDropdown = document.getElementById('vrm-version-dropdown');
                 const settings = {
                     userName: userNameInput.value,
                     assistantName: assistantNameInput.value,
@@ -3077,7 +3134,8 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
                     ttsService: ttsServiceOpenAI.checked ? 'openai' : 'microsoft', // Save TTS service selection
                     ttsEndpoint: ttsEndpointInput.value, // Save TTS endpoint
                     ttsModel: ttsModelDropdown.value, // Save TTS model
-                    ttsVoice: ttsVoiceDropdown.value // Save TTS voice
+                    ttsVoice: ttsVoiceDropdown.value, // Save TTS voice
+                    vrmVersion: vrmVersionDropdown ? vrmVersionDropdown.value : '1.0' // Save VRM version selection
                 };
                 localStorage.setItem('toolSettings', JSON.stringify(settings));
             } catch (error) {
@@ -3139,6 +3197,13 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
                         ttsVoiceDropdown.value = settings.ttsVoice;
                     }
                     
+                    // Restore VRM version setting
+                    const vrmVersionDropdown = document.getElementById('vrm-version-dropdown');
+                    if (settings.vrmVersion !== undefined && vrmVersionDropdown) {
+                        vrmVersionDropdown.value = settings.vrmVersion;
+                        vrmVersion = settings.vrmVersion; // Update the global variable
+                    }
+                    
                     // If OpenAI-compatible TTS is selected, fetch available voices
                     if (settings.ttsService === 'openai' && ttsServiceOpenAI) {
                         ttsServiceOpenAI.checked = true;
@@ -3189,6 +3254,20 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
             if (ttsModelDropdown) ttsModelDropdown.addEventListener('change', saveToolSettings);
             if (ttsVoiceDropdown) ttsVoiceDropdown.addEventListener('change', saveToolSettings);
             
+            // Add event listener for VRM version dropdown
+            const vrmVersionDropdown = document.getElementById('vrm-version-dropdown');
+            if (vrmVersionDropdown) {
+                vrmVersionDropdown.addEventListener('change', async () => {
+                    vrmVersion = vrmVersionDropdown.value; // Update global variable
+                    saveToolSettings(); // Save the setting
+                    // Reinitialize VRM if currently active
+                    if (document.getElementById('vrm-mode') && document.getElementById('vrm-mode').checked && vrmModel) {
+                        cleanupVRM();
+                        await initVRM();
+                    }
+                });
+            }
+            
             // Add event listener for refresh button
             if (refreshTtsVoicesBtn) {
                 refreshTtsVoicesBtn.addEventListener('click', fetchTtsVoices);
@@ -3212,6 +3291,11 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
 
                 // Load persisted tool settings (User Name, Assistant Name, etc.)
                 loadToolSettings();
+                // Ensure VRM version is initialized (default to 1.0 if not set)
+                const vrmVersionDropdown = document.getElementById('vrm-version-dropdown');
+                if (vrmVersionDropdown && !vrmVersion) {
+                    vrmVersion = vrmVersionDropdown.value || '1.0';
+                }
 
                 // Initialize core features
             loadVoices();
@@ -3318,7 +3402,11 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
                 recorderNode = new AudioWorkletNode(audioContext, 'recorder-worklet');
                 recorderNode.port.onmessage = (event) => {
                     const inputData = event.data;
-                    console.log('Received audio data chunk:', inputData.length);
+                    // Log audio chunk info (but limit frequency to avoid console spam)
+                    if (audioData.length % 100 === 0) {
+                        console.log('Received audio data chunk:', inputData.length, 'samples (total chunks:', audioData.length + 1, ')');
+                    }
+                    // Store the audio data chunk
                     audioData.push(new Float32Array(inputData));
                 };
 
@@ -3387,8 +3475,10 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
                 // clearMessageHistory(); // Commented out to preserve chat history when using STT
 
                 // Connect the nodes and start recording
+                // Connect mediaStreamSource to recorderNode to capture audio
                 mediaStreamSource.connect(recorderNode);
-                recorderNode.connect(audioContext.destination); // Add this line
+                // Note: recorderNode is NOT connected to destination to avoid audio feedback loop
+                // The audio is only captured, not played back through speakers
                 
                 // Update UI
                 startRecordBtn.innerHTML = '<i class="fas fa-stop"></i>';
@@ -3401,44 +3491,121 @@ Get VRM files from VRoid Studio or other 3D avatar creators"></textarea>
 
         // Update the stopRecording function
         function stopRecording() {
-            if (isRecording && recorderNode && audioContext) {
-                // Properly disconnect both ends of the audio nodes
-                mediaStreamSource.disconnect();
-                recorderNode.disconnect();
-                
-                // Update UI
+            // Check if we're actually recording and have required nodes
+            if (!isRecording || !recorderNode || !audioContext) {
+                // Not recording or missing required nodes, reset state and exit
+                isRecording = false;
                 startRecordBtn.innerHTML = '<i class="fas fa-microphone"></i>';
                 startRecordBtn.title = "Start Recording";
-                status.textContent = "Processing recording...";
-                
-                // Set recording state to false BEFORE processing the audio
-                isRecording = false;
-                
-                // Process the recorded audio if we have data
-                if (audioData.length > 0) {
-                    processAudioData();
-                } else {
-                    status.textContent = "No audio recorded";
+                return; // Exit early if not in valid recording state
+            }
+            
+            // Safely disconnect audio nodes with error handling
+            try {
+                // Disconnect mediaStreamSource if it exists and is connected
+                if (mediaStreamSource) {
+                    try {
+                        mediaStreamSource.disconnect();
+                    } catch (disconnectError) {
+                        // Node may already be disconnected, log but continue
+                        console.warn('MediaStreamSource disconnect warning:', disconnectError.message);
+                    }
                 }
+                
+                // Disconnect recorderNode if it exists and is connected
+                if (recorderNode) {
+                    try {
+                        recorderNode.disconnect();
+                    } catch (disconnectError) {
+                        // Node may already be disconnected, log but continue
+                        console.warn('RecorderNode disconnect warning:', disconnectError.message);
+                    }
+                }
+            } catch (error) {
+                // Log any unexpected errors during disconnection
+                console.error('Error during audio node disconnection:', error);
+            }
+            
+            // Update UI
+            startRecordBtn.innerHTML = '<i class="fas fa-microphone"></i>';
+            startRecordBtn.title = "Start Recording";
+            status.textContent = "Processing recording...";
+            
+            // Set recording state to false BEFORE processing the audio
+            isRecording = false;
+            
+            // Process the recorded audio if we have data
+            if (audioData.length > 0) {
+                processAudioData();
+            } else {
+                status.textContent = "No audio recorded";
             }
         }
 
         function processAudioData() {
-    // Flatten the audio data
-    let flatData = flattenArray(audioData);
+            // Validate audioContext exists before processing
+            if (!audioContext || !audioContext.sampleRate) {
+                // Audio context is missing or invalid, show error and exit
+                console.error('Audio context is not available for processing');
+                status.textContent = "Processing failed: Audio context unavailable. Please try recording again.";
+                audioData = []; // Clear audio data
+                return; // Exit early if audio context is invalid
+            }
+            
+            // Flatten the audio data
+            let flatData = flattenArray(audioData);
+            
+            // Validate that we have meaningful audio data
+            console.log('Audio data chunks:', audioData.length);
+            console.log('Total samples:', flatData.length);
+            console.log('Sample rate:', audioContext.sampleRate);
+            const durationSeconds = flatData.length / audioContext.sampleRate;
+            console.log('Recording duration:', durationSeconds.toFixed(2), 'seconds');
+            
+            // Check if recording is too short (less than 0.5 seconds)
+            if (durationSeconds < 0.5) {
+                console.error('Recording is too short:', durationSeconds, 'seconds');
+                status.textContent = "Recording too short. Please speak for at least 0.5 seconds.";
+                audioData = []; // Clear audio data
+                return; // Exit early if recording is too short
+            }
+            
+            // Check if audio is mostly silence (very low amplitude)
+            let maxAmplitude = 0;
+            let sumAmplitude = 0;
+            for (let i = 0; i < flatData.length; i++) {
+                const absValue = Math.abs(flatData[i]);
+                maxAmplitude = Math.max(maxAmplitude, absValue);
+                sumAmplitude += absValue;
+            }
+            const avgAmplitude = sumAmplitude / flatData.length;
+            console.log('Max amplitude:', maxAmplitude.toFixed(4));
+            console.log('Average amplitude:', avgAmplitude.toFixed(4));
+            
+            // If audio is too quiet (max amplitude less than 0.01), warn the user
+            if (maxAmplitude < 0.01) {
+                console.warn('Audio appears to be very quiet or silent');
+                status.textContent = "Audio too quiet. Please speak louder or check your microphone.";
+                audioData = []; // Clear audio data
+                return; // Exit early if audio is too quiet
+            }
 
-    // Encode the data into WAV format
-    let wavBlob = encodeWAV(flatData, audioContext.sampleRate);
+            // Encode the data into WAV format using validated sample rate
+            let wavBlob = encodeWAV(flatData, audioContext.sampleRate);
+            
+            // Log the blob size for debugging
+            console.log('WAV blob size:', wavBlob.size, 'bytes');
+            
+            // Save the WAV file for testing/debugging (helps verify audio quality)
+            // Uncomment the next line to enable automatic WAV file downloads for debugging
+            // saveWAVFile(wavBlob);
 
-    // Save the WAV file for testing
-    // saveWAVFile(wavBlob);
+            // Clear audioData for next recording
+            audioData = [];
 
-    // Clear audioData for next recording
-    audioData = [];
-
-    // Send to Whisper
-    sendAudioToWhisper(wavBlob);
-}
+            // Send to Whisper
+            sendAudioToWhisper(wavBlob);
+        }
 /*
 function saveWAVFile(wavBlob) {
     const url = URL.createObjectURL(wavBlob);
@@ -3514,7 +3681,15 @@ function saveWAVFile(wavBlob) {
         }
 
         async function sendAudioToWhisper(audioBlob) {
+            // Validate API key before making request
             const apiKey = apiKeyInput.value.trim();
+            if (!apiKey || apiKey.length === 0) {
+                // API key is missing, show error and exit
+                console.error('API key is required for transcription');
+                status.textContent = "Transcription failed: API key is missing. Please enter your API key.";
+                return; // Exit early if API key is missing
+            }
+            
             // Use the proxy server endpoint which has CORS configured
             const whisperEndpoint = 'http://localhost:8002/v1/audio/transcriptions';
 
@@ -3531,24 +3706,110 @@ function saveWAVFile(wavBlob) {
                     },
                     body: formData
                 });
-                const data = await response.json();
+                
+                // Check if response is successful before parsing JSON
+                if (!response.ok) {
+                    // Response is not OK, try to get error details
+                    let errorMessage = `Transcription failed: Server returned ${response.status} ${response.statusText}`;
+                    try {
+                        // Try to parse error response for more details
+                        const errorData = await response.json();
+                        if (errorData.error && errorData.error.message) {
+                            errorMessage = `Transcription failed: ${errorData.error.message}`;
+                        } else if (errorData.message) {
+                            errorMessage = `Transcription failed: ${errorData.message}`;
+                        }
+                    } catch (parseError) {
+                        // If error response is not JSON, use status-based message
+                        if (response.status === 401) {
+                            errorMessage = "Transcription failed: Invalid or missing API key. Please check your API key.";
+                        } else if (response.status === 404) {
+                            errorMessage = "Transcription failed: Endpoint not found. Please check the server configuration.";
+                        } else if (response.status >= 500) {
+                            errorMessage = "Transcription failed: Server error. Please try again later.";
+                        }
+                    }
+                    console.error('Whisper API error:', errorMessage);
+                    status.textContent = errorMessage;
+                    return; // Exit early on error
+                }
+                
+                // Response is OK, parse JSON
+                // Read response as text first so we can log it if JSON parsing fails
+                let responseText;
+                let data;
+                try {
+                    // Read the response body as text first (can only be read once)
+                    responseText = await response.text();
+                    // Try to parse the text as JSON
+                    data = JSON.parse(responseText);
+                } catch (jsonError) {
+                    // JSON parsing failed - log the raw response text for debugging
+                    console.error('Failed to parse Whisper response as JSON:', jsonError);
+                    console.error('Raw response text:', responseText || 'Unable to read response');
+                    status.textContent = "Transcription failed: Invalid server response format. Please try again.";
+                    return;
+                }
+                
                 console.log('Whisper response:', data);
+                
+                // Check for different possible response formats
+                let transcribedText = null;
                 if (data.text) {
-                    // Set the input with the transcribed text
-                    const transcribedText = data.text.trim();
+                    // Standard format: { text: "transcribed text" }
+                    transcribedText = data.text;
+                } else if (data.transcription) {
+                    // Alternative format: { transcription: "transcribed text" }
+                    transcribedText = data.transcription;
+                } else if (typeof data === 'string') {
+                    // Response might be a plain string
+                    transcribedText = data;
+                } else if (data.result && data.result.text) {
+                    // Nested format: { result: { text: "transcribed text" } }
+                    transcribedText = data.result.text;
+                }
+                
+                if (transcribedText) {
+                    // Trim the transcribed text
+                    transcribedText = transcribedText.trim();
+                    console.log('Transcribed text extracted:', transcribedText); // Debug log to see what was transcribed
+                    
+                    // Validate that we have actual transcribed text (not empty or just whitespace)
+                    if (!transcribedText || transcribedText.length === 0) {
+                        console.error('Transcribed text is empty after trimming');
+                        status.textContent = "Transcription failed: No text was transcribed. Please try again.";
+                        return;
+                    }
+                    
+                    // Set the input field with the transcribed text
                     userInput.value = transcribedText + ' ';
                     status.textContent = "Transcription successful.";
                     
                     // Send the transcribed text to OpenAI
                     // Note: fetchOpenAIResponse will add the message to chat history
+                    console.log('Calling fetchOpenAIResponse with transcribed text:', transcribedText); // Debug log
                     fetchOpenAIResponse(transcribedText);
                 } else {
-                    console.error('Unexpected response format:', data);
-                    status.textContent = "Transcription failed. Please try again.";
+                    // Response format is unexpected - log the full response for debugging
+                    console.error('Unexpected response format - no text field found:', data);
+                    console.error('Response keys:', Object.keys(data));
+                    status.textContent = "Transcription failed: Unexpected response format. Please check console for details.";
                 }
             } catch (error) {
+                // Handle network errors and other exceptions
+                let errorMessage = "Transcription failed. Please try again.";
+                if (error instanceof TypeError && error.message.includes('fetch')) {
+                    // Network error (e.g., server unreachable)
+                    errorMessage = "Transcription failed: Unable to connect to server. Please check your connection and server status.";
+                } else if (error instanceof SyntaxError) {
+                    // JSON parsing error
+                    errorMessage = "Transcription failed: Invalid server response. Please try again.";
+                } else {
+                    // Other errors
+                    errorMessage = `Transcription failed: ${error.message || 'Unknown error'}. Please try again.`;
+                }
                 console.error('Error with OpenAI Whisper request:', error);
-                status.textContent = "Transcription failed. Please try again.";
+                status.textContent = errorMessage;
             }
         }
 
@@ -5336,6 +5597,23 @@ function saveWAVFile(wavBlob) {
 
         // Update the fetchOpenAIResponse function to handle context properly
         async function fetchOpenAIResponse(promptText) {
+            // Validate promptText parameter
+            if (!promptText || typeof promptText !== 'string') {
+                console.error('fetchOpenAIResponse called with invalid promptText:', promptText);
+                status.textContent = "Error: Invalid input text. Please try again.";
+                return;
+            }
+            
+            // Trim and validate the prompt text
+            promptText = promptText.trim();
+            if (promptText.length === 0) {
+                console.error('fetchOpenAIResponse called with empty promptText');
+                status.textContent = "Error: Empty input text. Please try again.";
+                return;
+            }
+            
+            console.log('fetchOpenAIResponse called with promptText:', promptText); // Debug log
+            
             let endpoint = endpointInput.value;
             const apiKey = apiKeyInput.value.trim();
 
@@ -5670,6 +5948,7 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
             };
 
             // Add user message to history before sending
+            console.log('Adding user message to history with content:', promptText); // Debug log
             addMessageToHistory('user', promptText);
             
             try {
@@ -6574,6 +6853,34 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                     throw new Error('Selected model path is not a .vrm file. Please provide a valid VRM file.');
                 }
 
+                // Wait for THREE.js and VRM modules to be ready
+                if (!window.__vrmModulesReady || !window.THREE || !window.GLTFLoader) {
+                    console.log('Waiting for VRM modules to load...');
+                    await new Promise((resolve, reject) => {
+                        const start = Date.now();
+                        const timer = setInterval(() => {
+                            if (window.__vrmModulesReady && window.THREE && window.GLTFLoader && window.VRMLoaderPlugin) {
+                                clearInterval(timer);
+                                resolve();
+                            } else if (Date.now() - start > 10000) {
+                                clearInterval(timer);
+                                reject(new Error('VRM modules failed to load within 10 seconds'));
+                            }
+                        }, 50);
+                    });
+                }
+
+                // Verify THREE.js is available
+                if (!window.THREE) {
+                    if (window.__vrmModulesError) {
+                        throw new Error('VRM modules failed to load: ' + window.__vrmModulesError.message);
+                    }
+                    throw new Error('THREE.js is not loaded. Please refresh the page and check the console for errors.');
+                }
+                if (!window.THREE.Scene) {
+                    throw new Error('THREE.js Scene is not available. THREE.js may not have loaded correctly.');
+                }
+
                 // Initialize Three.js scene
                 const scene = new window.THREE.Scene();
                 const camera = new window.THREE.PerspectiveCamera(45, canvas.clientWidth / canvas.clientHeight, 0.1, 1000);
@@ -6590,11 +6897,12 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
 
                 // Load VRM model
                 const loader = new window.GLTFLoader();
-                // Register VRM + VRMA plugins for GLTFLoader if available
+                // Register VRM plugin (same plugin works for both VRM 0.0 and 1.0)
                 if (window.VRMLoaderPlugin) {
                     loader.register(parser => new window.VRMLoaderPlugin(parser));
                 }
-                if (window.VRMAnimationLoaderPlugin) {
+                // Register VRMA plugin for VRM 1.0 animations (only works with VRM 1.0)
+                if (vrmVersion === '1.0' && window.VRMAnimationLoaderPlugin) {
                     loader.register(parser => new window.VRMAnimationLoaderPlugin(parser));
                 }
 
@@ -6608,14 +6916,43 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                 });
 
                 // Extract VRM instance from GLTFLoader plugin output
-                const vrm = gltf && gltf.userData && gltf.userData.vrm ? gltf.userData.vrm : null;
+                // VRM data can be in userData.vrm or extensions.VRM
+                let vrm = null;
+                if (gltf && gltf.userData && gltf.userData.vrm) {
+                    vrm = gltf.userData.vrm;
+                } else if (gltf && gltf.parser && gltf.parser.userData && gltf.parser.userData.vrm) {
+                    vrm = gltf.parser.userData.vrm;
+                } else if (gltf && gltf.scene && gltf.scene.userData && gltf.scene.userData.vrm) {
+                    vrm = gltf.scene.userData.vrm;
+                }
+                
                 if (!vrm) {
-                    throw new Error('Loaded GLTF does not contain VRM data. Ensure the file is a valid .vrm model.');
+                    console.error('GLTF structure:', {
+                        hasUserData: !!gltf?.userData,
+                        hasParser: !!gltf?.parser,
+                        hasScene: !!gltf?.scene,
+                        userDataKeys: gltf?.userData ? Object.keys(gltf.userData) : [],
+                        parserUserDataKeys: gltf?.parser?.userData ? Object.keys(gltf.parser.userData) : []
+                    });
+                    throw new Error('Loaded GLTF does not contain VRM data. Ensure the file is a valid .vrm model and the VRM version setting matches the model version.');
                 }
 
                 // Optimize skeleton for performance (updated per deprecation notice)
                 if (window.VRMUtils && vrm && vrm.scene) {
                     try { window.VRMUtils.combineSkeletons(vrm.scene); } catch (_) {}
+                }
+                
+                // Handle VRM 0.0 orientation if needed (VRM 0.0 models face Z- instead of Z+)
+                if (vrmVersion === '0.0' && window.VRMUtils && vrm) {
+                    try {
+                        // Check if this is actually a VRM 0.0 model by checking meta
+                        if (vrm.meta && vrm.meta.metaVersion === '0') {
+                            // Rotate VRM 0.0 model to correct orientation
+                            window.VRMUtils.rotateVRM0(vrm);
+                        }
+                    } catch (e) {
+                        console.warn('Could not rotate VRM 0.0 model:', e);
+                    }
                 }
 
                 // Setup VRM model
@@ -6626,6 +6963,74 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                 });
 
                 scene.add(vrm.scene);
+                
+                // Reset VRM 0.0 arm bones to natural rest pose AFTER scene is added
+                // This ensures the bones are properly initialized before we reset them
+                if (vrmVersion === '0.0' && vrm && vrm.meta && vrm.meta.metaVersion === '0' && vrm.humanoid) {
+                    try {
+                        // Function to set arm bones to natural rest pose (arms hanging naturally by sides)
+                        const setNaturalArmPose = () => {
+                            // Get arm bones
+                            const leftShoulder = vrm.humanoid.getNormalizedBoneNode('leftShoulder');
+                            const rightShoulder = vrm.humanoid.getNormalizedBoneNode('rightShoulder');
+                            const leftUpperArm = vrm.humanoid.getNormalizedBoneNode('leftUpperArm');
+                            const rightUpperArm = vrm.humanoid.getNormalizedBoneNode('rightUpperArm');
+                            const leftLowerArm = vrm.humanoid.getNormalizedBoneNode('leftLowerArm');
+                            const rightLowerArm = vrm.humanoid.getNormalizedBoneNode('rightLowerArm');
+                            const leftHand = vrm.humanoid.getNormalizedBoneNode('leftHand');
+                            const rightHand = vrm.humanoid.getNormalizedBoneNode('rightHand');
+                            
+                            // Set shoulders to neutral
+                            if (leftShoulder) leftShoulder.quaternion.set(0, 0, 0, 1);
+                            if (rightShoulder) rightShoulder.quaternion.set(0, 0, 0, 1);
+                            
+                            // Set upper arms with slight inward rotation for natural hang
+                            if (leftUpperArm) {
+                                leftUpperArm.quaternion.setFromAxisAngle(
+                                    new window.THREE.Vector3(0, 1, 0), 
+                                    Math.PI * 0.05 // ~9 degrees inward
+                                );
+                            }
+                            if (rightUpperArm) {
+                                rightUpperArm.quaternion.setFromAxisAngle(
+                                    new window.THREE.Vector3(0, 1, 0), 
+                                    -Math.PI * 0.05 // ~9 degrees inward
+                                );
+                            }
+                            
+                            // Set lower arms with slight forward rotation
+                            if (leftLowerArm) {
+                                leftLowerArm.quaternion.setFromAxisAngle(
+                                    new window.THREE.Vector3(0, 0, 1), 
+                                    Math.PI * 0.02 // ~3.6 degrees forward
+                                );
+                            }
+                            if (rightLowerArm) {
+                                rightLowerArm.quaternion.setFromAxisAngle(
+                                    new window.THREE.Vector3(0, 0, 1), 
+                                    -Math.PI * 0.02 // ~3.6 degrees forward
+                                );
+                            }
+                            
+                            // Set hands to neutral
+                            if (leftHand) leftHand.quaternion.set(0, 0, 0, 1);
+                            if (rightHand) rightHand.quaternion.set(0, 0, 0, 1);
+                            
+                            // Update the skeleton hierarchy to propagate changes
+                            if (vrm.scene) {
+                                vrm.scene.updateMatrixWorld(true);
+                            }
+                        };
+                        
+                        // Set pose immediately
+                        setNaturalArmPose();
+                        
+                        // Also set after a short delay to ensure everything is initialized
+                        setTimeout(setNaturalArmPose, 100);
+                    } catch (e) {
+                        // Silently handle errors to avoid console spam
+                    }
+                }
 
                 // Find lip sync morph target (supports VRM 0.x and VRM 1.0)
                 try {
@@ -6659,10 +7064,11 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
 
                 // Animation mixer
                 const mixer = new window.THREE.AnimationMixer(vrm.scene);
-                // Optional: preload VRMA animation clip for love pose
+                // Optional: preload VRMA animation clip for love pose (only for VRM 1.0)
                 let loveVrmaAction = null;
                 try {
-                    if (POSE_CONFIG?.love?.useVrma && POSE_CONFIG?.love?.vrmaPath) {
+                    // VRMA animations only work with VRM 1.0, skip for VRM 0.0
+                    if (vrmVersion === '1.0' && POSE_CONFIG?.love?.useVrma && POSE_CONFIG?.love?.vrmaPath) {
                         const vrmaUrl = encodeURI(POSE_CONFIG.love.vrmaPath);
                         console.log('Loading VRMA from', vrmaUrl);
                         const vrmaGltf = await new Promise((resolve, reject) => {
@@ -6827,10 +7233,11 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                     console.warn('Failed to preload VRMA animation:', e);
                 }
                 
-                // Optional: preload VRMA animation clip for thinking pose
+                // Optional: preload VRMA animation clip for thinking pose (only for VRM 1.0)
                 let thinkVrmaAction = null;
                 try {
-                    if (POSE_CONFIG?.think?.useVrma && POSE_CONFIG?.think?.vrmaPath) {
+                    // VRMA animations only work with VRM 1.0, skip for VRM 0.0
+                    if (vrmVersion === '1.0' && POSE_CONFIG?.think?.useVrma && POSE_CONFIG?.think?.vrmaPath) {
                         const vrmaUrl = encodeURI(POSE_CONFIG.think.vrmaPath);
                         console.log('Loading Thinking VRMA from', vrmaUrl);
                         const vrmaGltf = await new Promise((resolve, reject) => {
@@ -6904,10 +7311,11 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                     console.warn('Failed to preload Thinking VRMA animation:', e);
                 }
                 
-                // Optional: preload VRMA animation clip for cry pose
+                // Optional: preload VRMA animation clip for cry pose (only for VRM 1.0)
                 let cryVrmaAction = null;
                 try {
-                    if (POSE_CONFIG?.cry?.useVrma && POSE_CONFIG?.cry?.vrmaPath) {
+                    // VRMA animations only work with VRM 1.0, skip for VRM 0.0
+                    if (vrmVersion === '1.0' && POSE_CONFIG?.cry?.useVrma && POSE_CONFIG?.cry?.vrmaPath) {
                         const vrmaUrl = encodeURI(POSE_CONFIG.cry.vrmaPath);
                         console.log('Loading Cry VRMA from', vrmaUrl);
                         const vrmaGltf = await new Promise((resolve, reject) => {
@@ -6981,10 +7389,11 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                     console.warn('Failed to preload Cry VRMA animation:', e);
                 }
                 
-                // Optional: preload VRMA animation clip for angry pose
+                // Optional: preload VRMA animation clip for angry pose (only for VRM 1.0)
                 let angryVrmaAction = null;
                 try {
-                    if (POSE_CONFIG?.angry?.useVrma && POSE_CONFIG?.angry?.vrmaPath) {
+                    // VRMA animations only work with VRM 1.0, skip for VRM 0.0
+                    if (vrmVersion === '1.0' && POSE_CONFIG?.angry?.useVrma && POSE_CONFIG?.angry?.vrmaPath) {
                         const vrmaUrl = encodeURI(POSE_CONFIG.angry.vrmaPath);
                         console.log('Loading Angry VRMA from', vrmaUrl);
                         const vrmaGltf = await new Promise((resolve, reject) => {
@@ -7560,6 +7969,48 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                     try { if (rightHand && dRHand && neutral.RHand) { rightHand.quaternion.copy(neutral.RHand.clone().multiply(dRHand)); } } catch(_){}
                 } else if (!(vrmLoveVrmaAction && vrmLoveVrmaAction.isRunning()) && !(vrmThinkVrmaAction && vrmThinkVrmaAction.isRunning()) && !(vrmCryVrmaAction && vrmCryVrmaAction.isRunning()) && !(vrmAngryVrmaAction && vrmAngryVrmaAction.isRunning())) {
                     // Only apply manual pose control if VRMA animations are NOT running
+                    // For VRM 0.0, set arms to natural rest pose (slightly rotated inward, hanging naturally)
+                    if (vrmVersion === '0.0' && vrm && vrm.meta && vrm.meta.metaVersion === '0') {
+                        try {
+                            // Set arms to natural rest pose (hanging by sides with slight inward rotation)
+                            // Left arm: slight inward rotation (positive Y rotation)
+                            if (leftUpperArm) {
+                                leftUpperArm.quaternion.setFromAxisAngle(
+                                    new window.THREE.Vector3(0, 1, 0), 
+                                    Math.PI * 0.05 // ~9 degrees inward
+                                );
+                            }
+                            // Right arm: slight inward rotation (negative Y rotation)
+                            if (rightUpperArm) {
+                                rightUpperArm.quaternion.setFromAxisAngle(
+                                    new window.THREE.Vector3(0, 1, 0), 
+                                    -Math.PI * 0.05 // ~9 degrees inward
+                                );
+                            }
+                            // Lower arms: slight forward rotation for natural hang
+                            if (leftLowerArm) {
+                                leftLowerArm.quaternion.setFromAxisAngle(
+                                    new window.THREE.Vector3(0, 0, 1), 
+                                    Math.PI * 0.02 // ~3.6 degrees forward
+                                );
+                            }
+                            if (rightLowerArm) {
+                                rightLowerArm.quaternion.setFromAxisAngle(
+                                    new window.THREE.Vector3(0, 0, 1), 
+                                    -Math.PI * 0.02 // ~3.6 degrees forward
+                                );
+                            }
+                            // Hands: keep neutral
+                            if (leftHand) leftHand.quaternion.set(0, 0, 0, 1);
+                            if (rightHand) rightHand.quaternion.set(0, 0, 0, 1);
+                            // Shoulders: keep neutral
+                            if (leftShoulder) leftShoulder.quaternion.set(0, 0, 0, 1);
+                            if (rightShoulder) rightShoulder.quaternion.set(0, 0, 0, 1);
+                        } catch (e) {
+                            // Silently handle any errors to avoid console spam
+                        }
+                    } else {
+                        // Normal idle animation for VRM 1.0
                         const w = lovePoseWeight; // Shorthand for love pose
                         const wt = thinkPoseWeight; // Shorthand for think pose
                         const applyLimbs = !POSE_CONFIG.love.expressionsOnly; // Skip love limb offsets when expressions-only is enabled
@@ -7777,6 +8228,7 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                             } catch(_){}
                         }
                     }
+                    } // End else block for VRM 1.0 idle animation
 
                     if (vrmRenderer && vrmScene && vrmCamera) {
                         vrmRenderer.render(vrmScene, vrmCamera);
@@ -9604,4 +10056,5 @@ ${fullText.substring(0, 6000)}...${minimalImageInfo}`;
         }
     </script>
 </body>
+</html>
 </html>

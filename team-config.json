@@ -10,8 +10,8 @@
       {
         "provider": "autogen_agentchat.agents.AssistantAgent",
         "component_type": "agent",
-        "version": 1,
-        "component_version": 1,
+        "version": 2,
+        "component_version": 2,
         "description": "An agent that provides assistance with tool use.",
         "label": "AssistantAgent",
         "config": {
@@ -47,33 +47,35 @@
               "top_p": 1
             }
           },
-          "workbench": {
-            "provider": "autogen_core.tools.StaticWorkbench",
-            "component_type": "workbench",
-            "version": 1,
-            "component_version": 1,
-            "description": "A workbench that provides a static set of tools that do not change after\n    each tool execution.",
-            "label": "StaticWorkbench",
-            "config": {
-              "tools": [
-                {
-                  "provider": "autogen_core.tools.FunctionTool",
-                  "component_type": "tool",
-                  "version": 1,
-                  "component_version": 1,
-                  "description": "Create custom tools by wrapping standard Python functions.",
-                  "label": "FunctionTool",
-                  "config": {
-                    "source_code": "def calculator(a: float, b: float, operator: str) -> str:\n    try:\n        if operator == \"+\":\n            return str(a + b)\n        elif operator == \"-\":\n            return str(a - b)\n        elif operator == \"*\":\n            return str(a * b)\n        elif operator == \"/\":\n            if b == 0:\n                return \"Error: Division by zero\"\n            return str(a / b)\n        else:\n            return \"Error: Invalid operator. Please use +, -, *, or /\"\n    except Exception as e:\n        return f\"Error: {str(e)}\"\n",
-                    "name": "calculator",
-                    "description": "A simple calculator that performs basic arithmetic operations",
-                    "global_imports": [],
-                    "has_cancellation_support": false
+          "workbench": [
+            {
+              "provider": "autogen_core.tools.StaticWorkbench",
+              "component_type": "workbench",
+              "version": 1,
+              "component_version": 1,
+              "description": "A workbench that provides a static set of tools that do not change after\n    each tool execution.",
+              "label": "StaticWorkbench",
+              "config": {
+                "tools": [
+                  {
+                    "provider": "autogen_core.tools.FunctionTool",
+                    "component_type": "tool",
+                    "version": 1,
+                    "component_version": 1,
+                    "description": "Create custom tools by wrapping standard Python functions.",
+                    "label": "FunctionTool",
+                    "config": {
+                      "source_code": "def calculator(a: float, b: float, operator: str) -> str:\n    try:\n        if operator == \"+\":\n            return str(a + b)\n        elif operator == \"-\":\n            return str(a - b)\n        elif operator == \"*\":\n            return str(a * b)\n        elif operator == \"/\":\n            if b == 0:\n                return \"Error: Division by zero\"\n            return str(a / b)\n        else:\n            return \"Error: Invalid operator. Please use +, -, *, or /\"\n    except Exception as e:\n        return f\"Error: {str(e)}\"\n",
+                      "name": "calculator",
+                      "description": "A simple calculator that performs basic arithmetic operations",
+                      "global_imports": [],
+                      "has_cancellation_support": false
+                    }
                   }
-                }
-              ]
+                ]
+              }
             }
-          },
+          ],
           "model_context": {
             "provider": "autogen_core.model_context.BufferedChatCompletionContext",
             "component_type": "chat_completion_context",
@@ -96,8 +98,8 @@
       {
         "provider": "autogen_agentchat.agents.AssistantAgent",
         "component_type": "agent",
-        "version": 1,
-        "component_version": 1,
+        "version": 2,
+        "component_version": 2,
         "description": "An agent that provides assistance with tool use.",
         "label": "AssistantAgent",
         "config": {
@@ -133,17 +135,19 @@
               "top_p": 1
             }
           },
-          "workbench": {
-            "provider": "autogen_core.tools.StaticWorkbench",
-            "component_type": "workbench",
-            "version": 1,
-            "component_version": 1,
-            "description": "A workbench that provides a static set of tools that do not change after\n    each tool execution.",
-            "label": "StaticWorkbench",
-            "config": {
-              "tools": []
+          "workbench": [
+            {
+              "provider": "autogen_core.tools.StaticWorkbench",
+              "component_type": "workbench",
+              "version": 1,
+              "component_version": 1,
+              "description": "A workbench that provides a static set of tools that do not change after\n    each tool execution.",
+              "label": "StaticWorkbench",
+              "config": {
+                "tools": []
+              }
             }
-          },
+          ],
           "model_context": {
             "provider": "autogen_core.model_context.BufferedChatCompletionContext",
             "component_type": "chat_completion_context",
