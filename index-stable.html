@@ -1306,6 +1306,8 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
             // Update base model when user selects a new one
             baseModelDropdown.addEventListener('change', function() {
                 baseModel = this.value;
+                defaultBaseModel = this.value;
+                saveToolSettings();
                 if (currentModelSpan) {
                     currentModelSpan.textContent = `Current Model: ${getCurrentModel()}`;
                 }
@@ -1319,6 +1321,8 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
             // Update tool model when user selects a new one
             toolModelDropdown.addEventListener('change', function() {
                 toolModel = this.value;
+                defaultToolModel = this.value;
+                saveToolSettings();
                 if (currentModelSpan) {
                     currentModelSpan.textContent = `Current Model: ${getCurrentModel()}`;
                 }
@@ -1332,6 +1336,8 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
             // Update vision model when user selects a new one
             visionModelDropdown.addEventListener('change', function() {
                 visionModel = this.value;
+                defaultVisionModel = this.value;
+                saveToolSettings();
                 if (currentModelSpan) {
                     currentModelSpan.textContent = `Current Model: ${getCurrentModel()}`;
                 }
@@ -1380,8 +1386,8 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
                         .join('');
                     if (!toolModelDropdown.value) {
                         toolModelDropdown.value = defaultToolModel;
-                        toolModel = defaultToolModel;
                     }
+                    toolModel = toolModelDropdown.value || defaultToolModel;
                 }
 
                 // Update base model dropdown
@@ -1391,8 +1397,8 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
                         .join('');
                     if (!baseModelDropdown.value) {
                         baseModelDropdown.value = defaultBaseModel;
-                        baseModel = defaultBaseModel;
                     }
+                    baseModel = baseModelDropdown.value || defaultBaseModel;
                 }
 
                 // Populate Live2D model list dropdown from persisted storage or textarea
@@ -1700,8 +1706,8 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
                         .join('');
                     if (!visionModelDropdown.value) {
                         visionModelDropdown.value = defaultVisionModel;
-                        visionModel = defaultVisionModel;
                     }
+                    visionModel = visionModelDropdown.value || defaultVisionModel;
                 }
             } catch (error) {
                 console.error('Error fetching models:', error);
@@ -1815,6 +1821,19 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
                     voicesData = [];
                 }
                 
+                const storedVoice = (() => {
+                    try {
+                        const savedSettings = localStorage.getItem('toolSettings');
+                        if (!savedSettings) return '';
+                        const settings = JSON.parse(savedSettings);
+                        return settings.ttsVoice || '';
+                    } catch (error) {
+                        console.warn('Could not read stored TTS voice:', error);
+                        return '';
+                    }
+                })();
+                const fallbackVoice = ttsVoiceDropdown.value || storedVoice;
+
                 // Clear existing options
                 ttsVoiceDropdown.innerHTML = '';
                 
@@ -1843,6 +1862,12 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
                     console.warn('Voices data is not an array:', voicesData);
                 }
                 
+                const availableVoiceValues = Array.from(ttsVoiceDropdown.options).map(option => option.value);
+                const desiredVoice = availableVoiceValues.includes(storedVoice) ? storedVoice : fallbackVoice;
+                if (desiredVoice && availableVoiceValues.includes(desiredVoice)) {
+                    ttsVoiceDropdown.value = desiredVoice;
+                }
+
                 console.log('TTS voices updated successfully');
                 saveToolSettings(); // Save the updated voice list state
             } catch (error) {
@@ -3075,6 +3100,9 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
                     webcamMode: document.getElementById('webcam-toggle').checked,
                     clipboardMode: document.getElementById('clipboard-toggle').checked,
                     muteMode: document.getElementById('mute-toggle').checked,
+                    baseModel: baseModelDropdown ? baseModelDropdown.value : baseModel,
+                    toolModel: toolModelDropdown ? toolModelDropdown.value : toolModel,
+                    visionModel: visionModelDropdown ? visionModelDropdown.value : visionModel,
                     ttsService: ttsServiceOpenAI.checked ? 'openai' : 'microsoft', // Save TTS service selection
                     ttsEndpoint: ttsEndpointInput.value, // Save TTS endpoint
                     ttsModel: ttsModelDropdown.value, // Save TTS model
@@ -3120,6 +3148,28 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
                     if (settings.muteMode !== undefined) {
                         document.getElementById('mute-toggle').checked = settings.muteMode;
                         isMuted = settings.muteMode; // Update the isMuted variable as well
+                    }
+
+                    if (settings.baseModel !== undefined) {
+                        defaultBaseModel = settings.baseModel;
+                        baseModel = settings.baseModel;
+                        if (baseModelDropdown) {
+                            baseModelDropdown.value = settings.baseModel;
+                        }
+                    }
+                    if (settings.toolModel !== undefined) {
+                        defaultToolModel = settings.toolModel;
+                        toolModel = settings.toolModel;
+                        if (toolModelDropdown) {
+                            toolModelDropdown.value = settings.toolModel;
+                        }
+                    }
+                    if (settings.visionModel !== undefined) {
+                        defaultVisionModel = settings.visionModel;
+                        visionModel = settings.visionModel;
+                        if (visionModelDropdown) {
+                            visionModelDropdown.value = settings.visionModel;
+                        }
                     }
                     
                     // Restore TTS settings
