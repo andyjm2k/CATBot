@@ -5871,7 +5871,13 @@ Parameters:
     "filename": "string (name of the file to read from the scratch directory)"
 }
 
-13. writeFile
+13. listFiles
+Description: Lists all files currently available in the scratch directory. No parameters are required.
+Parameters:
+{
+}
+
+14. writeFile
 Description: Writes content to a file in the scratch directory. Supports txt, docx, xlsx, and pdf formats.
 Parameters:
 {
@@ -5945,6 +5951,13 @@ Assistant: <tool>readFile</tool>
 <parameters>
 {
     "filename": "report.txt"
+}
+</parameters>
+
+User: "List the files in the scratch directory"
+Assistant: <tool>listFiles</tool>
+<parameters>
+{
 }
 </parameters>
 
