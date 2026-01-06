@@ -4458,6 +4458,48 @@ function saveWAVFile(wavBlob) {
             {
                 type: "function",
                 function: {
+                    name: "readFile",
+                    description: "Reads content from a file",
+                    parameters: {
+                        type: "object",
+                        properties: {
+                            filename: {
+                                type: "string",
+                                description: "The name of the file to read"
+                            }
+                        },
+                        required: ["filename"]
+                    }
+                }
+            },
+            {
+                type: "function",
+                function: {
+                    name: "writeFile",
+                    description: "Writes content to a file with an optional format",
+                    parameters: {
+                        type: "object",
+                        properties: {
+                            filename: {
+                                type: "string",
+                                description: "The name of the file to write"
+                            },
+                            content: {
+                                type: "string",
+                                description: "The content to write to the file"
+                            },
+                            format: {
+                                type: "string",
+                                description: "Optional format of the content (e.g., 'text', 'json')"
+                            }
+                        },
+                        required: ["filename", "content"]
+                    }
+                }
+            },
+            {
+                type: "function",
+                function: {
                     name: "runBrowserAgent",
                     description: "Executes browser automation tasks using natural language. Can navigate websites, fill forms, click buttons, extract information, and perform complex multi-step web interactions.",
                     parameters: {
