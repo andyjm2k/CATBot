@@ -4500,6 +4500,18 @@ function saveWAVFile(wavBlob) {
             {
                 type: "function",
                 function: {
+                    name: "listFiles",
+                    description: "Lists files in the scratch directory",
+                    parameters: {
+                        type: "object",
+                        properties: {},
+                        required: []
+                    }
+                }
+            },
+            {
+                type: "function",
+                function: {
                     name: "runBrowserAgent",
                     description: "Executes browser automation tasks using natural language. Can navigate websites, fill forms, click buttons, extract information, and perform complex multi-step web interactions.",
                     parameters: {
@@ -4651,6 +4663,55 @@ function saveWAVFile(wavBlob) {
             }
         }
 
+        // Handler for listing files in the scratch directory
+        async function handleListFiles() {
+            try {
+                // Call the proxy server to list files
+                const response = await fetch('http://localhost:8002/v1/files/list', {
+                    method: 'GET',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
+
+                // Parse the response
+                const result = await response.json();
+
+                // Return the result
+                if (result.success) {
+                    const files = result.files || [];
+                    const count = typeof result.count === 'number' ? result.count : files.length;
+                    const scratchDir = result.scratch_dir;
+                    const content = files.length > 0
+                        ? files
+                            .map((file, index) => `${index + 1}. ${file.name} (${file.size} bytes)`)
+                            .join('\n')
+                        : 'No files found in the scratch directory.';
+
+                    return {
+                        success: true,
+                        message: `Found ${count} file${count === 1 ? '' : 's'} in the scratch directory.`,
+                        files,
+                        count,
+                        scratch_dir: scratchDir,
+                        content
+                    };
+                }
+
+                return {
+                    success: false,
+                    message: result.message
+                };
+            } catch (error) {
+                // Handle network or parsing errors
+                console.error('List files error:', error);
+                return {
+                    success: false,
+                    message: `Error listing files: ${error.message}. Make sure the proxy server is running on port 8002.`
+                };
+            }
+        }
+
         // Update executeToolCall to include the new handler
         async function executeToolCall(toolCall, context) {
             console.log('executeToolCall - Input:', { toolCall, context });
@@ -4736,6 +4797,9 @@ function saveWAVFile(wavBlob) {
                         break;
                     case "writeFile":
                         result = await handleWriteFile(args);
+                        break;
+                    case "listFiles":
+                        result = await handleListFiles(args);
                         break;
                     default:
                         // Tool not found
