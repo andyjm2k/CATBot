@@ -1833,18 +1833,18 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
         // Fetch TTS voices from OpenAI-compatible endpoint (e.g., Chatterbox)
         async function fetchTtsVoices() {
             try {
-                // Get the TTS endpoint
+                // Get the TTS endpoint and normalize it (remove trailing slash)
                 const endpoint = (ttsEndpointInput && ttsEndpointInput.value && ttsEndpointInput.value.trim()) 
                     ? ttsEndpointInput.value.trim().replace(/\/$/, '') 
                     : 'http://localhost:4123/v1';
                 
-                // Use proxy server to handle CORS
-                const proxyUrl = `${PROXY_BASE_URL}/v1/proxy/tts/voices?endpoint=${encodeURIComponent(endpoint)}`;
+                // Construct the voices endpoint URL by appending /voices to the TTS endpoint
+                const voicesUrl = `${endpoint}/voices`;
                 
-                console.log('Fetching voices through proxy:', proxyUrl);
+                console.log('Fetching voices directly from TTS endpoint:', voicesUrl);
                 
-                // Fetch voices from the TTS endpoint through proxy
-                const response = await fetch(proxyUrl, {
+                // Fetch voices directly from the TTS endpoint
+                const response = await fetch(voicesUrl, {
                     method: 'GET',
                     headers: {
                         'Content-Type': 'application/json'

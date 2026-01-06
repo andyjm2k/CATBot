@@ -253,23 +253,75 @@ class MCPClientManager:
 # FastAPI app
 app = FastAPI(title="AI Assistant Proxy Server", version="2.0.0")
 
+# Startup event to verify app initialization
+@app.on_event("startup")
+async def startup_event():
+    """Log that the application has started successfully."""
+    import sys
+    print("🚀 FastAPI application startup event fired", flush=True)
+    sys.stdout.flush()
+    print(f"🚀 App routes registered: {len(app.routes)} routes", flush=True)
+    sys.stdout.flush()
+    # List all registered routes
+    for route in app.routes:
+        if hasattr(route, 'path') and hasattr(route, 'methods'):
+            print(f"   Route: {list(route.methods)} {route.path}", flush=True)
+            sys.stdout.flush()
+
 # Request logging middleware to debug CORS issues
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
     """Middleware to log all incoming requests for debugging."""
     async def dispatch(self, request: Request, call_next):
-        # Log the incoming request
-        print(f"🌐 [{request.method}] {request.url.path}?{request.url.query}")
-        print(f"   Origin: {request.headers.get('origin', 'none')}")
-        print(f"   Headers: {dict(request.headers)}")
+        import sys
+        # Safely log the incoming request with error handling
+        try:
+            method = getattr(request, 'method', 'UNKNOWN')
+            path = getattr(request.url, 'path', 'unknown') if hasattr(request, 'url') else 'unknown'
+            query = getattr(request.url, 'query', '') if hasattr(request, 'url') and hasattr(request.url, 'query') else ''
+            origin = request.headers.get('origin', 'none') if hasattr(request, 'headers') else 'none'
+            print(f"🌐 [{method}] {path}?{query}", flush=True)
+            sys.stdout.flush()
+            print(f"   Origin: {origin}", flush=True)
+            sys.stdout.flush()
+            if hasattr(request, 'headers'):
+                print(f"   Headers: {dict(request.headers)}", flush=True)
+                sys.stdout.flush()
+        except Exception as log_error:
+            # If logging fails, continue anyway - don't break the request
+            print(f"⚠️ Error logging request: {log_error}", flush=True)
+            sys.stdout.flush()
+            import traceback
+            print(traceback.format_exc(), flush=True)
+            sys.stdout.flush()
         
         try:
+            # Process the request
             response = await call_next(request)
-            print(f"✅ [{request.method}] {request.url.path} -> {response.status_code}")
+            # Log successful response
+            try:
+                method = getattr(request, 'method', 'UNKNOWN')
+                path = getattr(request.url, 'path', 'unknown') if hasattr(request, 'url') else 'unknown'
+                status = getattr(response, 'status_code', 'unknown')
+                print(f"✅ [{method}] {path} -> {status}", flush=True)
+                sys.stdout.flush()
+            except Exception as log_err:
+                print(f"⚠️ Error logging response: {log_err}", flush=True)
+                sys.stdout.flush()
             return response
         except Exception as e:
-            print(f"❌ [{request.method}] {request.url.path} -> Exception: {e}")
-            import traceback
-            print(traceback.format_exc())
+            # Log the exception
+            try:
+                method = getattr(request, 'method', 'UNKNOWN')
+                path = getattr(request.url, 'path', 'unknown') if hasattr(request, 'url') else 'unknown'
+                print(f"❌ [{method}] {path} -> Exception: {e}", flush=True)
+                sys.stdout.flush()
+                import traceback
+                print(traceback.format_exc(), flush=True)
+                sys.stdout.flush()
+            except Exception:
+                print("❌ Error in exception logging", flush=True)
+                sys.stdout.flush()
+            # Re-raise the exception so it can be handled by exception handlers
             raise
 
 # Add request logging middleware first (before CORS)
@@ -280,12 +332,7 @@ app.add_middleware(RequestLoggingMiddleware)
 # Note: Using allow_credentials=False allows more flexible origin matching
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:8000",
-        "http://localhost:8001",
-        "http://127.0.0.1:8000",
-        "http://127.0.0.1:8001",
-    ],
+    allow_origins=["*"],  # Allow all origins for development (be more permissive to debug)
     allow_credentials=False,  # Set to False to allow more flexible CORS handling
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allow_headers=["*"],
@@ -294,7 +341,13 @@ app.add_middleware(
 
 def build_cors_headers(request: Request) -> Dict[str, str]:
     """Build CORS headers for the request origin."""
-    origin = request.headers.get("origin", "http://localhost:8000")
+    try:
+        # Safely get origin from request headers, with fallback
+        origin = request.headers.get("origin", "http://localhost:8000") if hasattr(request, 'headers') else "http://localhost:8000"
+    except Exception:
+        # If we can't access headers, use default origin
+        origin = "http://localhost:8000"
+    
     return {
         "Access-Control-Allow-Origin": origin,
         "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS, PATCH",
@@ -305,33 +358,94 @@ def build_cors_headers(request: Request) -> Dict[str, str]:
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
     """Handle HTTP exceptions and ensure CORS headers are included."""
+    # Safely build CORS headers - if this fails, use minimal headers
+    try:
+        cors_headers = build_cors_headers(request)
+    except Exception as header_error:
+        print(f"⚠️ Error building CORS headers in HTTPException handler: {header_error}")
+        # Use minimal safe headers if build_cors_headers fails
+        cors_headers = {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS, PATCH",
+            "Access-Control-Allow-Headers": "*",
+        }
+    
     return JSONResponse(
         status_code=exc.status_code,
         content={"detail": exc.detail},
-        headers=build_cors_headers(request),
+        headers=cors_headers,
     )
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     """Handle validation errors and ensure CORS headers are included."""
+    # Safely build CORS headers - if this fails, use minimal headers
+    try:
+        cors_headers = build_cors_headers(request)
+    except Exception as header_error:
+        print(f"⚠️ Error building CORS headers in ValidationException handler: {header_error}")
+        # Use minimal safe headers if build_cors_headers fails
+        cors_headers = {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS, PATCH",
+            "Access-Control-Allow-Headers": "*",
+        }
+    
     return JSONResponse(
         status_code=422,
         content={"detail": exc.errors()},
-        headers=build_cors_headers(request),
+        headers=cors_headers,
     )
 
 @app.exception_handler(Exception)
 async def general_exception_handler(request: Request, exc: Exception):
     """Handle all other exceptions and ensure CORS headers are included."""
+    import sys
     import traceback
     error_trace = traceback.format_exc()
-    print(f"❌ Unhandled exception: {exc}")
-    print(error_trace)
-    return JSONResponse(
-        status_code=500,
-        content={"detail": f"Internal server error: {str(exc)}"},
-        headers=build_cors_headers(request),
-    )
+    print(f"❌ Unhandled exception in general_exception_handler: {exc}", flush=True)
+    sys.stdout.flush()
+    print(error_trace, flush=True)
+    sys.stdout.flush()
+    
+    # Safely build CORS headers - if this fails, use minimal headers
+    try:
+        cors_headers = build_cors_headers(request)
+    except Exception as header_error:
+        print(f"⚠️ Error building CORS headers: {header_error}", flush=True)
+        sys.stdout.flush()
+        import traceback
+        print(traceback.format_exc(), flush=True)
+        sys.stdout.flush()
+        # Use minimal safe headers if build_cors_headers fails
+        cors_headers = {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS, PATCH",
+            "Access-Control-Allow-Headers": "*",
+        }
+    
+    try:
+        response = JSONResponse(
+            status_code=500,
+            content={"detail": f"Internal server error: {str(exc)}"},
+            headers=cors_headers,
+        )
+        print(f"✅ Created error response with status 500", flush=True)
+        sys.stdout.flush()
+        return response
+    except Exception as response_error:
+        print(f"❌ Error creating error response: {response_error}", flush=True)
+        sys.stdout.flush()
+        import traceback
+        print(traceback.format_exc(), flush=True)
+        sys.stdout.flush()
+        # Last resort - return a simple response
+        from fastapi.responses import PlainTextResponse
+        return PlainTextResponse(
+            content=f"Internal server error: {str(exc)}",
+            status_code=500,
+            headers=cors_headers,
+        )
 
 # Helper function to clean HTML text (similar to Node.js version)
 def clean_text(text: str) -> str:
@@ -423,18 +537,27 @@ def load_autogen_team():
         print(traceback.format_exc())
         return None
 
-# Load servers on startup
+# Load servers on startup (with error handling to prevent startup failures)
 try:
     load_servers()
     print(f"✅ Loaded {len(mcp_servers)} MCP servers from disk")
 except Exception as e:
-    print(f"Warning: Could not load servers on startup: {e}")
+    import traceback
+    print(f"⚠️ Warning: Could not load servers on startup: {e}")
+    print(traceback.format_exc())
+    # Continue anyway - server should still work without pre-loaded servers
 
-# Load AutoGen team on startup
+# Load AutoGen team on startup (with error handling to prevent startup failures)
 try:
     autogen_team = load_autogen_team()
+    if autogen_team is not None:
+        print("✅ AutoGen team loaded successfully on startup")
 except Exception as e:
-    print(f"Warning: Could not load AutoGen team on startup: {e}")
+    import traceback
+    print(f"⚠️ Warning: Could not load AutoGen team on startup: {e}")
+    print(traceback.format_exc())
+    # Continue anyway - server should still work without AutoGen team
+    autogen_team = None
 
 # Web proxy endpoint for fetching content
 @app.get("/v1/proxy/fetch")
@@ -1069,69 +1192,6 @@ async def list_tools(server_id: str):
         print(f"💥 [TOOLS/LIST] Error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to list tools on MCP server: {str(e)}")
 
-@app.post("/v1/mcp/servers/{server_id}/tools/call")
-async def call_tool(server_id: str, request: ToolCallRequest):
-    """Call a tool on an MCP server."""
-    if not MCP_AVAILABLE:
-        raise HTTPException(status_code=503, detail="MCP SDK not available")
-
-    try:
-        print(f"🔧 [TOOLS/CALL] Server: {server_id}")
-
-        global mcp_clients
-
-        client = mcp_clients.get(server_id)
-        if not client:
-            print(f"❌ [TOOLS/CALL] Server {server_id} not found or not connected")
-            raise HTTPException(status_code=404, detail="Server is not connected")
-
-        tool_name = request.toolName
-        parameters = request.parameters or {}
-
-        print(f"🔍 [TOOLS/CALL] Tool name: {tool_name}")
-        print(f"🔍 [TOOLS/CALL] Parameters: {parameters}")
-
-        if not tool_name:
-            print("❌ [TOOLS/CALL] toolName is required but missing")
-            raise HTTPException(status_code=400, detail="toolName is required")
-
-        # Make MCP request to call tool
-        result = await client.request(
-            method="tools/call",
-            params={
-                "name": tool_name,
-                "arguments": parameters
-            }
-        )
-
-        print(f"📨 [TOOLS/CALL] Raw response from MCP server: {result}")
-
-        # Validate response structure
-        if not result:
-            print("❌ [TOOLS/CALL] No result returned from MCP server")
-        elif 'content' not in result:
-            print(f"❌ [TOOLS/CALL] Missing 'content' field in response: {list(result.keys())}")
-        elif not isinstance(result['content'], list):
-            print(f"❌ [TOOLS/CALL] 'content' field is not an array: {type(result['content'])}")
-        else:
-            print(f"✅ [TOOLS/CALL] Found {len(result['content'])} content items in response")
-            for i, content_item in enumerate(result['content']):
-                content_type = content_item.get('type', 'unknown type')
-                print(f"  Content {i}: {content_type}")
-                if content_type == 'text' and 'text' in content_item:
-                    text_content = content_item['text'][:100] + ('...' if len(content_item['text']) > 100 else '')
-                    print(f"    ✅ Text content: '{text_content}'")
-                else:
-                    print(f"    ⚠️  Non-text content: {content_item}")
-
-        return {"result": result}
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"💥 [TOOLS/CALL] Error: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to call tool on MCP server: {str(e)}")
-
 # Root endpoint
 @app.get("/")
 async def root():
@@ -1252,11 +1312,34 @@ async def telegram_clear_conversation(conversation_id: str):
     removed = telegram_conversations.pop(conversation_id, None) is not None
     return {"conversation_id": conversation_id, "cleared": removed}
 
+# Simple test endpoint to verify requests are reaching the server
+@app.get("/test")
+async def test_endpoint():
+    """Simple test endpoint that should always work."""
+    import sys
+    print("🧪 TEST endpoint called", flush=True)
+    sys.stdout.flush()
+    return {"message": "test successful", "timestamp": time.time()}
+
 # Health check endpoint
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
-    return {"status": "healthy", "timestamp": time.time()}
+    # Add explicit logging to debug
+    import sys
+    print("🏥 Health check endpoint called", flush=True)
+    sys.stdout.flush()
+    try:
+        result = {"status": "healthy", "timestamp": time.time()}
+        print(f"🏥 Health check returning: {result}", flush=True)
+        sys.stdout.flush()
+        return result
+    except Exception as e:
+        import traceback
+        print(f"❌ Health check error: {e}", flush=True)
+        print(traceback.format_exc(), flush=True)
+        sys.stdout.flush()
+        raise
 
 # Whisper proxy endpoint to handle CORS
 @app.post("/v1/audio/transcriptions")
@@ -1335,153 +1418,6 @@ async def proxy_whisper(request: Request):
         import traceback
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Failed to proxy Whisper request: {str(e)}")
-
-# TTS voices proxy endpoint to handle CORS
-@app.options("/v1/proxy/tts/voices")
-async def proxy_tts_voices_options(request: Request):
-    """Handle OPTIONS preflight requests for TTS voices endpoint."""
-    return JSONResponse(
-        content={},
-        headers={
-            **build_cors_headers(request),
-            "Access-Control-Max-Age": "3600",
-        },
-    )
-
-@app.get("/v1/proxy/tts/voices")
-async def proxy_tts_voices(endpoint: str, request: Request):
-    """Proxy TTS voices requests to handle CORS."""
-    # Log that we received the request
-    print(f"📥 Received TTS voices request from origin: {request.headers.get('origin', 'none')}")
-    print(f"📥 Request endpoint parameter: {endpoint}")
-    
-    try:
-        # Construct the voices endpoint URL from the provided base endpoint
-        if not endpoint:
-            return JSONResponse(
-                content={"error": "Endpoint parameter is required"},
-                status_code=400,
-                headers=build_cors_headers(request),
-            )
-        
-        # Normalize the endpoint URL
-        endpoint = endpoint.rstrip('/')
-        if not endpoint.startswith(("http://", "https://")):
-            endpoint = f"http://{endpoint}"
-
-        candidate_urls = []
-        if endpoint.endswith(("/voices", "/v1/voices", "/tts/voices", "/v1/tts/voices")):
-            candidate_urls.append(endpoint)
-        else:
-            if endpoint.endswith("/v1"):
-                candidate_urls.extend([f"{endpoint}/voices", f"{endpoint}/tts/voices"])
-            elif endpoint.endswith("/v1/tts"):
-                candidate_urls.append(f"{endpoint}/voices")
-            elif endpoint.endswith("/tts"):
-                candidate_urls.append(f"{endpoint}/voices")
-            else:
-                candidate_urls.extend(
-                    [
-                        f"{endpoint}/v1/voices",
-                        f"{endpoint}/voices",
-                        f"{endpoint}/v1/tts/voices",
-                        f"{endpoint}/tts/voices",
-                    ]
-                )
-
-        seen = set()
-        candidate_urls = [url for url in candidate_urls if not (url in seen or seen.add(url))]
-        
-        print(f"🎤 Attempting to fetch TTS voices from: {candidate_urls}")
-        
-        # Fetch voices from the TTS service
-        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-            response = None
-            voices_url = None
-            last_error = None
-            for candidate_url in candidate_urls:
-                try:
-                    response = await client.get(candidate_url)
-                    voices_url = candidate_url
-                    print(f"✅ TTS voices response status: {response.status_code} from {voices_url}")
-                    if response.status_code in {404, 405}:
-                        print(f"⚠️ TTS voices endpoint not found at {voices_url}, trying next candidate.")
-                        continue
-                    break
-                except httpx.ConnectError as conn_err:
-                    last_error = conn_err
-                    print(f"⚠️ Connection failed to {candidate_url}: {str(conn_err)}")
-                    continue
-
-            if response is None:
-                error_detail = (
-                    f"Could not connect to TTS service at {endpoint}. Tried {candidate_urls}"
-                )
-                if last_error:
-                    error_detail = f"{error_detail}. Last error: {last_error}"
-                return JSONResponse(
-                    content={"error": error_detail},
-                    status_code=503,
-                    headers=build_cors_headers(request),
-                )
-        
-        # Check if the response is successful
-        if response.status_code != 200:
-            print(f"❌ TTS voices service returned error: {response.status_code}")
-            print(f"   Response text: {response.text[:200]}")
-            return JSONResponse(
-                content={"error": f"TTS voices service error: {response.text[:200]}"},
-                status_code=response.status_code,
-                headers=build_cors_headers(request),
-            )
-        
-        # Check if response has content
-        response_text = response.text.strip()
-        if not response_text:
-            print("⚠️ Empty response from TTS voices endpoint")
-            # Return empty list with CORS headers
-            return JSONResponse(
-                content=[],
-                headers=build_cors_headers(request),
-            )
-        
-        print(f"📄 Response content (first 200 chars): {response_text[:200]}")
-        
-        # Try to parse the response as JSON
-        try:
-            voices_data = response.json()
-            print(f"✅ Fetched {len(voices_data) if isinstance(voices_data, list) else 'unknown'} voices")
-            # Return data with CORS headers
-            return JSONResponse(
-                content=voices_data,
-                headers=build_cors_headers(request),
-            )
-        except Exception as json_error:
-            print(f"⚠️ Could not parse JSON response: {json_error}")
-            print(f"   Response text: {response_text[:500]}")
-            # Return empty list with CORS headers
-            return JSONResponse(
-                content=[],
-                headers=build_cors_headers(request),
-            )
-    
-    except httpx.TimeoutException:
-        print(f"❌ Timeout error: TTS service did not respond in time")
-        return JSONResponse(
-            content={"error": "TTS service request timed out"},
-            status_code=504,
-            headers=build_cors_headers(request),
-        )
-    except Exception as e:
-        print(f"❌ TTS voices proxy error: {e}")
-        import traceback
-        error_trace = traceback.format_exc()
-        print(error_trace)
-        return JSONResponse(
-            content={"error": f"Failed to fetch TTS voices: {str(e)}"},
-            status_code=500,
-            headers=build_cors_headers(request),
-        )
 
 # ============================================================================
 # FILE OPERATIONS ENDPOINTS
