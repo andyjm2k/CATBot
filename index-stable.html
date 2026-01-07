@@ -4702,7 +4702,29 @@ function saveWAVFile(wavBlob) {
         async function handleWorkflow({ contentPrompt }) {
             try {
                 const result = await window.runWorkflow(contentPrompt);
-                return { success: true, message: result };
+                const now = new Date();
+                const pad2 = (value) => value.toString().padStart(2, '0');
+                const timestamp = [
+                    pad2(now.getDate()),
+                    pad2(now.getMonth() + 1),
+                    now.getFullYear(),
+                    pad2(now.getHours()),
+                    pad2(now.getMinutes()),
+                    pad2(now.getSeconds())
+                ].join('-');
+                const filename = `${timestamp}_autogen_response.txt`;
+
+                const writeResult = await handleWriteFile({
+                    filename,
+                    content: result,
+                    format: 'txt'
+                });
+
+                if (!writeResult.success) {
+                    console.warn('Failed to persist AutoGen response:', writeResult.message);
+                }
+
+                return { success: true, message: "The workflow has completed. Please review the output." };
             } catch (error) {
                 console.error('Workflow error:', error);
                 return { success: false, message: `Error: ${error.message}` };
