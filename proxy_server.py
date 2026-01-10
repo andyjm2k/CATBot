@@ -719,6 +719,87 @@ async def proxy_search(query: str):
         print(f"Search error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to perform search: {str(e)}")
 
+# News API search endpoint
+@app.get("/v1/proxy/news")
+async def proxy_news_search(query: str):
+    """Search news articles using News API."""
+    if not query:
+        raise HTTPException(status_code=400, detail="Search query is required")
+
+    # Get News API key from environment variable
+    news_api_key = os.getenv('NEWS_API_KEY')
+    if not news_api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="NEWS_API_KEY is not configured. Please set it in your .env file."
+        )
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                'https://newsapi.org/v2/everything',
+                headers={
+                    'Accept': 'application/json',
+                },
+                params={
+                    'q': query,
+                    'apiKey': news_api_key,
+                    'sortBy': 'publishedAt',
+                    'language': 'en',
+                    'pageSize': 100  # Maximum allowed by News API
+                }
+            )
+
+        if response.status_code == 200:
+            data = response.json()
+            articles = data.get('articles', [])
+            
+            if not articles:
+                return {
+                    "success": False,
+                    "message": f"No articles found for search term \"{query}\"",
+                    "articles": []
+                }
+
+            # Format articles for response
+            formatted_articles = []
+            for article in articles:
+                formatted_articles.append({
+                    'title': clean_text(article.get('title', '')),
+                    'url': article.get('url', ''),
+                    'description': clean_text(article.get('description', '')),
+                    'publishedAt': article.get('publishedAt', ''),
+                    'source': article.get('source', {}).get('name', 'Unknown')
+                })
+
+            return {
+                "success": True,
+                "message": f"Found {len(formatted_articles)} articles",
+                "articles": formatted_articles,
+                "totalResults": data.get('totalResults', len(formatted_articles))
+            }
+        else:
+            error_data = response.json() if response.headers.get('content-type', '').startswith('application/json') else {}
+            error_message = error_data.get('message', f"News API returned status {response.status_code}")
+            print(f"News API error: {error_message}")
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"News API error: {error_message}"
+            )
+
+    except httpx.HTTPStatusError as e:
+        print(f"News API HTTP error: {e}")
+        raise HTTPException(
+            status_code=e.response.status_code,
+            detail=f"News API request failed: {str(e)}"
+        )
+    except Exception as e:
+        print(f"News API error: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch news: {str(e)}"
+        )
+
 # AutoGen team chat endpoint (integrated directly)
 @app.post("/v1/proxy/autogen")
 async def autogen_chat(request: Request):
