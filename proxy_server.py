@@ -25,6 +25,14 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel
 import uvicorn
 
+# Import dotenv to load .env file
+try:
+    from dotenv import load_dotenv
+    DOTENV_AVAILABLE = True
+except ImportError:
+    DOTENV_AVAILABLE = False
+    print("[WARN] python-dotenv not available. Install with: pip install python-dotenv")
+
 # Import file operations libraries
 try:
     from docx import Document  # python-docx for Word documents
@@ -61,6 +69,25 @@ except ImportError as e:
     ClientSession = None
     stdio_client = None
     StdioServerParameters = None
+
+# Load environment variables from .env file in project root
+if DOTENV_AVAILABLE:
+    # Try loading from current directory first
+    env_path = Path(__file__).parent / '.env'
+    if env_path.exists():
+        load_dotenv(env_path)
+        print(f"✅ Loaded environment variables from {env_path}")
+    else:
+        # Try loading from parent directory as fallback
+        parent_env = Path(__file__).parent.parent / '.env'
+        if parent_env.exists():
+            load_dotenv(parent_env)
+            print(f"✅ Loaded environment variables from {parent_env}")
+        else:
+            print(f"⚠️  No .env file found. Using system environment variables.")
+            print(f"   Looked in: {env_path} and {parent_env}")
+else:
+    print("⚠️  python-dotenv not available. Using system environment variables only.")
 
 # Pydantic models for request/response validation
 class ServerConfig(BaseModel):
