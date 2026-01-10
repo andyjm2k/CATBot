@@ -10531,19 +10531,8 @@ ${fullText.substring(0, 6000)}...${minimalImageInfo}`;
         }
 
         async function handleGoogleDriveUpload({ filePath, fileName }) {
-            const credentials = {
-                type: "service_account",
-                project_id: "my-project-1693459754636",
-                private_key_id: "38baa4270ba1ec847499b8a0a3cb7f48444cad10",
-                private_key: "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCj419AiE5+m0P8\n8HaAlArwkE1Kfblu3eCoCLiupL8nuVVAtewMoQEiQMdpUeB9JUnbnA0ZQ96+xUC/\nP/HTTzYgie+kv7ht7688VupJoAvg4iu9I09+tLaJ/r7LBvH5BQJGH4MXr0Cj4Dui\nU2gyx9Feq3drynOXCCg9dhPKRtpwyVCy8ITb2Bwl1XkyNs3BDqyOdA5eT8P6zA+u\npW3E6qkACTB2btCuHQCi6WmkPDqAwqMqKZ1bVeN5ctHbH515YJoV2+eBJQC6zAOY\nszV+gJMxady/wibpNT9+e7GF38WESJ1zIO7QejmrK0kI8kYwlHv07JUJOFl9Nx1U\nusaoYZ4bAgMBAAECggEAEZr2cQgTfT3wVEbVRrkLNyNxQhwhDuauiwPWKbX7Q5Or\ns6th+PX/bq63HTpqm1b686ifBESftC5GvHoXNW7Fbu0SaB12Ukz/WJkySt1yrozt\nS5X0T2AEr0Hv51R5gEQy+ysdxINoNhJ7pX5Alm/pBGVMC1wbWwaeeAJsBtHiBl/V\n474LYlAc5c5oOc5sD7r7M0V3XTu/4Q0Abclay39jw0bIUtXnXfPdtwdWTFEpZaP8\ndAlHXdI28FoKF+163n2rYDfmW1n30+jgSsBvMBZd9vBa99eoLAWfsUUjGKJGQHJw\nywwJyR3PrcBWeUIY40IxzNvZ9fVShV5Me8XB091+RQKBgQDUUwBO63cgz2b1jiSb\n1+GvdapaEgT5LAxTEe31xe0EV2TSg0Ed/eQ4ignK5MS2jZHNgaLG05u6thxcIa+x\nRYMlW0ycphNk1w7rpHbrXQtMXKvFkG0BfM1gzozNPSIbhSJNUbCOSPA9wSublSWF\nlZB8Yd2R3vIRoS0IiJNLUBVUlQKBgQDFmborx+B67nWdrMllOzoOuspGbTuR/39j\nNCzt/hloqQKV2nfBa6a8j9aoLCHlxeSe8ZIy5/uJPkG/SAmGw32VlJ4FzLxw2Lm1\n5zpC8sESsBPFTQSswltJX5iHaOodmqRbGC28eq5ljTyYXt1JO1YK8SLAdV8eAttt\nWCRktfBL7wKBgQCq3Jxb5gq4wY6GPrvhGaoJK7RJxURxS+wjEUOgS4W/v6Bn8638\nN6tngFX/C3ftvCE/8nmObQ1eBFzwGz+qdVjjQAR37wGeXZ4pLPFx2C9WZSDp3J6L\n2uXfaHhQVUjUQp/m/r0I01NZLtEr46sNQ93A6nSGhZXhcAWwX0/BBJIVvQKBgQCP\nZSKkONVfgILb3JL+In/cRpMZjpVnOrlv/WIJh5dayyN0Kekz9PI37k4BFp22x+hD\nq9zDknOIQiSmMhmvsVgGX6ZZYRzy62PBbL5r7QxNineee2jEEfr7ASOISIt01k8l\nSCOQnprGWTs6+8SsKyIiqKDmd4aCGeKwtAEdEKcEAwKBgF3GSo7MBVH2iDyZRTnN\nUqQ9pmFdTeI6mYaglqEppTXAQ+dtrmBUQ6YByHIWrfKgZHqzujmU+dbi57sfbSrf\nFhxqqfm1vvlkdE0n2bAJuN83SvXfL4a3QJzA/UNdeEd2VkMSbXR8my2AQmVWDmxl\nDt937ci9WufHH3d7vEZznJI8\n-----END PRIVATE KEY-----\n",
-                client_email: "andrew-service-account@my-project-1693459754636.iam.gserviceaccount.com",
-                auth_uri: "https://accounts.google.com/o/oauth2/auth",
-                token_uri: "https://oauth2.googleapis.com/token",
-                auth_provider_x509_cert_url: "https://www.googleapis.com/oauth2/v1/certs",
-                client_x509_cert_url: "https://www.googleapis.com/robot/v1/metadata/x509/andrew-service-account@my-project-1693459754636.iam.gserviceaccount.com"
-            };
-            
-            const FOLDER_ID = "18JydSRuY5j4272ywvwYl1Xgfj8UYagbf";
+            // Credentials are read from .env file by the proxy server for security
+            // No credentials are sent from the frontend
 
             try {
                 // Verify file exists
@@ -10552,9 +10541,8 @@ ${fullText.substring(0, 6000)}...${minimalImageInfo}`;
                 }
 
                 // Make request to proxy endpoint for Google Drive upload
+                // Note: All credentials and folder ID are read from .env file by the proxy server for security
                 const formData = new FormData();
-                formData.append('credentials', JSON.stringify(credentials));
-                formData.append('folderId', FOLDER_ID);
                 formData.append('filePath', filePath);
                 if (fileName) {
                     formData.append('fileName', fileName);

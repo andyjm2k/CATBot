@@ -2251,6 +2251,146 @@ async def delete_file(filename: str):
 # END FILE OPERATIONS ENDPOINTS
 # ============================================================================
 
+# ============================================================================
+# GOOGLE DRIVE UPLOAD ENDPOINT
+# ============================================================================
+
+@app.post("/v1/proxy/upload-to-drive")
+async def upload_to_drive(request: Request):
+    """
+    Upload a file to Google Drive using service account credentials from .env file.
+    Credentials are read from environment variables:
+    - GOOGLE_DRIVE_PROJECT_ID
+    - GOOGLE_DRIVE_PRIVATE_KEY_ID
+    - GOOGLE_DRIVE_PRIVATE_KEY
+    - GOOGLE_DRIVE_CLIENT_EMAIL
+    - GOOGLE_DRIVE_FOLDER_ID
+    """
+    try:
+        # Get form data from request
+        form_data = await request.form()
+        
+        # Get file path from form data
+        file_path = form_data.get('filePath')
+        if not file_path:
+            raise HTTPException(status_code=400, detail="filePath is required")
+        
+        # Get optional file name
+        file_name = form_data.get('fileName')
+        
+        # Get folder ID from form data or environment variable
+        folder_id = form_data.get('folderId') or os.getenv('GOOGLE_DRIVE_FOLDER_ID')
+        if not folder_id:
+            raise HTTPException(status_code=400, detail="folderId is required (provide in request or set GOOGLE_DRIVE_FOLDER_ID in .env)")
+        
+        # Read Google Drive credentials from environment variables (loaded from .env file)
+        project_id = os.getenv('GOOGLE_DRIVE_PROJECT_ID')
+        private_key_id = os.getenv('GOOGLE_DRIVE_PRIVATE_KEY_ID')
+        private_key = os.getenv('GOOGLE_DRIVE_PRIVATE_KEY')
+        client_email = os.getenv('GOOGLE_DRIVE_CLIENT_EMAIL')
+        
+        # Validate that all required credentials are present
+        if not all([project_id, private_key_id, private_key, client_email]):
+            missing = [k for k, v in {
+                'GOOGLE_DRIVE_PROJECT_ID': project_id,
+                'GOOGLE_DRIVE_PRIVATE_KEY_ID': private_key_id,
+                'GOOGLE_DRIVE_PRIVATE_KEY': private_key,
+                'GOOGLE_DRIVE_CLIENT_EMAIL': client_email
+            }.items() if not v]
+            raise HTTPException(
+                status_code=500,
+                detail=f"Missing Google Drive credentials in .env file: {', '.join(missing)}"
+            )
+        
+        # Construct credentials object from environment variables
+        # Replace \\n with actual newlines in private key
+        private_key_formatted = private_key.replace('\\n', '\n')
+        
+        credentials_dict = {
+            "type": "service_account",
+            "project_id": project_id,
+            "private_key_id": private_key_id,
+            "private_key": private_key_formatted,
+            "client_email": client_email,
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+            "client_x509_cert_url": f"https://www.googleapis.com/robot/v1/metadata/x509/{client_email}"
+        }
+        
+        # Try to import Google Drive API libraries
+        try:
+            from google.oauth2 import service_account
+            from googleapiclient.discovery import build
+            from googleapiclient.http import MediaFileUpload
+            GOOGLE_DRIVE_AVAILABLE = True
+        except ImportError:
+            GOOGLE_DRIVE_AVAILABLE = False
+            raise HTTPException(
+                status_code=503,
+                detail="Google Drive API libraries not available. Install with: pip install google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client"
+            )
+        
+        # Verify file exists
+        file_path_obj = Path(file_path)
+        if not file_path_obj.exists():
+            raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
+        
+        # Authenticate with Google Drive using service account credentials
+        credentials = service_account.Credentials.from_service_account_info(
+            credentials_dict,
+            scopes=['https://www.googleapis.com/auth/drive.file']
+        )
+        
+        # Build the Drive service
+        drive_service = build('drive', 'v3', credentials=credentials)
+        
+        # Determine file name to use
+        upload_file_name = file_name if file_name else file_path_obj.name
+        
+        # Prepare file metadata
+        file_metadata = {
+            'name': upload_file_name,
+            'parents': [folder_id] if folder_id else []
+        }
+        
+        # Upload file to Google Drive
+        media = MediaFileUpload(
+            str(file_path_obj),
+            resumable=True
+        )
+        
+        # Perform the upload
+        file = drive_service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields='id, name, webViewLink'
+        ).execute()
+        
+        # Return success response with file ID
+        return {
+            'success': True,
+            'fileId': file.get('id'),
+            'fileName': file.get('name'),
+            'webViewLink': file.get('webViewLink'),
+            'message': f"File successfully uploaded to Google Drive with ID: {file.get('id')}"
+        }
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    except Exception as e:
+        # Handle any other errors
+        print(f"❌ Google Drive upload error: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to upload file to Google Drive: {str(e)}"
+        )
+
+# ============================================================================
+# END GOOGLE DRIVE UPLOAD ENDPOINT
+# ============================================================================
+
 if __name__ == "__main__":
     # Start the server
     print("[START] Starting AI Assistant Proxy Server with File Operations...")
