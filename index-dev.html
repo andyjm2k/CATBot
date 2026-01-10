@@ -1304,6 +1304,12 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
         let ttsAnalyserStopTimer = null; // Timer used to delay cleanup after audio ends
 		let ttsAbortController = null; // AbortController for active Chatterbox TTS fetch/stream
 		let ttsGeneration = 0; // Monotonic token to discard stale TTS callbacks
+		// Microsoft TTS lip sync variables (smooth amplitude-based approach, same as Chatterbox)
+		let microsoftTtsRafId = 0; // requestAnimationFrame id for Microsoft TTS lip sync loop
+		let microsoftTtsTargetAmplitude = 0; // Target amplitude for smooth lip sync (0-1)
+		let microsoftTtsSmoothedAmplitude = 0; // Current smoothed amplitude value
+		let microsoftTtsLastBoundaryTs = 0; // Timestamp of last boundary event
+		let microsoftTtsIsActive = false; // Flag to track if Microsoft TTS lip sync is active
 
         // Global VRMA actions
         let vrmLoveVrmaAction = null; // Prepared AnimationAction for love VRMA
@@ -2198,6 +2204,14 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
 			try { ttsCleanupFns.forEach(fn => { try { fn(); } catch(_){} }); ttsCleanupFns = []; } catch (_) {}
 			try { stopChatterboxLipSync(true); } catch (_) {}
 			try { if (ttsAbortController) { ttsAbortController.abort(); ttsAbortController = null; } } catch (_) {}
+			// Stop Microsoft TTS lip sync if active
+			try { 
+				microsoftTtsIsActive = false; // Stop Microsoft TTS lip sync loop
+				if (microsoftTtsRafId) { 
+					cancelAnimationFrame(microsoftTtsRafId); 
+					microsoftTtsRafId = 0; 
+				} // Cancel Microsoft TTS RAF
+			} catch (_) {}
 
             // Check TTS service selection - use OpenAI-compatible TTS when selected or when API key is present
             const useOpenAITTS = (ttsServiceOpenAI && ttsServiceOpenAI.checked) || 
@@ -2219,11 +2233,80 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
                 console.warn('No valid voice selected, using default system voice');
             }
 
-            let isMoving = false; // Track whether mouth is currently open or closed
             const mouthOpenY = "ParamMouthOpenY"; // Live2D mouth open parameter id
             let headMovementInterval; // Interval id for gentle head movement
-            let lipSyncInterval; // Interval id for lip-sync fallback toggling
-            let lastBoundaryTs = 0; // Timestamp of last onboundary event
+            
+            // Start smooth amplitude-based lip sync for Microsoft TTS (similar to Chatterbox analyser approach)
+            function startMicrosoftTtsLipSync() { // Start smooth lip sync loop for Microsoft TTS
+                if (microsoftTtsRafId) return; // Avoid spawning duplicate loops
+                
+                microsoftTtsIsActive = true; // Mark lip sync as active
+                microsoftTtsSmoothedAmplitude = 0; // Initialize smoothed amplitude
+                microsoftTtsTargetAmplitude = 0.3; // Start with lower mouth opening to allow natural closing
+                microsoftTtsLastBoundaryTs = performance.now(); // Initialize boundary timestamp
+                
+                const attack = 0.6; // Attack coefficient for rising amplitude (same as Chatterbox)
+                const release = 0.15; // Release coefficient for falling amplitude (same as Chatterbox)
+                const threshold = 0.05; // Minimum amplitude threshold (increased to make mouth close more between words)
+                const boundaryDecayRate = 0.08; // Rate at which amplitude decays between boundaries (increased for faster closing)
+                const boundaryDecayDelay = 50; // Delay before decay starts (reduced from 100ms for more responsive closing)
+                
+                const step = () => { // Per-frame lip sync update callback
+                    if (!microsoftTtsIsActive || !isSpeaking) { // Stop if speech ended or deactivated
+                        microsoftTtsRafId = 0; // Clear RAF id
+                        microsoftTtsSmoothedAmplitude = 0; // Reset amplitude
+                        // Close mouth when speech ends
+                        if (live2dModel) {
+                            live2dModel.internalModel.coreModel.setParameterValueById(mouthOpenY, 0);
+                        }
+                        const vrmModeToggle = document.getElementById('vrm-mode');
+                        if (vrmModel && vrmModeToggle && vrmModeToggle.checked) {
+                            animateVRMLipSync(0);
+                        }
+                        return; // Exit loop
+                    }
+                    
+                    const now = performance.now(); // Get current timestamp
+                    const timeSinceBoundary = now - microsoftTtsLastBoundaryTs; // Calculate time since last boundary
+                    
+                    // Decay target amplitude over time if no recent boundary (simulates natural speech rhythm)
+                    // Use exponential decay for more natural closing between words
+                    if (timeSinceBoundary > boundaryDecayDelay) { // If no boundary for >50ms, start decaying
+                        const decayFactor = Math.min(1.0, (timeSinceBoundary - boundaryDecayDelay) / 200); // Faster decay over 200ms
+                        microsoftTtsTargetAmplitude = Math.max(0, microsoftTtsTargetAmplitude - (boundaryDecayRate * decayFactor));
+                    }
+                    
+                    // Apply attack/release smoothing (same algorithm as Chatterbox analyser)
+                    if (microsoftTtsTargetAmplitude > microsoftTtsSmoothedAmplitude) { // Attack branch
+                        microsoftTtsSmoothedAmplitude += (microsoftTtsTargetAmplitude - microsoftTtsSmoothedAmplitude) * attack;
+                    } else { // Release branch
+                        microsoftTtsSmoothedAmplitude += (microsoftTtsTargetAmplitude - microsoftTtsSmoothedAmplitude) * release;
+                    }
+                    
+                    // Scale amplitude with adjusted threshold for better mouth closing between words
+                    const scaled = microsoftTtsSmoothedAmplitude <= threshold ? 0 : Math.min(1, (microsoftTtsSmoothedAmplitude - threshold) * 5.5);
+                    
+                    // Apply to Live2D model
+                    if (live2dModel) {
+                        live2dModel.internalModel.coreModel.setParameterValueById(mouthOpenY, scaled);
+                    }
+                    
+                    // Apply to VRM model
+                    const vrmModeToggle = document.getElementById('vrm-mode');
+                    if (vrmModel && vrmModeToggle && vrmModeToggle.checked) {
+                        animateVRMLipSync(scaled);
+                    }
+                    
+                    // Continue loop while speech is active
+                    if (isSpeaking && microsoftTtsIsActive) {
+                        microsoftTtsRafId = requestAnimationFrame(step);
+                    } else {
+                        microsoftTtsRafId = 0; // Clear RAF id when done
+                    }
+                }; // End step function
+                
+                step(); // Start the lip sync loop immediately
+            } // End startMicrosoftTtsLipSync
             
             utterance.onstart = function() { // When speech begins
                 console.log('Speech started'); // Log start of speech
@@ -2234,24 +2317,10 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
                     }, 3000); // Run every 3 seconds
                 } // End Live2D head movement setup
 
-                lastBoundaryTs = performance.now(); // Initialize last boundary timestamp to now
-
-                // Start a fallback lip-sync interval to keep mouth moving if onboundary stalls
-                lipSyncInterval = setInterval(() => { // Begin interval for lip sync toggling
-                    const now = performance.now(); // Get current high-resolution time
-                    if (now - lastBoundaryTs > 180) { // If no boundary for >180ms, toggle manually
-                        isMoving = !isMoving; // Flip mouth open/closed state
-                        const value = isMoving ? 1.0 : 0.0; // Compute target value for mouth
-                        if (live2dModel) { // If Live2D active
-                            live2dModel.internalModel.coreModel.setParameterValueById(mouthOpenY, value); // Apply Live2D mouth value
-                        } // End Live2D application
-                        if (vrmModel && document.getElementById('vrm-mode').checked) { // If VRM active
-                            animateVRMLipSync(value); // Apply VRM mouth value
-                        } // End VRM application
-                        lastBoundaryTs = now; // Update last boundary time to avoid over-toggling
-                    } // End boundary gap check
-                }, 120); // Check frequently for smooth motion
-                ttsLipSyncIntervalId = lipSyncInterval; // Track active interval globally for cleanup
+                microsoftTtsLastBoundaryTs = performance.now(); // Initialize boundary timestamp
+                
+                // Start smooth amplitude-based lip sync (same approach as Chatterbox)
+                startMicrosoftTtsLipSync(); // Start smooth lip sync loop
 
                 // Kick mouth slightly open at start so it does not appear stuck
                 if (vrmModel && document.getElementById('vrm-mode').checked) { // If VRM active
@@ -2260,30 +2329,26 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
             }; // End onstart handler
 
             utterance.onboundary = function(event) { // Called on word or sentence boundaries
-                lastBoundaryTs = performance.now(); // Record time to inform fallback timer
-                if (live2dModel) { // If Live2D active
-                    isMoving = !isMoving; // Toggle mouth open state
-                    const mouthOpenValue = isMoving ? 1 : 0; // Compute Live2D mouth value
-                    live2dModel.internalModel.coreModel.setParameterValueById(mouthOpenY, mouthOpenValue); // Apply Live2D mouth value
-                } // End Live2D section
-
-                // VRM lip sync animation
-                if (vrmModel && document.getElementById('vrm-mode').checked) { // If VRM active
-                    const lipValue = isMoving ? 1.0 : 0.0; // Compute VRM target value
-                    animateVRMLipSync(lipValue); // Apply VRM mouth value
-                } // End VRM section
+                const now = performance.now(); // Get current timestamp
+                const timeSinceLastBoundary = now - microsoftTtsLastBoundaryTs; // Calculate time since last boundary
+                microsoftTtsLastBoundaryTs = now; // Update boundary timestamp
+                // Trigger amplitude increase on boundary (simulates speech activity)
+                // Use smaller, more frequent boosts to allow mouth to close between words
+                const amplitudeBoost = Math.min(0.35, 0.15 + (timeSinceLastBoundary / 1000) * 0.08); // Reduced boost for more natural closing
+                microsoftTtsTargetAmplitude = Math.min(0.85, microsoftTtsTargetAmplitude + amplitudeBoost); // Cap at 0.85 to allow closing
             }; // End onboundary handler
 
             utterance.onend = function() { // When speech ends
                 console.log('Speech ended'); // Log end of speech
                 isSpeaking = false; // Clear speaking flag
+                microsoftTtsIsActive = false; // Stop Microsoft TTS lip sync loop
                 if (headMovementInterval) { // If head movement was running
                     clearInterval(headMovementInterval); // Stop head movement interval
                 } // End head movement cleanup
-                if (lipSyncInterval) { // If lip-sync fallback was running
-                    clearInterval(lipSyncInterval); // Stop lip-sync interval
-                    lipSyncInterval = null; // Clear reference to interval id
-                } // End lip-sync cleanup
+                if (microsoftTtsRafId) { // If Microsoft TTS lip sync RAF is running
+                    try { cancelAnimationFrame(microsoftTtsRafId); } catch(_){} // Cancel animation frame
+                    microsoftTtsRafId = 0; // Clear RAF id
+                } // End Microsoft TTS lip sync cleanup
                 if (ttsLipSyncIntervalId) { try { clearInterval(ttsLipSyncIntervalId); } catch(_){} ttsLipSyncIntervalId = null; }
                 if (ttsRafId) { try { cancelAnimationFrame(ttsRafId); } catch(_){} ttsRafId = 0; }
                 try { ttsCleanupFns.forEach(fn => { try { fn(); } catch(_){} }); } catch(_){}
