@@ -64,6 +64,9 @@
             display: flex;
             flex-direction: column;
             gap: 15px;
+            transition: all 0.3s ease;
+            overflow: hidden;
+            min-width: 0;
         }
 
         /* Form Elements */
@@ -656,6 +659,47 @@
         .sidebar-toggle-btn i {
             font-size: 1.2rem;
         }
+
+        /* Right Panel Toggle Button */
+        .right-panel-toggle-btn {
+            position: fixed;
+            right: 10px;
+            top: 50%;
+            transform: translateY(-50%);
+            background: #007BFF;
+            color: white;
+            border: none;
+            border-radius: 5px 0 0 5px;
+            padding: 15px 8px;
+            cursor: pointer;
+            z-index: 1000;
+            box-shadow: -2px 0 8px rgba(0, 0, 0, 0.2);
+            transition: right 0.3s ease;
+            width: auto;
+            min-width: auto;
+        }
+
+        .right-panel-toggle-btn:hover {
+            background: #0056b3;
+        }
+
+        .right-panel-toggle-btn.panel-closed {
+            right: 10px;
+        }
+
+        .right-panel-toggle-btn i {
+            font-size: 1.2rem;
+        }
+
+        /* Right Column Collapsed State */
+        .right-column.collapsed {
+            flex: 0 0 0;
+            min-width: 0;
+            max-width: 0;
+            padding: 0;
+            opacity: 0;
+            visibility: hidden;
+        }
     </style>
     <!-- Replace the script section in the head -->
     <script src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js"></script>
@@ -811,6 +855,11 @@
     <!-- Sidebar Toggle Button -->
     <button class="sidebar-toggle-btn sidebar-open" id="sidebar-toggle-btn" title="Toggle Conversations">
         <i class="fas fa-chevron-left"></i>
+    </button>
+
+    <!-- Right Panel Toggle Button -->
+    <button class="right-panel-toggle-btn" id="right-panel-toggle-btn" title="Toggle Conversation History">
+        <i class="fas fa-chevron-right"></i>
     </button>
 
     <div class="container">
@@ -1012,7 +1061,7 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
             </div>
         </div>
         
-        <div class="column right-column">
+        <div class="column right-column" id="right-column">
             <label for="message-history">Conversation History:</label>
             <div id="message-history"></div>
             <textarea id="response-output" rows="30" readonly style="display: none;"></textarea>
@@ -3675,6 +3724,14 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
                 document.getElementById('sidebar-toggle-btn').addEventListener('click', () => {
                     toggleSidebar();
                 });
+
+                // Right panel toggle button handler
+                document.getElementById('right-panel-toggle-btn').addEventListener('click', () => {
+                    toggleRightPanel();
+                });
+                
+                // Load right panel state
+                loadRightPanelState();
             } catch (error) {
                 console.error('Error during initialization:', error);
             }
@@ -4505,6 +4562,51 @@ function saveWAVFile(wavBlob) {
                 }
             } catch (error) {
                 console.warn('Error loading sidebar state:', error);
+            }
+        }
+
+        // Right panel toggle functionality
+        const RIGHT_PANEL_STATE_KEY = 'rightPanelCollapsed';
+        let rightPanelCollapsed = false; // Default to open (accessible)
+
+        // Function to toggle right panel
+        function toggleRightPanel() {
+            const rightColumn = document.getElementById('right-column');
+            const toggleBtn = document.getElementById('right-panel-toggle-btn');
+            const toggleIcon = toggleBtn.querySelector('i');
+            
+            rightPanelCollapsed = !rightPanelCollapsed;
+            
+            if (rightPanelCollapsed) {
+                rightColumn.classList.add('collapsed');
+                toggleBtn.classList.add('panel-closed');
+                toggleIcon.className = 'fas fa-chevron-left'; // Point left to indicate it will expand from right
+            } else {
+                rightColumn.classList.remove('collapsed');
+                toggleBtn.classList.remove('panel-closed');
+                toggleIcon.className = 'fas fa-chevron-right'; // Point right to indicate it will collapse to right
+            }
+            
+            // Save state to localStorage
+            try {
+                storage.setItem(RIGHT_PANEL_STATE_KEY, rightPanelCollapsed.toString());
+            } catch (error) {
+                console.warn('Error saving right panel state:', error);
+            }
+        }
+
+        // Function to load right panel state
+        function loadRightPanelState() {
+            try {
+                const savedState = storage.getItem(RIGHT_PANEL_STATE_KEY);
+                // If there's a saved state and it's 'true' (panel should be collapsed), collapse it
+                if (savedState === 'true') {
+                    rightPanelCollapsed = false; // Set to false first so toggle works correctly
+                    toggleRightPanel(); // This will set it to true and collapse the panel
+                }
+                // If no saved state or saved state is 'false', panel remains open (default)
+            } catch (error) {
+                console.warn('Error loading right panel state:', error);
             }
         }
 
