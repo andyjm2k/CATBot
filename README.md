@@ -51,15 +51,17 @@ You will need the following API keys and service endpoints:
    - Default: `http://localhost:8001/v1/audio/transcriptions`
    - Environment variable: `WHISPER_ENDPOINT`
 
-4. **Brave Search API Key** (Optional but recommended)
+4. **Brave Search API Key** (Required for web search)
    - For web search functionality
    - Get your key: https://brave.com/search/api/
    - Environment variable: `BRAVE_API_KEY`
+   - Note: If not configured, web search will fall back to DuckDuckGo
 
-5. **News API Key** (Optional)
+5. **News API Key** (Optional, can be configured in UI)
    - For news aggregation features
    - Get your key: https://newsapi.org/
-   - Environment variable: `NEWS_API_KEY`
+   - Can be configured in the application settings UI (stored in browser localStorage)
+   - Environment variable: `NEWS_API_KEY` (not currently used - use UI settings instead)
 
 6. **Telegram Bot Token** (Optional, for Telegram integration)
    - Create a bot: https://core.telegram.org/bots#botfather
@@ -165,6 +167,8 @@ The following npm packages are required (see `package.json`):
 | `pydantic-settings` | >=2.0.0 | Settings management with Pydantic |
 | `typer` | >=0.12.0 | CLI framework |
 | `python-telegram-bot` | Latest | Telegram bot API wrapper |
+| `flask` | Latest | Flask web framework for MCP Browser HTTP server |
+| `flask-cors` | Latest | CORS support for Flask server |
 
 #### MCP Browser-Use Submodule Dependencies
 
@@ -230,7 +234,7 @@ pip install "mcp>=1.6.0" "browser-use==0.1.41" playwright pyperclip
 pip install langchain-community langchain-mistralai==0.2.4 langchain-ibm==0.3.10 langchain_mcp_adapters==0.0.9 langgraph==0.3.34
 
 # Install additional utilities
-pip install json-repair MainContentExtractor==0.0.4 pydantic-settings typer python-telegram-bot
+pip install json-repair MainContentExtractor==0.0.4 pydantic-settings typer python-telegram-bot flask flask-cors
 
 # Install Playwright browsers
 playwright install
@@ -440,16 +444,44 @@ Key environment variables (see `mcp_config.env.example` for complete list):
 - `ANTHROPIC_API_KEY`: Anthropic API key (for Claude)
 
 #### MCP Browser-Use Configuration
-- `MCP_LLM_PROVIDER`: LLM provider (openai, google, anthropic, etc.)
-- `MCP_LLM_MODEL_NAME`: Specific model name
+- `MCP_LLM_PROVIDER`: LLM provider (openai, google, anthropic, azure_openai, deepseek, mistral, ollama, openrouter, alibaba, moonshot, unbound_ai)
+- `MCP_LLM_MODEL_NAME`: Specific model name (e.g., gemini-2.0-flash-exp, gpt-4o-mini)
+- `MCP_LLM_PLANNER_PROVIDER`: Optional separate planner LLM provider
+- `MCP_LLM_PLANNER_MODEL_NAME`: Optional separate planner model name
 - `MCP_BROWSER_HEADLESS`: Run browser in headless mode (true/false)
-- `MCP_RESEARCH_TOOL_SAVE_DIR`: Directory for research outputs
+- `MCP_BROWSER_DISABLE_SECURITY`: Disable browser security features (use with caution)
+- `MCP_BROWSER_KEEP_OPEN`: Keep browser open between requests (improves performance)
+- `MCP_BROWSER_WINDOW_WIDTH`: Browser window width (default: 1280)
+- `MCP_BROWSER_WINDOW_HEIGHT`: Browser window height (default: 1100)
+- `MCP_BROWSER_USE_OWN_BROWSER`: Connect to existing browser instance (true/false)
+- `MCP_BROWSER_CDP_URL`: Chrome DevTools Protocol URL (if using own browser)
+- `MCP_RESEARCH_TOOL_SAVE_DIR`: Directory for research outputs (required)
+- `MCP_RESEARCH_TOOL_MAX_PARALLEL_BROWSERS`: Maximum parallel browsers for research (default: 3)
+- `MCP_AGENT_TOOL_MAX_STEPS`: Maximum steps per task (default: 100)
+- `MCP_AGENT_TOOL_MAX_ACTIONS_PER_STEP`: Maximum actions per step (default: 5)
+- `MCP_AGENT_TOOL_USE_VISION`: Enable screenshot analysis (true/false)
+- `MCP_AGENT_TOOL_TOOL_CALLING_METHOD`: Tool calling method (auto, json_schema, function_calling)
+- `MCP_AGENT_TOOL_MAX_INPUT_TOKENS`: Maximum input tokens (default: 128000)
+- `MCP_AGENT_TOOL_ENABLE_RECORDING`: Enable video recording (true/false)
+- `MCP_SERVER_LOGGING_LEVEL`: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+- `MCP_SERVER_ANONYMIZED_TELEMETRY`: Enable anonymized telemetry (true/false)
 
 #### Service Endpoints
-- `WHISPER_ENDPOINT`: Whisper STT service endpoint
-- `TTS_ENDPOINT`: TTS service endpoint
-- `BRAVE_API_KEY`: Brave Search API key
-- `NEWS_API_KEY`: News API key
+- `WHISPER_ENDPOINT`: Whisper STT service endpoint (default: http://localhost:8001/v1/audio/transcriptions)
+- `TTS_ENDPOINT`: TTS service endpoint (default: http://localhost:4123/v1)
+- `BRAVE_API_KEY`: Brave Search API key (required for Brave Search, falls back to DuckDuckGo if not set)
+- `NEWS_API_KEY`: News API key (configure in UI settings, stored in browser localStorage)
+
+#### Telegram Bot Configuration
+- `TELEGRAM_BOT_TOKEN`: Telegram bot token from BotFather (required)
+- `TELEGRAM_ADMIN_IDS`: Comma-separated list of allowed Telegram user IDs
+- `TELEGRAM_ALLOW_ALL`: Set to "true" to allow all users (default: false)
+- `TELEGRAM_BACKEND_URL`: Backend URL for chat requests (default: http://localhost:8002)
+- `TELEGRAM_CHAT_ENDPOINT`: Chat endpoint path (default: /v1/telegram/chat)
+- `TELEGRAM_CHAT_TIMEOUT`: Request timeout in seconds (default: 30)
+- `TELEGRAM_HISTORY_LIMIT`: Maximum conversation history messages (default: 12)
+- `TELEGRAM_BOT_SYSTEM_PROMPT`: Optional system prompt override
+- `TELEGRAM_CHAT_MODEL`: Optional model override
 
 ### Team Configuration (AutoGen)
 
@@ -491,6 +523,18 @@ This will start:
 - MCP Browser-Use server
 - MCP Browser HTTP server (port 5001)
 
+#### Option 1b: Stop All Services (Windows)
+
+```bash
+python stop_all.py
+```
+
+This will stop all running services including:
+- Python processes (http.server, Whisper, Proxy server)
+- Node.js processes
+- AutoGen Studio
+- All command windows
+
 #### Option 2: Start Services Individually
 
 ```bash
@@ -513,28 +557,154 @@ uv run mcp-server-browser-use
 
 # Start MCP Browser HTTP server
 python start_mcp_browser_server.py
+# OR use the startup script with environment validation
+python start_mcp_browser_server.py
 ```
 
 ### Accessing the Application
 
-1. **Web Interface**: Open `index-stable.html` or `index-dev.html` in your browser
+1. **Web Interface**: Open `index-dev.html` in your browser (served on port 8000)
 2. **AutoGen Studio**: Navigate to `http://localhost:8084`
-3. **Proxy Server API**: `http://localhost:8002`
-4. **MCP Browser Server**: `http://localhost:5001`
+3. **Proxy Server API**: `http://localhost:8002` (FastAPI with comprehensive endpoints)
+4. **MCP Browser HTTP Server**: `http://localhost:5001` (Flask-based HTTP bridge for browser automation)
+
+### API Endpoints
+
+#### Proxy Server Endpoints (Port 8002)
+
+The FastAPI proxy server provides the following endpoints:
+
+**Web Operations:**
+- `GET /v1/proxy/fetch` - Fetch web content from a URL
+- `GET /v1/proxy/search` - Perform web search (Brave Search or DuckDuckGo fallback)
+
+**AI & Chat:**
+- `POST /v1/proxy/autogen` - AutoGen team-based chat endpoint
+- `POST /v1/telegram/chat` - Telegram bot chat endpoint
+- `DELETE /v1/telegram/chat/{conversation_id}` - Clear Telegram conversation history
+
+**Speech & Audio:**
+- `POST /v1/audio/transcriptions` - Whisper STT proxy endpoint (handles CORS)
+- `GET /v1/proxy/tts/voices` - Get available TTS voices
+- `POST /v1/proxy/tts/speech` - Generate TTS speech (supports streaming)
+
+**MCP Server Management:**
+- `POST /v1/mcp/servers` - Add or update MCP server configuration
+- `GET /v1/mcp/servers` - List all configured MCP servers
+- `POST /v1/mcp/servers/{server_id}/connect` - Connect to an MCP server
+- `POST /v1/mcp/servers/{server_id}/disconnect` - Disconnect from an MCP server
+- `POST /v1/mcp/servers/{server_id}/tools/call` - Call an MCP tool
+- `POST /v1/mcp/servers/{server_id}/tools/list` - List available MCP tools
+
+**File Operations:**
+- `POST /v1/files/read` - Read files (supports: txt, docx, xlsx, pdf, png, jpg)
+- `POST /v1/files/write` - Write files (supports: txt, docx, xlsx, pdf)
+- `GET /v1/files/list` - List all files in scratch directory
+- `DELETE /v1/files/delete/{filename}` - Delete a file from scratch directory
+
+**Utility:**
+- `GET /health` - Health check endpoint
+- `GET /test` - Simple test endpoint
+
+#### MCP Browser HTTP Server Endpoints (Port 5001)
+
+The Flask-based HTTP bridge provides browser automation endpoints:
+
+- `POST /api/browser-agent` - Execute browser automation task
+  ```json
+  {
+    "task": "Go to example.com and get the page title"
+  }
+  ```
+
+- `POST /api/deep-research` - Execute deep research task
+  ```json
+  {
+    "research_task": "Research topic description",
+    "max_parallel_browsers": 3
+  }
+  ```
+
+- `GET /api/health` - Check server health and MCP availability
+- `POST /api/disconnect` - Disconnect MCP client (compatibility endpoint)
 
 ### Using Browser Automation
 
 The browser automation features are accessible through the MCP Browser-Use integration:
 
 ```bash
-# Via HTTP API
+# Via HTTP API (MCP Browser HTTP Server)
 curl -X POST http://localhost:5001/api/browser-agent \
   -H "Content-Type: application/json" \
   -d '{"task": "Go to example.com and get the page title"}'
 
+# Via Proxy Server MCP endpoints
+curl -X POST http://localhost:8002/v1/mcp/servers/browser-use/tools/call \
+  -H "Content-Type: application/json" \
+  -d '{"toolName": "run_browser_agent", "parameters": {"task": "Your task here"}}'
+
 # Via MCP tools in the frontend
 # Use the browser automation tool in the web interface
 ```
+
+### Using File Operations
+
+The proxy server provides file operations for working with documents in the `scratch/` directory:
+
+```bash
+# Read a file
+curl -X POST http://localhost:8002/v1/files/read \
+  -H "Content-Type: application/json" \
+  -d '{"filename": "document.docx"}'
+
+# Write a file
+curl -X POST http://localhost:8002/v1/files/write \
+  -H "Content-Type: application/json" \
+  -d '{"filename": "output.docx", "content": "Your content here", "format": "docx"}'
+
+# List all files
+curl http://localhost:8002/v1/files/list
+
+# Delete a file
+curl -X DELETE http://localhost:8002/v1/files/delete/document.docx
+```
+
+Supported file formats:
+- **Read**: txt, docx, xlsx, pdf, png, jpg, jpeg
+- **Write**: txt, docx, xlsx, pdf
+
+**File Operations Details:**
+- All file operations work within the `scratch/` directory
+- Text files (`.txt`) are read/written as plain text
+- Word documents (`.docx`) support full document structure
+- Excel files (`.xlsx`) can be read and written with formatting
+- PDF files (`.pdf`) support text extraction and generation
+- Images (`.png`, `.jpg`, `.jpeg`) can be read and analyzed
+- Files are automatically organized by modification time when listing
+
+### Using Telegram Bot
+
+The Telegram bot integration allows users to interact with the AI assistant via Telegram:
+
+**Setup:**
+1. Create a bot with [@BotFather](https://core.telegram.org/bots#botfather)
+2. Set `TELEGRAM_BOT_TOKEN` in your `.env` file
+3. Configure `TELEGRAM_ADMIN_IDS` (comma-separated user IDs) or set `TELEGRAM_ALLOW_ALL=true`
+4. Start the bot: `python telegram_bot.py`
+
+**Bot Commands:**
+- `/start` - Greet the user and register the conversation
+- `/help` - Display available commands
+- `/status` - Report backend status and message counts
+- `/clear` - Clear the conversation history on the backend
+
+**Environment Variables:**
+- `TELEGRAM_BOT_TOKEN` - Bot token from BotFather (required)
+- `TELEGRAM_ADMIN_IDS` - Comma-separated list of allowed user IDs
+- `TELEGRAM_ALLOW_ALL` - Set to "true" to allow all users
+- `TELEGRAM_BACKEND_URL` - Backend URL (default: http://localhost:8002)
+- `TELEGRAM_CHAT_ENDPOINT` - Chat endpoint path (default: /v1/telegram/chat)
+- `TELEGRAM_CHAT_TIMEOUT` - Request timeout in seconds (default: 30)
 
 ## Project Structure
 
@@ -551,15 +721,22 @@ AI_assistant/
 │   └── ogg-opus-decoder/ # Audio decoder
 ├── scratch/              # File operations workspace
 ├── research_output/      # Research tool outputs
-├── proxy_server.py       # FastAPI proxy server
-├── telegram_bot.py        # Telegram bot integration
+├── proxy_server.py       # FastAPI proxy server (port 8002)
+├── telegram_bot.py       # Telegram bot integration
+├── telegram_bot_minimal_example.py # Minimal Telegram bot example
 ├── mcp_browser_client.py # MCP browser client wrapper
-├── mcp_browser_server.py # MCP browser HTTP server
-├── start_all.py          # Start all services script
+├── mcp_browser_server.py # MCP browser HTTP server (Flask, port 5001)
+├── start_mcp_browser_server.py # Startup script for MCP browser server
+├── start_all.py         # Start all services script (Windows)
+├── stop_all.py           # Stop all services script (Windows)
 ├── team-config.json      # AutoGen team configuration
 ├── mcp_servers.json      # MCP server configurations
-├── package.json          # Node.js dependencies
 ├── mcp_config.env.example # Environment variables template
+├── telegram_env_example.txt # Telegram bot environment example
+├── package.json          # Node.js dependencies
+├── index-dev.html        # Web interface (development)
+├── recorder-worklet-processor.js # Audio recording worklet
+├── test_*.py             # Various test files
 └── README.md             # This file
 ```
 
@@ -632,17 +809,64 @@ AI_assistant/
 4. **Missing API Keys**
    - Ensure all required API keys are set in `.env` file
    - Verify environment variables are loaded correctly
+   - Check `mcp_config.env.example` for all available configuration options
 
 5. **Port Already in Use**
    - Change port numbers in configuration files
    - Or stop the process using the port
+   - Use `python stop_all.py` to stop all services on Windows
+
+6. **File Operations Not Working**
+   - Ensure file operation libraries are installed: `pip install python-docx openpyxl PyPDF2 reportlab Pillow`
+   - Check that files are in the `scratch/` directory
+   - Verify file format is supported (txt, docx, xlsx, pdf, png, jpg)
+
+7. **Telegram Bot Not Responding**
+   - Verify `TELEGRAM_BOT_TOKEN` is set correctly
+   - Check that `TELEGRAM_ADMIN_IDS` is configured or `TELEGRAM_ALLOW_ALL=true`
+   - Ensure proxy server is running on port 8002
+   - Check bot logs for connection errors
+
+8. **MCP Browser Server Connection Issues**
+   - Verify MCP Browser-Use server is running
+   - Check environment variables in `.env` file
+   - Ensure `MCP_RESEARCH_TOOL_SAVE_DIR` directory exists
+   - Review `start_mcp_browser_server.py` output for configuration errors
+
+9. **CORS Errors in Browser**
+   - Proxy server includes CORS middleware - ensure it's running
+   - Check that requests are going to the correct port (8002 for proxy, 5001 for MCP browser server)
+   - Verify browser console for specific CORS error messages
 
 ### Getting Help
 
 - Check the installation guide: `INSTALL_GUIDE.md`
 - Review MCP Browser-Use README: `mcp-browser-use/README.md`
 - Enable debug logging: Set `MCP_SERVER_LOGGING_LEVEL=DEBUG` in `.env`
+- Check proxy server logs for API endpoint errors
+- Review test files (`test_*.py`) for usage examples
 - Check GitHub issues for related projects
+
+### Testing the Installation
+
+Several test files are available to verify functionality:
+
+```bash
+# Test file operations
+python test_file_operations.py
+
+# Test MCP browser integration
+python test_mcp_browser_integration.py
+
+# Test MCP client connection
+python test_mcp_client.py
+
+# Test HTTP client
+python test_http_client.py
+
+# Test server endpoints
+python test_server.py
+```
 
 ## License
 

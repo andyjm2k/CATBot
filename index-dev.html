@@ -844,7 +844,11 @@
                     
                     <label for="endpoint-url">OpenAI API Endpoint:</label>
                     <input type="text" id="endpoint-url" value="http://localhost:1234/v1/chat/completions">
-
+                    
+                    <label for="news-api-key">News API Key:</label>
+                    <input type="password" id="news-api-key" placeholder="Enter your News API key">
+                    <span class="helper-text">Get your key from https://newsapi.org</span>
+                    
                     <div class="toggle-container">
                         <label for="webcam-toggle">Webcam Mode:</label>
                         <label class="switch">
@@ -1047,6 +1051,7 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
         const status = document.getElementById('status');
         const endpointInput = document.getElementById('endpoint-url');
         const apiKeyInput = document.getElementById('api-key');
+        const newsApiKeyInput = document.getElementById('news-api-key');
         const systemPromptInput = document.getElementById('system-prompt');
         const voiceDropdown = document.getElementById('voice-dropdown');
         const ttsServiceMicrosoft = document.getElementById('tts-service-microsoft'); // Microsoft TTS service radio
@@ -1844,25 +1849,75 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
                     ? ttsEndpointInput.value.trim().replace(/\/$/, '') 
                     : 'http://localhost:4123/v1';
                 
-                // Construct the voices endpoint URL by appending /voices to the TTS endpoint
-                const voicesUrl = `${endpoint}/voices`;
+                // Extract base URL (origin: protocol + host + port) to pass to proxy
+                // The proxy will try /voices first, then /v1/audio/voices
+                let baseUrl;
+                try {
+                    // Parse the endpoint URL to extract the origin (protocol + host + port)
+                    const endpointUrl = new URL(endpoint);
+                    baseUrl = endpointUrl.origin; // Gets protocol + host + port, without any path
+                } catch (e) {
+                    // Fallback to simple string replacement if URL parsing fails
+                    // Remove /v1 if it's at the end, or extract origin manually
+                    const match = endpoint.match(/^(https?:\/\/[^\/]+)/);
+                    baseUrl = match ? match[1] : endpoint.replace(/\/v1$/, '');
+                }
                 
-                console.log('Fetching voices directly from TTS endpoint:', voicesUrl);
+                console.log('Fetching voices through proxy from TTS endpoint:', baseUrl);
                 
-                // Fetch voices directly from the TTS endpoint
-                const response = await fetch(voicesUrl, {
-                    method: 'GET',
-                    headers: {
-                        'Content-Type': 'application/json'
+                // Try to fetch voices from the configured endpoint through proxy
+                // The proxy will automatically try /voices first, then /v1/audio/voices
+                let response = null;
+                let responseData = null;
+                
+                try {
+                    const proxyUrl = `${PROXY_BASE_URL}/v1/proxy/tts/voices?endpoint=${encodeURIComponent(baseUrl)}`;
+                    console.log('Fetching voices through proxy:', proxyUrl);
+                    response = await fetch(proxyUrl, {
+                        method: 'GET',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        }
+                    });
+                    
+                    if (response.ok) {
+                        responseData = await response.json();
                     }
-                });
+                } catch (e) {
+                    console.warn('Primary fetch failed:', e);
+                    response = null;
+                }
                 
-                if (!response.ok) {
-                    console.error('Failed to fetch voices:', response.status, response.statusText);
+                // If primary fetch fails, try OpenAI-compatible fallback endpoint
+                // (different server, so we try it separately)
+                if (!response || !response.ok) {
+                    console.warn('Primary fetch failed, trying OpenAI-compatible fallback endpoint');
+                    const openAiFallbackUrl = 'http://localhost:8880';
+                    try {
+                        const openAiFallbackProxyUrl = `${PROXY_BASE_URL}/v1/proxy/tts/voices?endpoint=${encodeURIComponent(openAiFallbackUrl)}`;
+                        console.log('Fetching voices from OpenAI-compatible fallback through proxy:', openAiFallbackProxyUrl);
+                        response = await fetch(openAiFallbackProxyUrl, {
+                            method: 'GET',
+                            headers: {
+                                'Content-Type': 'application/json'
+                            }
+                        });
+                        
+                        if (response.ok) {
+                            responseData = await response.json();
+                        }
+                    } catch (e) {
+                        console.warn('OpenAI fallback failed:', e);
+                        response = null;
+                    }
+                }
+                
+                // If all attempts failed, log error and return
+                if (!response || !response.ok || !responseData) {
+                    console.error('Failed to fetch voices from all endpoints');
                     return;
                 }
                 
-                const responseData = await response.json();
                 console.log('Fetched voices:', responseData);
                 
                 // Extract voices array from the response (handle both array and object formats)
@@ -2729,7 +2784,21 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
                     return; // Exit early
                 } // End endpoint check
                 
-                const endpoint = `${ttsEndpointInput.value.trim().replace(/\/$/, '')}/v1/audio/speech`; // Use Chatterbox TTS endpoint with SSE format
+                // Get TTS endpoint base URL and extract origin for proxy
+                const ttsEndpointBase = ttsEndpointInput.value.trim().replace(/\/$/, '');
+                let baseUrl;
+                try {
+                    // Parse the endpoint URL to extract the origin (protocol + host + port)
+                    const endpointUrl = new URL(ttsEndpointBase);
+                    baseUrl = endpointUrl.origin; // Gets protocol + host + port, without any path
+                } catch (e) {
+                    // Fallback to simple string replacement if URL parsing fails
+                    const match = ttsEndpointBase.match(/^(https?:\/\/[^\/]+)/);
+                    baseUrl = match ? match[1] : ttsEndpointBase.replace(/\/v1$/, '');
+                }
+                
+                // Use proxy endpoint to handle CORS
+                const endpoint = `${PROXY_BASE_URL}/v1/proxy/tts/speech?endpoint=${encodeURIComponent(baseUrl)}`; // Use proxy endpoint for TTS speech
                 const modelId = (ttsModelDropdown && ttsModelDropdown.value) ? ttsModelDropdown.value : 'tts-1'; // Get model from dropdown or default
                 const voiceId = (ttsVoiceDropdown && ttsVoiceDropdown.value) ? ttsVoiceDropdown.value : 'alloy'; // Get voice from dropdown or default
 
@@ -2758,8 +2827,8 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
 				ttsAbortController = localController; // Store in global variable
 				localGen = (++ttsGeneration); // Assign generation token for this request
 
-				// Use SSE streaming approach for lower latency
-				const res = await fetch(endpoint, { // Issue HTTP request for speech to Chatterbox
+				// Use SSE streaming approach for lower latency through proxy
+				const res = await fetch(endpoint, { // Issue HTTP request for speech through proxy
                     method: 'POST', // Use POST method per API spec
                     headers: headers, // Set headers for SSE streaming
 					body: JSON.stringify(reqBody), // Attach serialized JSON body
@@ -2782,32 +2851,225 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
                     return; // Exit early
                 } // End error response branch
                 
-                // Stop sniffing content-type for audio - SSE always comes as text/event-stream
+                // Detect response format: SSE (Chatterbox/PCM) or binary audio (VibeVoice/OpenAI-compatible)
                 const ct = (res.headers.get('content-type') || '').toLowerCase(); // Get content type from headers
-                const isSSE = ct.includes('text/event-stream'); // Check if response is SSE format
+                const isSSE = ct.includes('text/event-stream'); // Check if response is SSE format (Chatterbox)
+                const isBinaryAudio = ct.includes('audio/'); // Check if response is binary audio (VibeVoice/OpenAI-compatible)
                 
                 // Check if request was aborted before processing format (check local controller first)
                 if (localGen !== ttsGeneration || (localController && localController.signal.aborted)) {
-                    console.log('🛑 Chatterbox TTS request cancelled during format check, skipping fallback'); // Log cancellation
+                    console.log('🛑 TTS request cancelled during format check, skipping fallback'); // Log cancellation
                     stopChatterboxLipSync(true); // Immediately stop lip sync
                     return; // Exit without fallback
                 }
                 
-                if (!isSSE) { // If not SSE format
-                    console.warn('⚠️ Expected SSE format but got:', ct, '- falling back to browser TTS'); // Log format mismatch
-                    stopChatterboxLipSync(true); // Reset lip sync state before fallback
-                    textToSpeechFallback(text); // Fall back to browser TTS
-                    return; // Exit early
-                } // End SSE check
+                // Handle binary audio format (VibeVoice/OpenAI-compatible TTS) with low-latency streaming
+                if (!isSSE && isBinaryAudio) { // If binary audio format (not SSE)
+                    console.log('📦 Received binary audio format:', ct, '- streaming for low latency'); // Log format detection
+                    stopChatterboxLipSync(true); // Reset lip sync state
+                    
+                    // Handle binary audio response (MP3, WAV, etc. from OpenAI-compatible TTS) with streaming
+                    try {
+                        // Determine MIME type from content-type header
+                        let mimeType = 'audio/mpeg'; // Default to MP3
+                        if (ct.includes('audio/wav') || ct.includes('audio/wave')) {
+                            mimeType = 'audio/wav';
+                        } else if (ct.includes('audio/webm')) {
+                            mimeType = 'audio/webm';
+                        } else if (ct.includes('audio/ogg')) {
+                            mimeType = 'audio/ogg';
+                        } else if (ct.includes('audio/mp4') || ct.includes('audio/m4a')) {
+                            mimeType = 'audio/mp4';
+                        }
+                        
+                        // Check if MediaSource supports this format for streaming
+                        // Note: MP3 is not well-supported by MediaSource API in most browsers
+                        // For MP3, we'll use blob mode instead
+                        const useMediaSource = window.MediaSource && 
+                                               MediaSource.isTypeSupported(mimeType) && 
+                                               !mimeType.includes('mpeg'); // Don't use MediaSource for MP3
+                        
+                        if (useMediaSource) {
+                            // Use MediaSource API for low-latency streaming playback
+                            console.log('🎵 Using MediaSource API for low-latency streaming:', mimeType); // Log streaming method
+                            
+                            // Create audio element and MediaSource
+                            const audio = new Audio(); // Create audio element
+                            const mediaSource = new MediaSource(); // Create MediaSource for streaming
+                            audio.src = URL.createObjectURL(mediaSource); // Set source to object URL
+                            audio.preload = 'auto'; // Enable preload
+                            audio.crossOrigin = 'anonymous'; // Allow WebAudio connection
+                            
+                            // Collect audio chunks as they arrive
+                            const audioChunks = []; // Array to store audio chunks
+                            let sourceBuffer = null; // Source buffer for MediaSource
+                            let audioStarted = false; // Track if audio has started playing
+                            
+                            // Wait for MediaSource to be ready
+                            mediaSource.addEventListener('sourceopen', () => { // When MediaSource opens
+                                try {
+                                    sourceBuffer = mediaSource.addSourceBuffer(mimeType); // Create source buffer
+                                    sourceBuffer.mode = 'sequence'; // Set mode to prevent timestamp gaps
+                                    
+                                    // Function to append chunks as they arrive
+                                    const appendChunk = (chunk) => { // Function to append a chunk
+                                        if (sourceBuffer && sourceBuffer.updating === false && mediaSource.readyState === 'open') {
+                                            try {
+                                                sourceBuffer.appendBuffer(chunk); // Append chunk to buffer
+                                                
+                                                // Start audio playback after first chunk for low latency
+                                                if (!audioStarted && audioChunks.length >= 1) {
+                                                    audioStarted = true; // Mark as started
+                                                    audio.play().then(() => { // When audio starts playing
+                                                        console.log('🎵 Audio playback started (streaming, low latency)'); // Log playback start
+                                                        // Start lip sync using audio element
+                                                        const audioContext = new (window.AudioContext || window.webkitAudioContext)(); // Create audio context
+                                                        const source = audioContext.createMediaElementSource(audio); // Create source from audio element
+                                                        const analyser = audioContext.createAnalyser(); // Create analyser for lip sync
+                                                        analyser.fftSize = 256; // Set FFT size for analysis
+                                                        source.connect(analyser); // Connect source to analyser
+                                                        analyser.connect(audioContext.destination); // Connect analyser to output
+                                                        startLipSyncFromAnalyserNode(); // Start analyser-driven lip sync updates
+                                                    }).catch(e => { // Catch play errors
+                                                        console.error('Audio play error:', e); // Log error
+                                                    }); // End play promise chain
+                                                } // End audio start check
+                                            } catch (e) {
+                                                console.error('Error appending chunk:', e); // Log error
+                                            }
+                                        } else {
+                                            // Buffer is updating, queue the chunk
+                                            if (sourceBuffer) {
+                                                sourceBuffer.addEventListener('updateend', () => appendChunk(chunk), { once: true }); // Queue chunk
+                                            }
+                                        }
+                                    }; // End appendChunk function
+                                    
+                                    // Read response stream and collect chunks
+                                    const reader = res.body.getReader(); // Get stream reader
+                                    const pump = async () => { // Async function to pump chunks
+                                        try {
+                                            while (true) { // Loop until stream ends
+                                                const { done, value } = await reader.read(); // Read next chunk
+                                                if (done) { // If stream is done
+                                                    console.log('🎵 Stream complete, ending MediaSource'); // Log completion
+                                                    // Wait for buffer to finish updating, then end stream
+                                                    if (sourceBuffer && sourceBuffer.updating) {
+                                                        sourceBuffer.addEventListener('updateend', () => {
+                                                            if (mediaSource.readyState === 'open') {
+                                                                mediaSource.endOfStream(); // Signal end of stream
+                                                            }
+                                                        }, { once: true }); // End stream after last chunk
+                                                    } else {
+                                                        if (mediaSource.readyState === 'open') {
+                                                            mediaSource.endOfStream(); // Signal end of stream
+                                                        }
+                                                    }
+                                                    break; // Exit loop
+                                                }
+                                                
+                                                if (value) { // If chunk has data
+                                                    audioChunks.push(value); // Store chunk in array
+                                                    appendChunk(value); // Append chunk to MediaSource buffer
+                                                }
+                                            }
+                                        } catch (e) {
+                                            console.error('Error in stream pump:', e); // Log error
+                                            if (mediaSource.readyState === 'open') {
+                                                mediaSource.endOfStream(); // Signal end on error
+                                            }
+                                        }
+                                    }; // End pump function
+                                    
+                                    pump(); // Start pumping chunks
+                                } catch (e) {
+                                    console.error('MediaSource setup error:', e); // Log error
+                                    mediaSource.endOfStream(); // Signal end on error
+                                }
+                            }); // End sourceopen event
+                            
+                            // Handle cleanup when audio ends
+                            audio.onended = () => { // When playback finishes
+                                URL.revokeObjectURL(audio.src); // Release object URL
+                                // Cleanup lip sync intervals
+                                try { if (ttsLipSyncIntervalId) { clearInterval(ttsLipSyncIntervalId); ttsLipSyncIntervalId = null; } } catch(_){}
+                                try { if (ttsRafId) { cancelAnimationFrame(ttsRafId); ttsRafId = 0; } } catch(_){}
+                                try { ttsCleanupFns.forEach(fn => { try { fn(); } catch(_){} }); } catch(_){}
+                                ttsCleanupFns = []; // Clear cleanup functions
+                                // Reset avatar mouth
+                                if (live2dModel) { live2dModel.internalModel.coreModel.setParameterValueById('ParamMouthOpenY', 0); }
+                                if (vrmModel && document.getElementById('vrm-mode').checked) { animateVRMLipSync(0); }
+                            }; // End onended handler
+                            
+                            // Store audio reference for cleanup
+                            ttsCleanupFns.push(() => { // Ensure cleanup when speech is cancelled
+                                try { if (audio) { audio.pause(); audio.src = ''; } } catch(_) {}
+                                try { if (mediaSource && mediaSource.readyState === 'open') { mediaSource.endOfStream(); } } catch(_) {}
+                            }); // End cleanup function
+                            
+                            return; // Exit successfully
+                        } else {
+                            // MediaSource not supported for this format, fall back to blob playback
+                            console.warn('⚠️ MediaSource not supported for', mimeType, '- using blob playback'); // Log fallback
+                            const audioBlob = await res.blob(); // Get audio data as blob
+                            const audioUrl = URL.createObjectURL(audioBlob); // Create object URL for blob
+                            
+                            // Create audio element and play
+                            const audio = new Audio(audioUrl); // Create audio element
+                            audio.preload = 'auto'; // Enable preload
+                            audio.crossOrigin = 'anonymous'; // Allow WebAudio connection
+                            
+                            // Handle cleanup when audio ends
+                            audio.onended = () => { // When playback finishes
+                                URL.revokeObjectURL(audioUrl); // Release object URL
+                                // Cleanup lip sync intervals
+                                try { if (ttsLipSyncIntervalId) { clearInterval(ttsLipSyncIntervalId); ttsLipSyncIntervalId = null; } } catch(_){}
+                                try { if (ttsRafId) { cancelAnimationFrame(ttsRafId); ttsRafId = 0; } } catch(_){}
+                                try { ttsCleanupFns.forEach(fn => { try { fn(); } catch(_){} }); } catch(_){}
+                                ttsCleanupFns = []; // Clear cleanup functions
+                                // Reset avatar mouth
+                                if (live2dModel) { live2dModel.internalModel.coreModel.setParameterValueById('ParamMouthOpenY', 0); }
+                                if (vrmModel && document.getElementById('vrm-mode').checked) { animateVRMLipSync(0); }
+                            }; // End onended handler
+                            
+                            // Start basic lip sync using audio amplitude
+                            const audioContext = new (window.AudioContext || window.webkitAudioContext)(); // Create audio context
+                            const source = audioContext.createMediaElementSource(audio); // Create source from audio element
+                            const analyser = audioContext.createAnalyser(); // Create analyser for lip sync
+                            analyser.fftSize = 256; // Set FFT size for analysis
+                            source.connect(analyser); // Connect source to analyser
+                            analyser.connect(audioContext.destination); // Connect analyser to output
+                            
+                            // Start lip sync animation
+                            startLipSyncFromAnalyserNode(); // Start analyser-driven lip sync updates
+                            
+                            // Play the audio
+                            await audio.play(); // Start playback
+                            console.log('🎵 Playing binary audio from TTS service (blob mode)'); // Log playback start
+                            
+                            return; // Exit successfully
+                        }
+                    } catch (audioError) {
+                        console.error('❌ Error playing binary audio:', audioError); // Log error
+                        stopChatterboxLipSync(true); // Reset lip sync state
+                        textToSpeechFallback(text); // Fall back to browser TTS on error
+                        return; // Exit early
+                    }
+                } // End binary audio handling
                 
-				// Prepare analyser-driven lip sync graph for PCM streaming
-                stopChatterboxLipSync(true); // Reset any previous PCM lip sync loop before starting a new stream
-                const pcmCtx = ensureChatterboxLipSyncGraph(); // Ensure audio context and analyser exist
-                if (pcmCtx.state === 'suspended') { // Resume context if required by autoplay policies
-                    try { pcmCtx.resume(); } catch (_) {} // Swallow resume errors; user interaction will resume if needed
-                }
-                ttsStreamActive = true; // Mark stream active so analyser loop stays alive between chunks
-                startLipSyncFromAnalyserNode(); // Start analyser-driven lip sync updates
+                // Handle SSE format (Chatterbox/PCM streaming)
+                // This path is for Chatterbox which returns SSE with base64-encoded PCM16 chunks
+                if (isSSE) {
+                    console.log('📡 Received SSE format (Chatterbox/PCM) - processing stream'); // Log format detection
+                    
+                    // Prepare analyser-driven lip sync graph for PCM streaming
+                    stopChatterboxLipSync(true); // Reset any previous PCM lip sync loop before starting a new stream
+                    const pcmCtx = ensureChatterboxLipSyncGraph(); // Ensure audio context and analyser exist
+                    if (pcmCtx.state === 'suspended') { // Resume context if required by autoplay policies
+                        try { pcmCtx.resume(); } catch (_) {} // Swallow resume errors; user interaction will resume if needed
+                    }
+                    ttsStreamActive = true; // Mark stream active so analyser loop stays alive between chunks
+                    startLipSyncFromAnalyserNode(); // Start analyser-driven lip sync updates
 				ttsCleanupFns.push(() => { // Ensure cleanup when speech is cancelled elsewhere
 					try { stopChatterboxLipSync(true); } catch(_) {}
 					try { if (localController) { localController.abort(); } } catch(_) {}
@@ -2860,6 +3122,13 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
                         textToSpeechFallback(text); // Fall back to browser TTS if error occurs
                     } // End onError handler
                 }); // End streamSSE call
+                } else {
+                    // Unknown format - neither SSE nor binary audio
+                    console.warn('⚠️ Unknown TTS response format:', ct, '- falling back to browser TTS'); // Log format mismatch
+                    stopChatterboxLipSync(true); // Reset lip sync state before fallback
+                    textToSpeechFallback(text); // Fall back to browser TTS
+                    return; // Exit early
+                } // End SSE format handling
             } catch (e) { // Catch any runtime errors
                 // FIRST: Check if this error is from a stale request (new utterance already started) - this must be checked first
                 if (localGen !== ttsGeneration) {
@@ -3152,6 +3421,7 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
                     assistantName: assistantNameInput.value,
                     apiKey: apiKeyInput.value,
                     endpoint: endpointInput.value,
+                    newsApiKey: newsApiKeyInput ? newsApiKeyInput.value : '',
                     systemPrompt: systemPromptInput.value,
                     webcamMode: document.getElementById('webcam-toggle').checked,
                     clipboardMode: document.getElementById('clipboard-toggle').checked,
@@ -3192,6 +3462,9 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
                     }
                     if (settings.endpoint !== undefined) {
                         endpointInput.value = settings.endpoint;
+                    }
+                    if (settings.newsApiKey !== undefined && newsApiKeyInput) {
+                        newsApiKeyInput.value = settings.newsApiKey;
                     }
                     if (settings.systemPrompt !== undefined) {
                         systemPromptInput.value = settings.systemPrompt;
@@ -3276,6 +3549,9 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
             
             // Add change event listeners to other tool settings
             apiKeyInput.addEventListener('input', saveToolSettings);
+            if (newsApiKeyInput) {
+                newsApiKeyInput.addEventListener('input', saveToolSettings);
+            }
             endpointInput.addEventListener('input', saveToolSettings);
             systemPromptInput.addEventListener('input', saveToolSettings);
             document.getElementById('webcam-toggle').addEventListener('change', saveToolSettings);
@@ -8983,7 +9259,29 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
         });
 
         async function handleNews({ searchTerm, filename }) {
-            const API_KEY = 'ad059d25195f48acab2bfbd089ee8fa1';
+            // Get News API key from localStorage or input field
+            let API_KEY = '';
+            try {
+                const savedSettings = localStorage.getItem('toolSettings');
+                if (savedSettings) {
+                    const settings = JSON.parse(savedSettings);
+                    API_KEY = settings.newsApiKey || '';
+                }
+            } catch (e) {
+                console.warn('Error loading news API key from settings:', e);
+            }
+            
+            // Fallback to input field if not in settings
+            if (!API_KEY && newsApiKeyInput) {
+                API_KEY = newsApiKeyInput.value.trim();
+            }
+            
+            if (!API_KEY) {
+                return {
+                    success: false,
+                    message: 'News API key is not configured. Please enter your News API key in the settings.'
+                };
+            }
             
             try {
                 // Fetch news from the API

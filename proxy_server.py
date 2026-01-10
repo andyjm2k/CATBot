@@ -14,12 +14,13 @@ from typing import Dict, List, Optional, Any
 from pathlib import Path
 from datetime import datetime
 from io import BytesIO
+from urllib.parse import urlparse, urlunparse
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel
 import uvicorn
@@ -593,7 +594,11 @@ async def proxy_search(query: str):
 
     # Try Brave Search first
     try:
-        brave_api_key = os.getenv('BRAVE_API_KEY', 'BSAu30gzJMxRgMIyw8HEO5CYU5bP_0R')
+        # Get Brave API key from environment variable (required, no fallback)
+        brave_api_key = os.getenv('BRAVE_API_KEY')
+        if not brave_api_key:
+            # If no API key is configured, skip Brave Search and fall back to DuckDuckGo
+            raise ValueError("BRAVE_API_KEY is not configured")
 
         async with httpx.AsyncClient() as client:
             response = await client.get(
@@ -1418,6 +1423,321 @@ async def proxy_whisper(request: Request):
         import traceback
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Failed to proxy Whisper request: {str(e)}")
+
+# TTS voices proxy endpoint to handle CORS
+@app.get("/v1/proxy/tts/voices")
+async def proxy_tts_voices(endpoint: str):
+    """Proxy TTS voices requests to handle CORS. Tries /voices first, then /v1/audio/voices."""
+    if not endpoint:
+        raise HTTPException(status_code=400, detail="Endpoint parameter is required")
+    
+    try:
+        # Normalize the endpoint URL (remove trailing slash)
+        base_endpoint = endpoint.rstrip('/')
+        
+        # Extract base URL (origin: protocol + host + port) to avoid path duplication
+        try:
+            # Parse the endpoint URL to extract the origin (protocol + host + port)
+            if not base_endpoint.startswith('http://') and not base_endpoint.startswith('https://'):
+                # If no protocol, assume http://
+                base_endpoint = f"http://{base_endpoint}"
+            
+            parsed_url = urlparse(base_endpoint)
+            # Reconstruct base URL with scheme, hostname, and port (if present)
+            base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+        except Exception as e:
+            # Fallback to simple string replacement if URL parsing fails
+            # Extract origin manually using regex
+            match = re.match(r'^(https?://[^/]+)', base_endpoint)
+            if match:
+                base_url = match.group(1)
+            else:
+                # Last resort: remove /v1 and any path
+                base_url = base_endpoint.split('/')[0] if '/' in base_endpoint else base_endpoint
+                if not base_url.startswith('http'):
+                    base_url = f"http://{base_url}"
+        
+        # Try /voices first (Chatterbox style)
+        voices_url_primary = f"{base_url}/voices"
+        print(f"🎤 Trying primary TTS voices endpoint: {voices_url_primary}")
+        
+        response = None
+        response_data = None
+        
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            try:
+                # Try the primary endpoint first
+                response = await client.get(
+                    voices_url_primary,
+                    headers={
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/json'
+                    }
+                )
+                
+                print(f"✅ Primary TTS voices response status: {response.status_code}")
+                
+                # If primary endpoint succeeds, use it
+                if response.status_code == 200:
+                    try:
+                        response_data = response.json()
+                        print(f"✅ Parsed TTS voices JSON response from primary endpoint")
+                        return JSONResponse(content=response_data, status_code=200)
+                    except Exception as json_error:
+                        print(f"❌ Failed to parse JSON response: {json_error}")
+                        print(f"   Raw response text: {response.text[:200]}")
+                        # Return the raw text if JSON parsing fails
+                        return JSONResponse(
+                            content={"text": response.text},
+                            status_code=200
+                        )
+            except (httpx.ConnectError, httpx.HTTPStatusError) as e:
+                # Primary endpoint failed, try fallback
+                print(f"⚠️ Primary endpoint failed: {e}")
+                response = None
+            
+            # If primary failed, try /v1/audio/voices (OpenAI-compatible style)
+            if not response or response.status_code != 200:
+                voices_url_fallback = f"{base_url}/v1/audio/voices"
+                print(f"🎤 Trying fallback TTS voices endpoint: {voices_url_fallback}")
+                
+                try:
+                    response = await client.get(
+                        voices_url_fallback,
+                        headers={
+                            'Content-Type': 'application/json',
+                            'Accept': 'application/json'
+                        }
+                    )
+                    
+                    print(f"✅ Fallback TTS voices response status: {response.status_code}")
+                    
+                    # Check if the fallback response is successful
+                    if response.status_code == 200:
+                        try:
+                            response_data = response.json()
+                            print(f"✅ Parsed TTS voices JSON response from fallback endpoint")
+                            return JSONResponse(content=response_data, status_code=200)
+                        except Exception as json_error:
+                            print(f"❌ Failed to parse JSON response: {json_error}")
+                            print(f"   Raw response text: {response.text[:200]}")
+                            # Return the raw text if JSON parsing fails
+                            return JSONResponse(
+                                content={"text": response.text},
+                                status_code=200
+                            )
+                    else:
+                        # Fallback also failed
+                        print(f"❌ Fallback TTS service returned error: {response.status_code}")
+                        print(f"   Response text: {response.text[:200]}")
+                        raise HTTPException(
+                            status_code=response.status_code,
+                            detail=f"TTS service error: {response.text[:200]}"
+                        )
+                except httpx.ConnectError as e:
+                    print(f"❌ Connection error: Could not connect to TTS service at {voices_url_fallback}")
+                    raise HTTPException(
+                        status_code=503,
+                        detail=f"Could not connect to TTS service. Tried {voices_url_primary} and {voices_url_fallback}"
+                    )
+                except httpx.HTTPStatusError as e:
+                    print(f"❌ HTTP error from fallback TTS service: {e.response.status_code}")
+                    raise HTTPException(
+                        status_code=e.response.status_code,
+                        detail=f"TTS service returned error: {str(e)}"
+                    )
+        
+        # If we get here, both attempts failed
+        if response and response.status_code != 200:
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"TTS service error: {response.text[:200]}"
+            )
+        else:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Could not connect to TTS service. Tried {voices_url_primary} and {base_url}/v1/audio/voices"
+            )
+    
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
+    except httpx.ConnectError as e:
+        print(f"❌ Connection error: Could not connect to TTS service at {endpoint}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Could not connect to TTS service at {endpoint}"
+        )
+    except httpx.HTTPStatusError as e:
+        print(f"❌ HTTP error from TTS service: {e.response.status_code}")
+        raise HTTPException(
+            status_code=e.response.status_code,
+            detail=f"TTS service returned error: {str(e)}"
+        )
+    except Exception as e:
+        print(f"❌ TTS voices proxy error: {e}")
+        import traceback
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to proxy TTS voices request: {str(e)}")
+
+# TTS speech proxy endpoint to handle CORS and streaming
+@app.post("/v1/proxy/tts/speech")
+async def proxy_tts_speech(request: Request, endpoint: Optional[str] = None):
+    """Proxy TTS speech requests to handle CORS. Supports streaming responses."""
+    try:
+        # Get endpoint from query parameter or try to extract from request
+        if not endpoint:
+            # Try to get from query params
+            endpoint = request.query_params.get('endpoint', '')
+        
+        # If still no endpoint, try to get from TTS_ENDPOINT env var or use default
+        if not endpoint:
+            tts_endpoint = os.getenv('TTS_ENDPOINT', 'http://localhost:4123/v1')
+            endpoint = tts_endpoint.rstrip('/')
+        
+        # Normalize the endpoint URL (remove trailing slash)
+        base_endpoint = endpoint.rstrip('/')
+        
+        # Extract base URL (origin: protocol + host + port) to avoid path duplication
+        try:
+            # Parse the endpoint URL to extract the origin (protocol + host + port)
+            if not base_endpoint.startswith('http://') and not base_endpoint.startswith('https://'):
+                # If no protocol, assume http://
+                base_endpoint = f"http://{base_endpoint}"
+            
+            parsed_url = urlparse(base_endpoint)
+            # Reconstruct base URL with scheme, hostname, and port (if present)
+            base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+        except Exception as e:
+            # Fallback to simple string replacement if URL parsing fails
+            # Extract origin manually using regex
+            match = re.match(r'^(https?://[^/]+)', base_endpoint)
+            if match:
+                base_url = match.group(1)
+            else:
+                # Last resort: remove /v1 and any path
+                base_url = base_endpoint.split('/')[0] if '/' in base_endpoint else base_endpoint
+                if not base_url.startswith('http'):
+                    base_url = f"http://{base_url}"
+        
+        # Construct the speech endpoint URL
+        speech_url = f"{base_url}/v1/audio/speech"
+        
+        print(f"🎤 Proxying TTS speech request to: {speech_url}")
+        
+        # Get the request body
+        try:
+            request_body = await request.json()
+        except Exception:
+            request_body = {}
+        
+        # Get headers from the original request
+        # Forward Accept header to support both SSE (Chatterbox) and binary audio (VibeVoice/OpenAI-compatible)
+        # If client requests SSE, forward it; otherwise let TTS service decide (defaults to binary audio)
+        accept_header = request.headers.get('Accept', '')
+        forward_headers = {
+            'Content-Type': 'application/json',
+        }
+        
+        # Forward Accept header if present (allows Chatterbox to return SSE, VibeVoice will ignore and return binary)
+        if accept_header:
+            forward_headers['Accept'] = accept_header
+        
+        # Forward Authorization header if present
+        auth_header = request.headers.get('Authorization')
+        if auth_header:
+            forward_headers['Authorization'] = auth_header
+        
+        # Create a streaming response generator
+        # We need to peek at the response to get the actual content-type
+        # Since we can't change media_type after StreamingResponse is created,
+        # we'll use a wrapper that can handle both SSE and binary audio
+        
+        class TTSStreamWrapper:
+            """Wrapper to handle both SSE and binary audio responses."""
+            def __init__(self):
+                self.content_type = None
+                self.first_chunk = True
+                
+            async def __aiter__(self):
+                try:
+                    async with httpx.AsyncClient(timeout=60.0) as client:
+                        async with client.stream(
+                            'POST',
+                            speech_url,
+                            json=request_body,
+                            headers=forward_headers
+                        ) as response:
+                            print(f"✅ TTS speech response status: {response.status_code}")
+                            
+                            # Log request details for debugging
+                            print(f"📤 TTS request body: {json.dumps(request_body, indent=2)[:500]}")
+                            print(f"📤 TTS request headers: {forward_headers}")
+                            
+                            # Capture the actual content type from the TTS service
+                            self.content_type = response.headers.get('content-type', 'audio/mpeg')
+                            print(f"📦 TTS response content-type: {self.content_type}")
+                            
+                            # Check if the response is successful
+                            if response.status_code != 200:
+                                error_text = await response.aread()
+                                print(f"❌ TTS service returned error: {response.status_code}")
+                                print(f"   Response text: {error_text[:200]}")
+                                # Yield error as bytes
+                                if isinstance(error_text, bytes):
+                                    yield error_text
+                                else:
+                                    yield str(error_text).encode('utf-8')
+                                return
+                            
+                            # Stream the response chunk by chunk as bytes
+                            # This preserves binary audio data (MP3, WAV, etc.) or SSE text
+                            async for chunk in response.aiter_bytes():
+                                if chunk:
+                                    yield chunk
+                                    
+                except httpx.ConnectError as e:
+                    print(f"❌ Connection error: Could not connect to TTS service at {speech_url}")
+                    error_msg = f"Error: Could not connect to TTS service at {speech_url}"
+                    yield error_msg.encode('utf-8')
+                except Exception as e:
+                    print(f"❌ TTS speech proxy error: {e}")
+                    import traceback
+                    print(traceback.format_exc())
+                    error_msg = f"Error: Failed to proxy TTS speech request: {str(e)}"
+                    yield error_msg.encode('utf-8')
+        
+        stream_wrapper = TTSStreamWrapper()
+        
+        # Determine initial content-type based on Accept header
+        # If client requests SSE, use that; otherwise default to audio/mpeg
+        # The actual content-type will be in the response headers
+        initial_content_type = 'audio/mpeg'  # Default
+        if accept_header and 'text/event-stream' in accept_header:
+            initial_content_type = 'text/event-stream'  # Use SSE if requested
+        
+        # Use StreamingResponse with the initial content-type
+        # The actual content-type from the TTS service will be in the response headers
+        # JavaScript will check res.headers.get('content-type') to get the actual type
+        # Note: FastAPI's StreamingResponse sets Content-Type based on media_type parameter,
+        # but the actual response from the TTS service should have its own content-type header
+        # that JavaScript can read. However, if Chatterbox is returning audio/mpeg instead of
+        # text/event-stream, that means Chatterbox itself is not respecting the stream_format: 'sse'
+        # parameter or the Accept header.
+        
+        response_obj = StreamingResponse(
+            stream_wrapper,
+            media_type=initial_content_type,  # Initial guess based on Accept header
+            status_code=200
+        )
+        
+        return response_obj
+    
+    except Exception as e:
+        print(f"❌ TTS speech proxy error: {e}")
+        import traceback
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to proxy TTS speech request: {str(e)}")
 
 # ============================================================================
 # FILE OPERATIONS ENDPOINTS
