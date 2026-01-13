@@ -4433,7 +4433,8 @@ function saveWAVFile(wavBlob) {
                     activeConversationId = conversations[0].id;
                 }
                 
-                switchToConversation(activeConversationId);
+                // Skip timestamp update when loading from storage to preserve original timestamps
+                switchToConversation(activeConversationId, true);
                 renderConversationList();
             } catch (error) {
                 console.warn('Error loading conversations:', error);
@@ -4449,13 +4450,21 @@ function saveWAVFile(wavBlob) {
         }
 
         // Function to switch to a different conversation
-        function switchToConversation(conversationId) {
+        function switchToConversation(conversationId, skipTimestampUpdate = false) {
             // Save current conversation's state before switching
             const currentConv = getActiveConversation();
             if (currentConv) {
+                // Only update timestamp if messages actually changed and we're not skipping updates
+                const messagesChanged = JSON.stringify(currentConv.messages) !== JSON.stringify(chatHistory) ||
+                                      JSON.stringify(currentConv.displayedMessages) !== JSON.stringify(displayedMessages);
+                
                 currentConv.messages = [...chatHistory];
                 currentConv.displayedMessages = [...displayedMessages];
-                currentConv.updatedAt = new Date().toISOString();
+                
+                // Only update timestamp if messages actually changed and we're not skipping updates
+                if (!skipTimestampUpdate && messagesChanged) {
+                    currentConv.updatedAt = new Date().toISOString();
+                }
             }
             
             // Switch to new conversation
