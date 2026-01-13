@@ -70,6 +70,34 @@ except ImportError as e:
     stdio_client = None
     StdioServerParameters = None
 
+# Import memory system (with error handling)
+MEMORY_AVAILABLE = False
+MemoryManager = None
+memory_import_error = None
+
+try:
+    # Check for required dependencies first
+    try:
+        import numpy
+    except ImportError:
+        raise ImportError("numpy is required for the memory system. Install with: pip install numpy")
+    
+    from memory import MemoryManager
+    MEMORY_AVAILABLE = True
+    print("[OK] Memory system imports successful")
+except ImportError as e:
+    memory_import_error = str(e)
+    print(f"[WARN] Memory system not available: {e}")
+    if "numpy" in str(e).lower():
+        print("   Install numpy with: pip install numpy")
+    MEMORY_AVAILABLE = False
+    MemoryManager = None
+except Exception as e:
+    memory_import_error = str(e)
+    print(f"[WARN] Memory system not available (unexpected error): {e}")
+    MEMORY_AVAILABLE = False
+    MemoryManager = None
+
 # Load environment variables from .env file in project root
 if DOTENV_AVAILABLE:
     # Try loading from current directory first
@@ -141,6 +169,28 @@ class TelegramChatResponse(BaseModel):
     conversation_id: str
     usage: Optional[Dict[str, Any]] = None
 
+# Pydantic models for memory operations
+class MemoryStoreRequest(BaseModel):
+    text: str
+    category: Optional[str] = None
+    source: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+class MemorySearchRequest(BaseModel):
+    query: str
+    limit: Optional[int] = None
+    similarity_threshold: Optional[float] = None
+    category: Optional[str] = None
+
+class MemoryExtractRequest(BaseModel):
+    messages: List[Dict[str, str]]
+    max_memories: Optional[int] = 3
+
+class MemoryResponse(BaseModel):
+    success: bool
+    message: str
+    data: Optional[Dict[str, Any]] = None
+
 # Global state (similar to the Node.js version)
 mcp_clients = {}
 mcp_servers = {}
@@ -192,6 +242,25 @@ SCRATCH_DIR.mkdir(parents=True, exist_ok=True)
 
 # Global AutoGen team instance
 autogen_team = None
+
+# Global memory manager instance
+memory_manager = None
+
+# Initialize memory manager if available
+if MEMORY_AVAILABLE:
+    try:
+        memory_enabled = os.getenv("MEMORY_ENABLED", "true").lower() == "true"
+        if memory_enabled:
+            memory_manager = MemoryManager()
+            print(f"✅ Memory system initialized with {memory_manager.count()} existing memories")
+        else:
+            print("⚠️  Memory system disabled via MEMORY_ENABLED=false")
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        print(f"⚠️  Failed to initialize memory system: {e}")
+        print(f"   Full traceback:\n{error_trace}")
+        memory_manager = None
 
 # MCP Client Manager class to handle transport lifecycle
 class MCPClientManager:
@@ -1342,6 +1411,41 @@ async def telegram_chat_endpoint(request: TelegramChatRequest):
     if system_prompt is None:
         system_prompt = TELEGRAM_SYSTEM_PROMPT
 
+    # Retrieve relevant memories if memory system is available
+    memory_context = ""
+    if MEMORY_AVAILABLE and memory_manager:
+        try:
+            # Search for relevant memories based on the current message
+            # Use a lower threshold (0.3) for automatic retrieval to catch more relevant memories
+            relevant_memories = await memory_manager.search_memories(
+                query=message_text,
+                limit=5,
+                similarity_threshold=0.3,  # Lower threshold for better recall
+            )
+            
+            # Log search results for debugging
+            if relevant_memories:
+                print(f"Found {len(relevant_memories)} relevant memories for query: '{message_text[:50]}...'")
+                for mem in relevant_memories:
+                    print(f"  - {mem.get('text', '')} (similarity: {mem.get('similarity', 0):.3f})")
+            else:
+                print(f"No memories found for query: '{message_text[:50]}...' (threshold: 0.3)")
+            
+            # Build memory context if memories found
+            if relevant_memories:
+                memory_context = "\n\nRelevant context from previous conversations:\n"
+                for i, mem in enumerate(relevant_memories, 1):
+                    memory_context += f"{i}. {mem.get('text', '')}\n"
+                memory_context += "\nUse this context to provide more personalized and relevant responses."
+        except Exception as e:
+            print(f"Warning: Failed to retrieve memories: {e}")
+            import traceback
+            print(traceback.format_exc())
+
+    # Add memory context to system prompt
+    if memory_context:
+        system_prompt = system_prompt + memory_context
+
     messages: List[Dict[str, str]] = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
@@ -1409,6 +1513,21 @@ async def telegram_chat_endpoint(request: TelegramChatRequest):
     history.append({"role": "assistant", "content": reply})
     trim_telegram_history(history)
 
+    # Extract and store memories if memory system is available and auto-extract is enabled
+    if MEMORY_AVAILABLE and memory_manager:
+        auto_extract = os.getenv("MEMORY_AUTO_EXTRACT", "true").lower() == "true"
+        if auto_extract:
+            try:
+                # Extract memories from the conversation (last few messages)
+                # Include both user message and assistant response
+                recent_messages = history[-4:] if len(history) >= 4 else history
+                await memory_manager.extract_memories_from_conversation(
+                    messages=recent_messages,
+                    max_memories=3,
+                )
+            except Exception as e:
+                print(f"Warning: Failed to extract memories: {e}")
+
     usage = data.get("usage") if isinstance(data, dict) else None
 
     return TelegramChatResponse(
@@ -1424,6 +1543,215 @@ async def telegram_clear_conversation(conversation_id: str):
 
     removed = telegram_conversations.pop(conversation_id, None) is not None
     return {"conversation_id": conversation_id, "cleared": removed}
+
+# ============================================================================
+# MEMORY SYSTEM ENDPOINTS
+# ============================================================================
+
+@app.post("/v1/memory/store", response_model=MemoryResponse)
+async def store_memory(request: MemoryStoreRequest):
+    """Store a memory explicitly."""
+    if not MEMORY_AVAILABLE or not memory_manager:
+        error_detail = "Memory system is not available."
+        if not MEMORY_AVAILABLE:
+            error_detail += f" Import failed: {memory_import_error}. Check /v1/memory/status for details."
+        elif not memory_manager:
+            error_detail += " Memory manager initialization failed. Check server logs and /v1/memory/status endpoint."
+        raise HTTPException(
+            status_code=503,
+            detail=error_detail
+        )
+    
+    try:
+        # Store the memory
+        memory_id = await memory_manager.store_memory(
+            text=request.text,
+            category=request.category,
+            source=request.source or "explicit",
+            metadata=request.metadata,
+        )
+        
+        return MemoryResponse(
+            success=True,
+            message=f"Memory stored successfully",
+            data={"memory_id": memory_id}
+        )
+    except Exception as e:
+        print(f"Error storing memory: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to store memory: {str(e)}")
+
+@app.post("/v1/memory/search", response_model=MemoryResponse)
+async def search_memories(request: MemorySearchRequest):
+    """Search memories by query."""
+    if not MEMORY_AVAILABLE or not memory_manager:
+        raise HTTPException(
+            status_code=503,
+            detail="Memory system is not available. Check MEMORY_ENABLED setting."
+        )
+    
+    try:
+        # Search for relevant memories
+        results = await memory_manager.search_memories(
+            query=request.query,
+            limit=request.limit,
+            similarity_threshold=request.similarity_threshold,
+            category=request.category,
+        )
+        
+        return MemoryResponse(
+            success=True,
+            message=f"Found {len(results)} relevant memories",
+            data={"memories": results, "count": len(results)}
+        )
+    except Exception as e:
+        print(f"Error searching memories: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to search memories: {str(e)}")
+
+@app.get("/v1/memory/list", response_model=MemoryResponse)
+async def list_memories(limit: Optional[int] = None):
+    """List recent memories."""
+    if not MEMORY_AVAILABLE or not memory_manager:
+        raise HTTPException(
+            status_code=503,
+            detail="Memory system is not available. Check MEMORY_ENABLED setting."
+        )
+    
+    try:
+        # List memories
+        memories = memory_manager.list_memories(limit=limit)
+        
+        return MemoryResponse(
+            success=True,
+            message=f"Retrieved {len(memories)} memories",
+            data={"memories": memories, "count": len(memories), "total": memory_manager.count()}
+        )
+    except Exception as e:
+        print(f"Error listing memories: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to list memories: {str(e)}")
+
+@app.get("/v1/memory/{memory_id}", response_model=MemoryResponse)
+async def get_memory(memory_id: str):
+    """Get a specific memory by ID."""
+    if not MEMORY_AVAILABLE or not memory_manager:
+        raise HTTPException(
+            status_code=503,
+            detail="Memory system is not available. Check MEMORY_ENABLED setting."
+        )
+    
+    try:
+        # Get memory by ID
+        memory = memory_manager.get_memory(memory_id)
+        
+        if not memory:
+            raise HTTPException(status_code=404, detail=f"Memory {memory_id} not found")
+        
+        return MemoryResponse(
+            success=True,
+            message="Memory retrieved successfully",
+            data={"memory": memory}
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error getting memory: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get memory: {str(e)}")
+
+@app.post("/v1/memory/extract", response_model=MemoryResponse)
+async def extract_memories(request: MemoryExtractRequest):
+    """Extract and store memories from a conversation."""
+    if not MEMORY_AVAILABLE or not memory_manager:
+        error_detail = "Memory system is not available."
+        if not MEMORY_AVAILABLE:
+            error_detail += f" Import failed: {memory_import_error}. Check /v1/memory/status for details."
+        elif not memory_manager:
+            error_detail += " Memory manager initialization failed. Check server logs and /v1/memory/status endpoint."
+        raise HTTPException(
+            status_code=503,
+            detail=error_detail
+        )
+    
+    try:
+        # Check if auto-extract is enabled
+        auto_extract = os.getenv("MEMORY_AUTO_EXTRACT", "true").lower() == "true"
+        if not auto_extract:
+            return MemoryResponse(
+                success=False,
+                message="Automatic memory extraction is disabled via MEMORY_AUTO_EXTRACT=false",
+                data={"extracted": 0}
+            )
+        
+        # Extract memories from conversation
+        max_memories = request.max_memories or 3
+        memory_ids = await memory_manager.extract_memories_from_conversation(
+            messages=request.messages,
+            max_memories=max_memories,
+        )
+        
+        return MemoryResponse(
+            success=True,
+            message=f"Extracted and stored {len(memory_ids)} memories",
+            data={"extracted": len(memory_ids), "memory_ids": memory_ids}
+        )
+    except Exception as e:
+        print(f"Error extracting memories: {e}")
+        import traceback
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to extract memories: {str(e)}")
+
+@app.get("/v1/memory/status")
+async def memory_status():
+    """Get the status of the memory system."""
+    status = {
+        "available": MEMORY_AVAILABLE,
+        "enabled": os.getenv("MEMORY_ENABLED", "true").lower() == "true",
+        "initialized": memory_manager is not None,
+        "memory_count": memory_manager.count() if memory_manager else 0,
+    }
+    if not MEMORY_AVAILABLE:
+        status["error"] = f"Memory module not available (import failed: {memory_import_error})"
+        if memory_import_error and "numpy" in memory_import_error.lower():
+            status["fix"] = "Install numpy with: pip install numpy"
+    elif not status["enabled"]:
+        status["error"] = "Memory system disabled via MEMORY_ENABLED=false"
+    elif not status["initialized"]:
+        status["error"] = "Memory manager failed to initialize (check server logs)"
+    return status
+
+@app.delete("/v1/memory/{memory_id}", response_model=MemoryResponse)
+async def delete_memory(memory_id: str):
+    """Delete a memory by ID."""
+    if not MEMORY_AVAILABLE or not memory_manager:
+        error_detail = "Memory system is not available."
+        if not MEMORY_AVAILABLE:
+            error_detail += " Memory module import failed."
+        elif not memory_manager:
+            error_detail += " Memory manager initialization failed. Check server logs and /v1/memory/status endpoint."
+        raise HTTPException(
+            status_code=503,
+            detail=error_detail
+        )
+    
+    try:
+        # Delete memory
+        deleted = memory_manager.delete_memory(memory_id)
+        
+        if not deleted:
+            raise HTTPException(status_code=404, detail=f"Memory {memory_id} not found")
+        
+        return MemoryResponse(
+            success=True,
+            message=f"Memory {memory_id} deleted successfully",
+            data={"memory_id": memory_id}
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error deleting memory: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete memory: {str(e)}")
+
+# ============================================================================
+# END MEMORY SYSTEM ENDPOINTS
+# ============================================================================
 
 # Simple test endpoint to verify requests are reaching the server
 @app.get("/test")

@@ -1067,6 +1067,7 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
             <textarea id="response-output" rows="30" readonly style="display: none;"></textarea>
 
             <div id="clipboard-preview" style="display: none; margin: 15px 0;">
+                <div id="clipboard-status" style="font-size: 0.85em; color: #666; margin-bottom: 5px; font-style: italic;"></div>
                 <img id="clipboard-image" style="max-width: 100%; display: none;">
                 <p id="clipboard-text" style="display: none;"></p>
             </div>
@@ -1288,6 +1289,7 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
         // Add these variables at the top of your script section
         let clipboardData = null;
         let clipboardType = null;
+        let clipboardMonitorInterval = null; // Interval ID for clipboard monitoring
         let webcamStream = null;
         let isProcessing = false;
         let webcamInterval = null;
@@ -1843,6 +1845,14 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
             // Guard against missing span element
             if (currentModelSpan) {
                 currentModelSpan.textContent = `Current Model: ${getCurrentModel()}`;
+            }
+            
+            // Start or stop clipboard monitoring based on toggle state
+            if (clipboardVisionEnabled) {
+                startClipboardMonitoring();
+            } else {
+                stopClipboardMonitoring();
+                clearClipboardPreview(); // Clear clipboard data when mode is disabled
             }
         });
 
@@ -3779,6 +3789,12 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
                 // Load sidebar state
                 loadSidebarState();
                 
+                // Initialize clipboard monitoring if Clipboard Vision Mode is already enabled
+                if (clipboardToggle && clipboardToggle.checked) {
+                    clipboardVisionEnabled = true;
+                    startClipboardMonitoring();
+                }
+                
                 // New conversation button handler
                 document.getElementById('new-conversation-btn').addEventListener('click', () => {
                     const newConv = createNewConversation('New Conversation');
@@ -4844,6 +4860,82 @@ function saveWAVFile(wavBlob) {
             {
                 type: "function",
                 function: {
+                    name: "storeMemory",
+                    description: "Store important information about the user (preferences, habits, facts, needs, relationships) in the persistent embeddings-based memory system for future conversations",
+                    parameters: {
+                        type: "object",
+                        properties: {
+                            text: {
+                                type: "string",
+                                description: "The information to remember about the user"
+                            },
+                            category: {
+                                type: "string",
+                                enum: ["preference", "habit", "fact", "need", "relationship", "general"],
+                                description: "Category of the memory (preference, habit, fact, need, relationship, or general)"
+                            }
+                        },
+                        required: ["text"]
+                    }
+                }
+            },
+            {
+                type: "function",
+                function: {
+                    name: "searchMemories",
+                    description: "Search for relevant memories from previous conversations. Use this tool when the user asks you to recall, remember, or tell them what you know about something. Examples: 'what do you remember about me?', 'tell me what you know about Laura', 'recall my preferences'. Always use this tool before saying you don't have information.",
+                    parameters: {
+                        type: "object",
+                        properties: {
+                            query: {
+                                type: "string",
+                                description: "Search query to find relevant memories. Use keywords from the user's question (e.g., 'Laura', 'preferences', 'age', etc.)"
+                            },
+                            limit: {
+                                type: "number",
+                                description: "Maximum number of memories to retrieve (default: 5)"
+                            }
+                        },
+                        required: ["query"]
+                    }
+                }
+            },
+            {
+                type: "function",
+                function: {
+                    name: "listMemories",
+                    description: "List recent memories stored in the embeddings-based memory system",
+                    parameters: {
+                        type: "object",
+                        properties: {
+                            limit: {
+                                type: "number",
+                                description: "Maximum number of memories to list (default: 10)"
+                            }
+                        }
+                    }
+                }
+            },
+            {
+                type: "function",
+                function: {
+                    name: "deleteMemory",
+                    description: "Delete a specific memory by its ID from the embeddings-based memory system",
+                    parameters: {
+                        type: "object",
+                        properties: {
+                            memory_id: {
+                                type: "string",
+                                description: "The ID of the memory to delete"
+                            }
+                        },
+                        required: ["memory_id"]
+                    }
+                }
+            },
+            {
+                type: "function",
+                function: {
                     name: "navigateToUrl",
                     description: "Opens a URL in a new browser tab",
                     parameters: {
@@ -5279,6 +5371,18 @@ function saveWAVFile(wavBlob) {
                     case "uploadToGoogleDrive":
                         result = await handleGoogleDriveUpload(args);
                         break;
+                    case "storeMemory":
+                        result = await handleStoreMemory(args);
+                        break;
+                    case "searchMemories":
+                        result = await handleSearchMemories(args);
+                        break;
+                    case "listMemories":
+                        result = await handleListMemories(args);
+                        break;
+                    case "deleteMemory":
+                        result = await handleDeleteMemory(args);
+                        break;
                     case "runBrowserAgent":
                         result = await handleBrowserAgent(args);
                         break;
@@ -5419,6 +5523,132 @@ function saveWAVFile(wavBlob) {
                     } catch (error) {
                         console.error('Memory cache operation error:', error);
                 return { success: false, message: `Error: ${error.message}` };
+            }
+        }
+
+        async function handleStoreMemory({ text, category }) {
+            try {
+                const response = await fetch(`${PROXY_BASE_URL}/v1/memory/store`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        text: text,
+                        category: category || "general",
+                        source: "explicit"
+                    })
+                });
+                const data = await response.json();
+                if (data.success) {
+                    return { success: true, message: `Memory stored: ${text}` };
+                } else {
+                    return { success: false, message: data.message || "Failed to store memory" };
+                }
+            } catch (error) {
+                return { success: false, message: `Error storing memory: ${error.message}` };
+            }
+        }
+
+        async function handleSearchMemories({ query, limit }) {
+            try {
+                const response = await fetch(`${PROXY_BASE_URL}/v1/memory/search`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        query: query,
+                        limit: limit || 5,
+                        similarity_threshold: 0.5  // Lower threshold for better recall
+                    })
+                });
+                const data = await response.json();
+                if (data.success && data.data.memories) {
+                    const memories = data.data.memories;
+                    if (memories.length === 0) {
+                        return { success: true, message: "No relevant memories found." };
+                    }
+                    const memoryList = memories.map((mem, i) => 
+                        `${i + 1}. ${mem.text} (similarity: ${(mem.similarity * 100).toFixed(1)}%)`
+                    ).join('\n');
+                    return { success: true, message: `Found ${memories.length} relevant memories:\n${memoryList}` };
+                } else {
+                    return { success: false, message: data.message || "Failed to search memories" };
+                }
+            } catch (error) {
+                return { success: false, message: `Error searching memories: ${error.message}` };
+            }
+        }
+
+        async function handleListMemories({ limit }) {
+            try {
+                const limitParam = limit ? `?limit=${limit}` : '';
+                const response = await fetch(`${PROXY_BASE_URL}/v1/memory/list${limitParam}`, {
+                    method: 'GET',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                const data = await response.json();
+                if (data.success && data.data.memories) {
+                    const memories = data.data.memories;
+                    if (memories.length === 0) {
+                        return { success: true, message: "No memories stored yet." };
+                    }
+                    const memoryList = memories.map((mem, i) => 
+                        `${i + 1}. [${mem.category}] ${mem.text} (ID: ${mem.id})`
+                    ).join('\n');
+                    return { success: true, message: `Stored memories (${data.data.total} total):\n${memoryList}` };
+                } else {
+                    return { success: false, message: data.message || "Failed to list memories" };
+                }
+            } catch (error) {
+                return { success: false, message: `Error listing memories: ${error.message}` };
+            }
+        }
+
+        async function handleDeleteMemory({ memory_id }) {
+            try {
+                const response = await fetch(`${PROXY_BASE_URL}/v1/memory/${memory_id}`, {
+                    method: 'DELETE',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                const data = await response.json();
+                if (data.success) {
+                    return { success: true, message: `Memory ${memory_id} deleted successfully.` };
+                } else {
+                    return { success: false, message: data.message || "Failed to delete memory" };
+                }
+            } catch (error) {
+                return { success: false, message: `Error deleting memory: ${error.message}` };
+            }
+        }
+
+        // Automatically extract memories from conversation
+        async function extractMemoriesFromConversation() {
+            try {
+                // Get recent messages from chatHistory (last 4 messages: user + assistant pairs)
+                const recentMessages = chatHistory.slice(-4).map(msg => ({
+                    role: msg.role,
+                    content: msg.content || msg.content || ''
+                })).filter(msg => msg.content.trim()); // Filter out empty messages
+                
+                if (recentMessages.length === 0) {
+                    return; // No messages to extract from
+                }
+                
+                // Call the backend to extract and store memories
+                const response = await fetch(`${PROXY_BASE_URL}/v1/memory/extract`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        messages: recentMessages,
+                        max_memories: 3
+                    })
+                });
+                
+                const data = await response.json();
+                if (data.success && data.data.extracted > 0) {
+                    console.log(`Automatically extracted ${data.data.extracted} memories from conversation`);
+                }
+            } catch (error) {
+                // Silently fail - don't interrupt user experience
+                console.warn('Failed to extract memories automatically:', error);
             }
         }
 
@@ -6548,6 +6778,10 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                 }
             ];
 
+            // Track if clipboard content was used (store in a way that persists through async operations)
+            const hadClipboardContent = clipboardData && clipboardVisionEnabled;
+            const clipboardContentType = clipboardType; // Store type before potential clearing
+            
             // Add image content if present
             if (clipboardData && clipboardType === 'image' && clipboardVisionEnabled) {
                 const base64Image = await new Promise((resolve) => {
@@ -6568,6 +6802,12 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                         }
                     ]
                 });
+            }
+            // Add text content if present (prepend to user message)
+            else if (clipboardData && clipboardType === 'text' && clipboardVisionEnabled) {
+                // Prepend clipboard text to the user's message
+                const originalPrompt = messages[messages.length - 1].content;
+                messages[messages.length - 1].content = `[Clipboard content: ${clipboardData}]\n\n${originalPrompt}`;
             }
 
             const body = {
@@ -6664,6 +6904,18 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                                 chatHistory.push({ role: 'assistant', content: finalContent });
                                 responseOutput.value = finalContent;
                                 addMessageToHistory('assistant', finalContent); // Add to message history
+                                
+                                // Automatically extract memories from conversation (async, non-blocking)
+                                extractMemoriesFromConversation().catch(err => {
+                                    console.warn('Memory extraction failed:', err);
+                                });
+                                
+                                // Clear clipboard content after successful followup response
+                                if (hadClipboardContent) {
+                                    clearClipboardPreview();
+                                    console.log('Clipboard content cleared after followup response');
+                                }
+                                
                                 textToSpeech(finalContent);
                         const expressionFile = detectExpressionFromText(finalContent);
                         if (expressionFile && live2dModel) {
@@ -6897,6 +7149,12 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                                     chatHistory.push({ role: 'assistant', content: confirmText });
                                     responseOutput.value = confirmText;
                                     addMessageToHistory('assistant', confirmText); // Add to message history
+                                    
+                                    // Automatically extract memories from conversation (async, non-blocking)
+                                    extractMemoriesFromConversation().catch(err => {
+                                        console.warn('Memory extraction failed:', err);
+                                    });
+                                    
                                     textToSpeech(confirmText);
                                 }
                             }
@@ -6986,6 +7244,13 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                                         textToSpeech(result.message);
                                     }
                                 }
+                                
+                                // Clear clipboard content after successful tool execution
+                                if (hadClipboardContent) {
+                                    clearClipboardPreview();
+                                    console.log('Clipboard content cleared after tool execution');
+                                }
+                                
                                 // Remove pulsing effect after tool execution
                                 responseOutput.classList.remove('responding');
                                 messageHistory.classList.remove('responding'); // Remove pulsing effect from message history
@@ -7001,6 +7266,18 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                         chatHistory.push({ role: 'assistant', content: cleanContent });
                         responseOutput.value = cleanContent;
                         addMessageToHistory('assistant', cleanContent); // Add to message history
+                            
+                            // Automatically extract memories from conversation (async, non-blocking)
+                            extractMemoriesFromConversation().catch(err => {
+                                console.warn('Memory extraction failed:', err);
+                            });
+                            
+                            // Clear clipboard content after successful message send
+                            if (hadClipboardContent) {
+                                clearClipboardPreview();
+                                console.log('Clipboard content cleared after message sent');
+                            }
+                            
                             textToSpeech(cleanContent);
                         
                             // Update Live2D expression
@@ -7240,6 +7517,12 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                             chatHistory.push({ role: 'assistant', content: fallbackText });
                             responseOutput.value = fallbackText;
                             addMessageToHistory('assistant', fallbackText); // Add to message history
+                            
+                            // Automatically extract memories from conversation (async, non-blocking)
+                            extractMemoriesFromConversation().catch(err => {
+                                console.warn('Memory extraction failed:', err);
+                            });
+                            
                             textToSpeech(fallbackText);
                         }
                     }
@@ -9070,12 +9353,138 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
             const previewContainer = document.getElementById('clipboard-preview');
             const previewImage = document.getElementById('clipboard-image');
             const previewText = document.getElementById('clipboard-text');
+            const statusElement = document.getElementById('clipboard-status');
             
             previewContainer.style.display = 'none';
             previewImage.style.display = 'none';
             previewImage.src = '';
             previewText.style.display = 'none';
             previewText.textContent = '';
+            if (statusElement) {
+                statusElement.textContent = '';
+            }
+        }
+
+        // Automatic clipboard monitoring function
+        async function monitorClipboard() {
+            // Only monitor if Clipboard Vision Mode is enabled
+            if (!clipboardVisionEnabled) {
+                return;
+            }
+
+            try {
+                // Attempt to read clipboard contents
+                const items = await navigator.clipboard.read();
+                const previewContainer = document.getElementById('clipboard-preview');
+                const previewImage = document.getElementById('clipboard-image');
+                const previewText = document.getElementById('clipboard-text');
+
+                // Check each clipboard item
+                for (const item of items) {
+                    // Handle images (PNG, JPEG)
+                    if (item.types.includes('image/png') || item.types.includes('image/jpeg')) {
+                        const blob = await item.getType(item.types.find(type => type.startsWith('image/')));
+                        const imageUrl = URL.createObjectURL(blob);
+                        
+                        // Only update if this is new content (avoid unnecessary updates)
+                        if (clipboardType !== 'image' || clipboardData !== blob) {
+                            clipboardData = blob;
+                            clipboardType = 'image';
+                            
+                            previewImage.src = imageUrl;
+                            previewImage.style.display = 'block';
+                            previewText.style.display = 'none';
+                            previewContainer.style.display = 'block';
+                            
+                            // Show visual feedback with timestamp
+                            const statusElement = document.getElementById('clipboard-status');
+                            if (statusElement) {
+                                const timestamp = new Date().toLocaleTimeString();
+                                statusElement.textContent = `✓ Clipboard image detected automatically at ${timestamp} - will be included with next message`;
+                                statusElement.style.color = '#4CAF50'; // Green color for success
+                            }
+                            
+                            console.log('Clipboard image detected and ready');
+                        }
+                        return; // Exit after processing first image
+                    }
+                    // Handle text
+                    else if (item.types.includes('text/plain')) {
+                        const text = await (await item.getType('text/plain')).text();
+                        
+                        // Only update if this is new content (avoid unnecessary updates)
+                        if (clipboardType !== 'text' || clipboardData !== text) {
+                            clipboardData = text;
+                            clipboardType = 'text';
+                            
+                            previewText.textContent = text;
+                            previewText.style.display = 'block';
+                            previewImage.style.display = 'none';
+                            previewContainer.style.display = 'block';
+                            
+                            // Show visual feedback with timestamp
+                            const statusElement = document.getElementById('clipboard-status');
+                            if (statusElement) {
+                                const timestamp = new Date().toLocaleTimeString();
+                                statusElement.textContent = `✓ Clipboard text detected automatically at ${timestamp} - will be included with next message`;
+                                statusElement.style.color = '#4CAF50'; // Green color for success
+                            }
+                            
+                            console.log('Clipboard text detected and ready');
+                        }
+                        return; // Exit after processing first text
+                    }
+                }
+            } catch (err) {
+                // Handle permission errors and other clipboard access issues gracefully
+                if (err.name === 'NotAllowedError' || err.name === 'SecurityError') {
+                    // Permission denied - only log once to avoid spam
+                    if (!clipboardMonitorInterval || clipboardData === null) {
+                        console.warn('Clipboard access denied. Please grant clipboard permissions.');
+                    }
+                } else if (err.name !== 'NotFoundError') {
+                    // NotFoundError is normal when clipboard is empty, don't log it
+                    // But log other errors
+                    console.warn('Error reading clipboard:', err.message);
+                }
+            }
+        }
+
+        // Start clipboard monitoring when Clipboard Vision Mode is enabled
+        function startClipboardMonitoring() {
+            // Clear any existing interval first
+            if (clipboardMonitorInterval) {
+                clearInterval(clipboardMonitorInterval);
+            }
+            
+            // Remove any existing focus event listener to prevent duplicates
+            // This ensures we don't accumulate multiple listeners if startClipboardMonitoring is called multiple times
+            window.removeEventListener('focus', monitorClipboard);
+            
+            // Check clipboard immediately
+            monitorClipboard();
+            
+            // Set up periodic monitoring (every 1.5 seconds)
+            clipboardMonitorInterval = setInterval(monitorClipboard, 1500);
+            
+            // Also check clipboard on window focus (useful when user switches back to the tab)
+            window.addEventListener('focus', monitorClipboard);
+            
+            console.log('Clipboard monitoring started');
+        }
+
+        // Stop clipboard monitoring when Clipboard Vision Mode is disabled
+        function stopClipboardMonitoring() {
+            // Clear the monitoring interval
+            if (clipboardMonitorInterval) {
+                clearInterval(clipboardMonitorInterval);
+                clipboardMonitorInterval = null;
+            }
+            
+            // Remove focus event listener
+            window.removeEventListener('focus', monitorClipboard);
+            
+            console.log('Clipboard monitoring stopped');
         }
 
         // Update the initWebcam function
@@ -9198,6 +9607,11 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                     
                     // Add to chat history
                     chatHistory.push({ role: 'assistant', content: message });
+                    
+                    // Automatically extract memories from conversation (async, non-blocking)
+                    extractMemoriesFromConversation().catch(err => {
+                        console.warn('Memory extraction failed:', err);
+                    });
                 }
             } catch (error) {
                 console.error('Error processing webcam image:', error);
