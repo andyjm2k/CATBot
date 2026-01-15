@@ -98,6 +98,20 @@ except Exception as e:
     MEMORY_AVAILABLE = False
     MemoryManager = None
 
+# Import philosopher mode
+try:
+    from philosopher_mode import PhilosopherMode
+    PHILOSOPHER_MODE_AVAILABLE = True
+    print("[OK] Philosopher mode imports successful")
+except ImportError as e:
+    print(f"[WARN] Philosopher mode not available: {e}")
+    PHILOSOPHER_MODE_AVAILABLE = False
+    PhilosopherMode = None
+except Exception as e:
+    print(f"[WARN] Philosopher mode not available (unexpected error): {e}")
+    PHILOSOPHER_MODE_AVAILABLE = False
+    PhilosopherMode = None
+
 # Load environment variables from .env file in project root
 if DOTENV_AVAILABLE:
     # Try loading from current directory first
@@ -191,6 +205,25 @@ class MemoryResponse(BaseModel):
     message: str
     data: Optional[Dict[str, Any]] = None
 
+# Pydantic models for philosopher mode
+class PhilosopherStartRequest(BaseModel):
+    conversation_id: Optional[str] = None
+    user_id: Optional[str] = None
+
+class PhilosopherStopRequest(BaseModel):
+    conversation_id: Optional[str] = None
+    user_id: Optional[str] = None
+
+class PhilosopherContemplateRequest(BaseModel):
+    conversation_id: Optional[str] = None
+    user_id: Optional[str] = None
+    question: Optional[str] = None  # Optional: if not provided, generate one
+
+class PhilosopherResponse(BaseModel):
+    success: bool
+    message: str
+    data: Optional[Dict[str, Any]] = None
+
 # Global state (similar to the Node.js version)
 mcp_clients = {}
 mcp_servers = {}
@@ -200,6 +233,10 @@ SCRATCH_DIR = Path(__file__).parent / "scratch"
 
 # Telegram chat session storage (simple in-memory cache)
 telegram_conversations: Dict[str, List[Dict[str, str]]] = {}
+
+# Philosopher mode state storage (per conversation)
+philosopher_mode_active: Dict[str, bool] = {}
+philosopher_mode_instances: Dict[str, Any] = {}
 
 # Telegram/OpenAI configuration
 TELEGRAM_DEFAULT_MODEL = os.getenv("TELEGRAM_MODEL", os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
@@ -1751,6 +1788,475 @@ async def delete_memory(memory_id: str):
 
 # ============================================================================
 # END MEMORY SYSTEM ENDPOINTS
+# ============================================================================
+
+# ============================================================================
+# PHILOSOPHER MODE HELPER FUNCTIONS
+# ============================================================================
+
+async def get_all_available_tools() -> List[Dict]:
+    """Get all available tools from all connected MCP servers and built-in proxy tools."""
+    print(f"[PHILOSOPHER] get_all_available_tools called - MCP_AVAILABLE: {MCP_AVAILABLE}")
+    
+    all_tools = []
+    
+    # Add built-in proxy tools (web search, web scraper, news API)
+    # These are always available if the server is running
+    
+    # 1. Web Search Tool
+    all_tools.append({
+        "name": "web_search",
+        "description": "Search the web using Brave Search API (with DuckDuckGo fallback). Returns top search results with URLs, titles, and snippets.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The search query to execute (e.g., 'latest AI developments 2024')",
+                }
+            },
+            "required": ["query"]
+        },
+        "server_id": "proxy_server"
+    })
+    print("[PHILOSOPHER] Added web_search tool")
+    
+    # 2. Web Scraper/Fetcher Tool
+    all_tools.append({
+        "name": "web_scraper",
+        "description": "Fetch and scrape content from a web URL. Returns the HTML content of the webpage.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "The URL to fetch and scrape (must include http:// or https://)",
+                }
+            },
+            "required": ["url"]
+        },
+        "server_id": "proxy_server"
+    })
+    print("[PHILOSOPHER] Added web_scraper tool")
+    
+    # 3. News API Tool (only if API key is configured)
+    news_api_key = os.getenv('NEWS_API_KEY')
+    if news_api_key:
+        all_tools.append({
+            "name": "news_search",
+            "description": "Search for recent news articles using News API. Returns articles with titles, URLs, descriptions, and publication dates.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query for news articles (e.g., 'artificial intelligence')",
+                    }
+                },
+                "required": ["query"]
+            },
+            "server_id": "proxy_server"
+        })
+        print("[PHILOSOPHER] Added news_search tool")
+    else:
+        print("[PHILOSOPHER] NEWS_API_KEY not configured, skipping news_search tool")
+    
+    # Add MCP tools if MCP is available
+    if MCP_AVAILABLE:
+        # Debug: Check what servers are available
+        print(f"[PHILOSOPHER] Checking MCP tools - mcp_clients: {len(mcp_clients)} clients, mcp_servers: {len(mcp_servers)} servers")
+        print(f"[PHILOSOPHER] Connected client IDs: {list(mcp_clients.keys())}")
+        print(f"[PHILOSOPHER] Server IDs in mcp_servers: {list(mcp_servers.keys())}")
+        
+        # First, check mcp_servers for connected browser-use servers
+        # (Browser-use servers are marked as connected but may not be in mcp_clients)
+        for server_id, server in mcp_servers.items():
+            server_status = server.get("status", "disconnected")
+            server_name = server.get("name", "").lower()
+            
+            # Check if this is a connected browser-use server
+            if server_status == "connected" and "mcp-browser-use" in server_name:
+                print(f"[PHILOSOPHER] Found connected browser-use server: {server_id}")
+                # Add browser automation tool
+                all_tools.append({
+                    "name": "run_browser_agent",
+                    "description": "Control a web browser using natural language commands. Executes browser automation tasks and returns results.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "instruction": {
+                                "type": "string",
+                                "description": "Natural language instruction for browser automation (e.g., 'Navigate to Google and search for cats')",
+                            },
+                            "max_steps": {
+                                "type": "integer",
+                                "description": "Maximum number of steps the agent should take",
+                                "default": 10
+                            },
+                            "use_vision": {
+                                "type": "boolean",
+                                "description": "Whether to use vision for understanding page content",
+                                "default": True
+                            }
+                        },
+                        "required": ["instruction"]
+                    },
+                    "server_id": server_id
+                })
+        
+        # Get tools from each connected MCP client (non-browser-use servers)
+        for server_id, client in mcp_clients.items():
+            try:
+                print(f"[PHILOSOPHER] Processing MCP server: {server_id}")
+                # Check if this is the browser-use server (shouldn't be, but check anyway)
+                server = mcp_servers.get(server_id)
+                print(f"[PHILOSOPHER] Server config for {server_id}: {server}")
+                
+                if server and "mcp-browser-use" in server.get("name", "").lower():
+                    # Skip - already handled above
+                    print(f"[PHILOSOPHER] Skipping browser-use server {server_id} (already handled)")
+                    continue
+                else:
+                    # Get tools from MCP server
+                    print(f"[PHILOSOPHER] Requesting tools/list from MCP server {server_id}")
+                    result = await client.request(method="tools/list", params={})
+                    print(f"[PHILOSOPHER] tools/list response from {server_id}: {result}")
+                    if result and "tools" in result:
+                        print(f"[PHILOSOPHER] Found {len(result['tools'])} tools from server {server_id}")
+                        for tool in result["tools"]:
+                            tool["server_id"] = server_id
+                            all_tools.append(tool)
+                    else:
+                        print(f"[PHILOSOPHER] No tools in response from server {server_id}")
+            except Exception as e:
+                print(f"[PHILOSOPHER] Error getting tools from server {server_id}: {e}")
+                import traceback
+                print(traceback.format_exc())
+                continue
+    else:
+        print("[PHILOSOPHER] MCP not available, skipping MCP tools")
+    
+    print(f"[PHILOSOPHER] Total tools collected: {len(all_tools)}")
+    return all_tools
+
+async def execute_tool_for_philosopher(tool_name: str, parameters: Dict) -> str:
+    """Execute a tool for philosopher mode. Returns result as string."""
+    print(f"[PHILOSOPHER] Executing tool: {tool_name} with parameters: {parameters}")
+    
+    # Handle built-in proxy server tools
+    if tool_name == "web_search":
+        try:
+            query = parameters.get("query", "")
+            if not query:
+                return "Error: 'query' parameter is required for web_search"
+            
+            # Call the proxy search endpoint
+            result = await proxy_search(query)
+            
+            # Format results as readable text
+            if result and "results" in result:
+                results = result["results"]
+                if not results:
+                    return f"No search results found for query: {query}"
+                
+                formatted_results = []
+                for i, item in enumerate(results, 1):
+                    formatted_results.append(
+                        f"{i}. {item.get('title', 'No title')}\n"
+                        f"   URL: {item.get('url', 'No URL')}\n"
+                        f"   {item.get('snippet', 'No description')}"
+                    )
+                
+                return f"Search results for '{query}':\n\n" + "\n\n".join(formatted_results)
+            else:
+                return f"Search returned no results for query: {query}"
+        except HTTPException as e:
+            return f"Error executing web_search: {e.detail}"
+        except Exception as e:
+            return f"Error executing web_search: {str(e)}"
+    
+    elif tool_name == "web_scraper":
+        try:
+            url = parameters.get("url", "")
+            if not url:
+                return "Error: 'url' parameter is required for web_scraper"
+            
+            # Call the proxy fetch endpoint
+            result = await proxy_fetch(url)
+            
+            # Return the content (may be HTML)
+            if result and "content" in result:
+                content = result["content"]
+                # Truncate if too long (keep first 10000 characters)
+                if len(content) > 10000:
+                    return f"Web content from {url} (truncated):\n\n{content[:10000]}...\n\n[Content truncated to 10000 characters]"
+                return f"Web content from {url}:\n\n{content}"
+            else:
+                return f"No content retrieved from URL: {url}"
+        except HTTPException as e:
+            return f"Error executing web_scraper: {e.detail}"
+        except Exception as e:
+            return f"Error executing web_scraper: {str(e)}"
+    
+    elif tool_name == "news_search":
+        try:
+            query = parameters.get("query", "")
+            if not query:
+                return "Error: 'query' parameter is required for news_search"
+            
+            # Call the proxy news search endpoint
+            result = await proxy_news_search(query)
+            
+            # Format results as readable text
+            if result and "articles" in result:
+                articles = result["articles"]
+                if not articles:
+                    return f"No news articles found for query: {query}"
+                
+                formatted_articles = []
+                for i, article in enumerate(articles[:10], 1):  # Limit to top 10
+                    formatted_articles.append(
+                        f"{i}. {article.get('title', 'No title')}\n"
+                        f"   Source: {article.get('source', 'Unknown')}\n"
+                        f"   Published: {article.get('publishedAt', 'Unknown date')}\n"
+                        f"   URL: {article.get('url', 'No URL')}\n"
+                        f"   {article.get('description', 'No description')}"
+                    )
+                
+                total = result.get("totalResults", len(articles))
+                return f"News articles for '{query}' (showing {len(formatted_articles)} of {total}):\n\n" + "\n\n".join(formatted_articles)
+            else:
+                return f"News search returned no articles for query: {query}"
+        except HTTPException as e:
+            return f"Error executing news_search: {e.detail}"
+        except Exception as e:
+            return f"Error executing news_search: {str(e)}"
+    
+    # Handle MCP tools
+    elif MCP_AVAILABLE:
+        # Find which server has this tool
+        all_tools = await get_all_available_tools()
+        server_id = None
+        
+        for tool in all_tools:
+            if tool.get("name") == tool_name:
+                server_id = tool.get("server_id")
+                break
+        
+        if not server_id:
+            return f"Error: Tool '{tool_name}' not found on any connected server"
+        
+        # Execute the tool using the existing call_tool logic
+        try:
+            request = ToolCallRequest(toolName=tool_name, parameters=parameters)
+            result = await call_tool(server_id, request)
+            
+            # Extract result content
+            if result and "result" in result:
+                result_data = result["result"]
+                if "content" in result_data:
+                    content = result_data["content"]
+                    if isinstance(content, list):
+                        # Extract text from content array
+                        text_parts = []
+                        for item in content:
+                            if isinstance(item, dict) and item.get("type") == "text":
+                                text_parts.append(item.get("text", ""))
+                        return "\n".join(text_parts)
+                    return str(content)
+                return str(result_data)
+            
+            return str(result)
+        except Exception as e:
+            return f"Error executing tool {tool_name}: {str(e)}"
+    else:
+        return f"Error: Tool '{tool_name}' is not a built-in tool and MCP is not available"
+
+# ============================================================================
+# PHILOSOPHER MODE ENDPOINTS
+# ============================================================================
+
+@app.post("/v1/philosopher/start", response_model=PhilosopherResponse)
+async def philosopher_start(request: PhilosopherStartRequest):
+    """Enable philosopher mode for a conversation."""
+    if not PHILOSOPHER_MODE_AVAILABLE or not PhilosopherMode:
+        raise HTTPException(
+            status_code=503,
+            detail="Philosopher mode is not available. Check server logs for details."
+        )
+    
+    # Check if philosopher mode is enabled
+    philosopher_enabled = os.getenv("PHILOSOPHER_MODE_ENABLED", "true").lower() == "true"
+    if not philosopher_enabled:
+        raise HTTPException(
+            status_code=503,
+            detail="Philosopher mode is disabled via PHILOSOPHER_MODE_ENABLED=false"
+        )
+    
+    # Get conversation ID
+    conversation_id = request.conversation_id or request.user_id or "default"
+    
+    # Check if already active
+    if philosopher_mode_active.get(conversation_id, False):
+        return PhilosopherResponse(
+            success=True,
+            message="Philosopher mode is already active for this conversation",
+            data={"conversation_id": conversation_id, "active": True}
+        )
+    
+    try:
+        # Get API configuration
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise HTTPException(status_code=503, detail="OPENAI_API_KEY is not configured")
+        
+        api_base = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1")
+        # Use OPENAI_MODEL directly (not TELEGRAM_DEFAULT_MODEL) since philosopher mode is not Telegram-specific
+        model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        
+        # Create philosopher mode instance with tool support
+        philosopher = PhilosopherMode(
+            api_key=api_key,
+            api_base=api_base,
+            model=model,
+            memory_manager=memory_manager if MEMORY_AVAILABLE else None,
+            max_cycles=int(os.getenv("PHILOSOPHER_MAX_CYCLES", "10")),
+            similarity_threshold=float(os.getenv("PHILOSOPHER_SIMILARITY_THRESHOLD", "0.3")),
+            memory_limit=int(os.getenv("PHILOSOPHER_MEMORY_LIMIT", "10")),
+            conversation_history_limit=int(os.getenv("PHILOSOPHER_CONVERSATION_HISTORY_LIMIT", "3")),
+            tool_executor=execute_tool_for_philosopher,
+            get_tools_func=get_all_available_tools,
+            diversification_threshold=int(os.getenv("PHILOSOPHER_DIVERSIFICATION_THRESHOLD", "7")),
+        )
+        
+        # Store instance and activate mode
+        philosopher_mode_instances[conversation_id] = philosopher
+        philosopher_mode_active[conversation_id] = True
+        
+        return PhilosopherResponse(
+            success=True,
+            message="Philosopher mode activated",
+            data={"conversation_id": conversation_id, "active": True}
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error starting philosopher mode: {e}")
+        import traceback
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to start philosopher mode: {str(e)}")
+
+@app.post("/v1/philosopher/stop", response_model=PhilosopherResponse)
+async def philosopher_stop(request: PhilosopherStopRequest):
+    """Disable philosopher mode for a conversation."""
+    # Get conversation ID
+    conversation_id = request.conversation_id or request.user_id or "default"
+    
+    # Check if active
+    if not philosopher_mode_active.get(conversation_id, False):
+        return PhilosopherResponse(
+            success=True,
+            message="Philosopher mode is not active for this conversation",
+            data={"conversation_id": conversation_id, "active": False}
+        )
+    
+    try:
+        # Deactivate mode
+        philosopher_mode_active[conversation_id] = False
+        # Remove instance (optional - could keep for reuse)
+        philosopher_mode_instances.pop(conversation_id, None)
+        
+        return PhilosopherResponse(
+            success=True,
+            message="Philosopher mode deactivated",
+            data={"conversation_id": conversation_id, "active": False}
+        )
+    except Exception as e:
+        print(f"Error stopping philosopher mode: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to stop philosopher mode: {str(e)}")
+
+@app.get("/v1/philosopher/status")
+async def philosopher_status(conversation_id: Optional[str] = None, user_id: Optional[str] = None):
+    """Check if philosopher mode is active for a conversation."""
+    # Get conversation ID
+    conv_id = conversation_id or user_id or "default"
+    
+    is_active = philosopher_mode_active.get(conv_id, False)
+    
+    return {
+        "active": is_active,
+        "conversation_id": conv_id,
+        "available": PHILOSOPHER_MODE_AVAILABLE,
+        "enabled": os.getenv("PHILOSOPHER_MODE_ENABLED", "true").lower() == "true"
+    }
+
+@app.post("/v1/philosopher/contemplate", response_model=PhilosopherResponse)
+async def philosopher_contemplate(request: PhilosopherContemplateRequest):
+    """Execute a single contemplation cycle."""
+    if not PHILOSOPHER_MODE_AVAILABLE or not PhilosopherMode:
+        raise HTTPException(
+            status_code=503,
+            detail="Philosopher mode is not available. Check server logs for details."
+        )
+    
+    # Get conversation ID
+    conversation_id = request.conversation_id or request.user_id or "default"
+    
+    # Check if mode is active
+    if not philosopher_mode_active.get(conversation_id, False):
+        raise HTTPException(
+            status_code=400,
+            detail="Philosopher mode is not active for this conversation. Start it first with /v1/philosopher/start"
+        )
+    
+    # Get philosopher instance
+    philosopher = philosopher_mode_instances.get(conversation_id)
+    if not philosopher:
+        raise HTTPException(
+            status_code=500,
+            detail="Philosopher mode instance not found. Try restarting philosopher mode."
+        )
+    
+    try:
+        # Generate question if not provided
+        if request.question:
+            question = request.question
+        else:
+            question = await philosopher.generate_contemplation_question()
+            if not question:
+                raise HTTPException(status_code=500, detail="Failed to generate contemplation question")
+        
+        # Execute contemplation
+        result = await philosopher.contemplate_question(question)
+        
+        # Store contemplation in memory
+        memory_id = await philosopher.store_contemplation(
+            question=result["question"],
+            conclusion=result["conclusion"],
+            cycle_count=result["cycle_count"]
+        )
+        
+        return PhilosopherResponse(
+            success=True,
+            message="Contemplation completed",
+            data={
+                "question": result["question"],
+                "conclusion": result["conclusion"],
+                "contemplation_steps": result["contemplation_steps"],
+                "cycle_count": result["cycle_count"],
+                "memory_id": memory_id,
+            }
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error during contemplation: {e}")
+        import traceback
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to contemplate: {str(e)}")
+
+# ============================================================================
+# END PHILOSOPHER MODE ENDPOINTS
 # ============================================================================
 
 # Simple test endpoint to verify requests are reaching the server

@@ -396,6 +396,13 @@
             margin-right: 20px;
         }
 
+        /* Philosopher message styling (orange/amber theme) */
+        .message.philosopher {
+            background-color: #fff3e0;
+            border-left: 4px solid #ff9800;
+            margin-right: 20px;
+        }
+
         /* Message sender name */
         .message-sender {
             font-weight: bold;
@@ -411,6 +418,11 @@
         /* Assistant sender name color */
         .message.assistant .message-sender {
             color: #689F38;
+        }
+
+        /* Philosopher sender name color */
+        .message.philosopher .message-sender {
+            color: #e65100;
         }
 
         /* Message content */
@@ -1078,6 +1090,7 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
             <div class="button-group">
                 <button id="paste-btn" title="Paste from Clipboard"><i class="fas fa-clipboard"></i></button>
                 <button id="start-record-btn" title="Start Recording"><i class="fas fa-microphone"></i></button>
+                <button id="philosopher-mode-btn" title="Toggle Philosopher Mode"><i class="fas fa-brain"></i> Philosopher</button>
                 <button id="send-btn" title="Send Message"><i class="fas fa-paper-plane"></i></button>
             </div>
             <div id="status"></div>
@@ -1093,6 +1106,7 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
 
         const startRecordBtn = document.getElementById('start-record-btn');
         const sendBtn = document.getElementById('send-btn');
+        const philosopherModeBtn = document.getElementById('philosopher-mode-btn');
         const userInput = document.getElementById('user-input');
         const responseOutput = document.getElementById('response-output');
         const messageHistory = document.getElementById('message-history'); // New message history container
@@ -1136,11 +1150,15 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
         
         // Message history management
         let displayedMessages = []; // Array to store displayed messages (last 25)
+        let philosopherModeActive = false; // Philosopher mode state
+        let philosopherModeStarting = false; // Flag to prevent race condition on start
+        let philosopherModeContemplating = false; // Whether a contemplation is in progress
+        let philosopherModeInterval = null; // Interval for contemplation loop
         
         // Function to add a message to the history display
         function addMessageToHistory(role, content) {
-            // Validate inputs
-            if (!role || (role !== 'user' && role !== 'assistant')) {
+            // Validate inputs - now supports 'user', 'assistant', and 'philosopher'
+            if (!role || (role !== 'user' && role !== 'assistant' && role !== 'philosopher')) {
                 console.error('addMessageToHistory called with invalid role:', role);
                 return;
             }
@@ -1159,12 +1177,13 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
             // Get the configured names or use defaults
             const userName = userNameInput.value.trim() || 'User';
             const assistantName = assistantNameInput.value.trim() || 'EVA';
+            const philosopherName = assistantNameInput.value.trim() || 'EVA'; // Use assistant name for philosopher
             
             // Create message object - ensure content is set correctly (not sender name)
             const message = {
-                role: role, // 'user' or 'assistant'
+                role: role, // 'user', 'assistant', or 'philosopher'
                 content: content, // The actual message content, not the sender name
-                sender: role === 'user' ? userName : assistantName,
+                sender: role === 'user' ? userName : (role === 'philosopher' ? philosopherName + ' (Contemplating)' : assistantName),
                 timestamp: new Date()
             };
             
@@ -1202,6 +1221,7 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
                 });
                 
                 const messageDiv = document.createElement('div');
+                // Support 'philosopher' role in addition to 'user' and 'assistant'
                 messageDiv.className = `message ${msg.role}`;
                 
                 const senderDiv = document.createElement('div');
@@ -1231,6 +1251,287 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
             messageHistory.innerHTML = '';
             // Save to active conversation
             updateActiveConversationMessages();
+        }
+
+        // ============================================================================
+        // PHILOSOPHER MODE FUNCTIONS
+        // ============================================================================
+
+        // Check if message contains philosopher mode trigger
+        function detectPhilosopherModeTrigger(message) {
+            const triggerPhrases = [
+                'philosopher mode',
+                'enable philosopher mode',
+                'start philosopher mode',
+                'enter philosopher mode',
+                'philosopher',
+            ];
+            const messageLower = message.toLowerCase().trim();
+            return triggerPhrases.some(phrase => messageLower.includes(phrase));
+        }
+
+        // Start philosopher mode
+        async function startPhilosopherMode() {
+            // Prevent race condition: check if already active or starting
+            if (philosopherModeActive || philosopherModeStarting) {
+                return; // Already active or starting
+            }
+
+            // Set starting flag immediately to prevent concurrent calls
+            philosopherModeStarting = true;
+
+            try {
+                const response = await fetch(`${PROXY_BASE_URL}/v1/philosopher/start`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        conversation_id: activeConversationId || 'default',
+                        user_id: activeConversationId || 'default',
+                    }),
+                });
+
+                // Check if response is not ok (status >= 400)
+                if (!response.ok) {
+                    let errorMessage = 'Unknown error';
+                    try {
+                        const errorData = await response.json();
+                        // FastAPI HTTPException returns {"detail": "..."}
+                        errorMessage = errorData.detail || errorData.message || `HTTP ${response.status}: ${response.statusText}`;
+                    } catch (e) {
+                        errorMessage = `HTTP ${response.status}: ${response.statusText}`;
+                    }
+                    console.error('Failed to start philosopher mode:', errorMessage);
+                    status.textContent = `Failed to start philosopher mode: ${errorMessage}`;
+                    return;
+                }
+
+                const data = await response.json();
+                // Check if start was cancelled (philosopherModeStarting was cleared by stopPhilosopherMode)
+                if (!philosopherModeStarting) {
+                    // Start was cancelled, don't activate
+                    return;
+                }
+
+                // Check data.success explicitly - require it to be true
+                if (data.success === true) {
+                    // Check starting flag wasn't cleared during API call or after response parsing
+                    if (!philosopherModeStarting) {
+                        // Start was cancelled, don't activate
+                        return;
+                    }
+                    // Critical section: Check one more time right before activation
+                    // This prevents race condition where stopPhilosopherMode is called between checks
+                    if (!philosopherModeStarting) {
+                        return; // Start was cancelled
+                    }
+                    // Set active state - but verify starting flag is still true after setting
+                    philosopherModeActive = true;
+                    // Final verification: if starting flag was cleared, revert the activation
+                    if (!philosopherModeStarting) {
+                        philosopherModeActive = false; // Revert activation if cancelled
+                        return;
+                    }
+                    // Only proceed with UI updates if we successfully activated
+                    if (philosopherModeBtn) {
+                        philosopherModeBtn.textContent = '🧠 Stop Philosopher';
+                        philosopherModeBtn.style.backgroundColor = '#ff9800';
+                    }
+                    addMessageToHistory('assistant', 'Philosopher Mode activated. I will now contemplate questions and share my thoughts.');
+                    // Start contemplation loop
+                    startPhilosopherContemplationLoop();
+                } else {
+                    console.error('Failed to start philosopher mode:', data.message);
+                    status.textContent = `Failed to start philosopher mode: ${data.message || 'Unknown error'}`;
+                }
+            } catch (error) {
+                console.error('Error starting philosopher mode:', error);
+                status.textContent = `Error starting philosopher mode: ${error.message}`;
+            } finally {
+                // Always clear the starting flag, whether success or failure
+                philosopherModeStarting = false;
+            }
+        }
+
+        // Stop philosopher mode
+        async function stopPhilosopherMode(skipMessage = false) {
+            // If not active and not starting, there's nothing to stop
+            if (!philosopherModeActive && !philosopherModeStarting) {
+                return; // Already stopped and not starting
+            }
+
+            try {
+                // Clear contemplation interval and reset state immediately
+                philosopherModeActive = false; // Set to false first to stop loop
+                if (philosopherModeInterval) {
+                    clearInterval(philosopherModeInterval);
+                    philosopherModeInterval = null;
+                }
+
+                // If starting, cancel the start operation by clearing the starting flag
+                // This will prevent startPhilosopherMode from activating when it completes
+                const wasStarting = philosopherModeStarting;
+                if (philosopherModeStarting) {
+                    philosopherModeStarting = false;
+                }
+
+                // Always call the backend API to stop, even if we think it was just starting
+                // This handles the race condition where backend might already be active
+                // The backend will handle the case where it's not active gracefully
+                const response = await fetch(`${PROXY_BASE_URL}/v1/philosopher/stop`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        conversation_id: activeConversationId || 'default',
+                        user_id: activeConversationId || 'default',
+                    }),
+                });
+
+                const data = await response.json();
+                philosopherModeActive = false;
+                philosopherModeContemplating = false;
+                if (philosopherModeBtn) {
+                    philosopherModeBtn.textContent = '🧠 Philosopher';
+                    philosopherModeBtn.style.backgroundColor = '';
+                }
+                
+                // Show appropriate message based on whether it was starting or already active
+                // Skip message display if skipMessage is true (used during interruption to maintain message order)
+                if (!skipMessage) {
+                    if (wasStarting) {
+                        addMessageToHistory('assistant', 'Philosopher Mode activation cancelled.');
+                    } else {
+                        addMessageToHistory('assistant', 'Philosopher Mode deactivated.');
+                    }
+                }
+            } catch (error) {
+                console.error('Error stopping philosopher mode:', error);
+                // Still deactivate locally even if API call fails
+                philosopherModeActive = false;
+                philosopherModeContemplating = false;
+                philosopherModeStarting = false; // Also clear starting flag on error
+                if (philosopherModeBtn) {
+                    philosopherModeBtn.textContent = '🧠 Philosopher';
+                    philosopherModeBtn.style.backgroundColor = '';
+                }
+            }
+        }
+
+        // Execute a single contemplation cycle
+        async function executeContemplation() {
+            if (!philosopherModeActive || philosopherModeContemplating) {
+                return; // Not active or already contemplating
+            }
+
+            philosopherModeContemplating = true;
+
+            try {
+                const response = await fetch(`${PROXY_BASE_URL}/v1/philosopher/contemplate`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        conversation_id: activeConversationId || 'default',
+                        user_id: activeConversationId || 'default',
+                    }),
+                });
+
+                // Check if response is not ok (status >= 400)
+                if (!response.ok) {
+                    let errorMessage = 'Unknown error';
+                    try {
+                        const errorData = await response.json();
+                        // FastAPI HTTPException returns {"detail": "..."}
+                        errorMessage = errorData.detail || errorData.message || `HTTP ${response.status}: ${response.statusText}`;
+                    } catch (e) {
+                        errorMessage = `HTTP ${response.status}: ${response.statusText}`;
+                    }
+                    console.error('Contemplation failed:', errorMessage);
+                    // Display error to user in chat
+                    if (philosopherModeActive) {
+                        addMessageToHistory('assistant', `⚠️ Contemplation error: ${errorMessage}`);
+                    }
+                    return;
+                }
+
+                const data = await response.json();
+                // Check if philosopher mode is still active after async fetch completes
+                // This prevents displaying contemplation results if mode was stopped during the fetch
+                if (!philosopherModeActive) {
+                    // Mode was stopped, don't display results
+                    return;
+                }
+                
+                if (data.success && data.data) {
+                    // Double-check mode is still active before displaying
+                    if (!philosopherModeActive) {
+                        return; // Mode was stopped, don't display results
+                    }
+                    // Display question
+                    if (data.data.question) {
+                        addMessageToHistory('philosopher', `🤔 Question: ${data.data.question}`);
+                    }
+                    // Check again before displaying conclusion
+                    if (!philosopherModeActive) {
+                        return; // Mode was stopped, don't display conclusion
+                    }
+                    // Display conclusion
+                    if (data.data.conclusion) {
+                        addMessageToHistory('philosopher', `💭 Conclusion: ${data.data.conclusion}`);
+                    }
+                } else {
+                    const errorMsg = data.message || 'Unknown error';
+                    console.error('Contemplation failed:', errorMsg);
+                    // Display error to user in chat
+                    if (philosopherModeActive) {
+                        addMessageToHistory('assistant', `⚠️ Contemplation failed: ${errorMsg}`);
+                    }
+                }
+            } catch (error) {
+                console.error('Error during contemplation:', error);
+                // Display error to user in chat
+                if (philosopherModeActive) {
+                    addMessageToHistory('assistant', `⚠️ Contemplation error: ${error.message || 'Network or connection error'}`);
+                }
+            } finally {
+                philosopherModeContemplating = false;
+            }
+        }
+
+        // Start contemplation loop
+        function startPhilosopherContemplationLoop() {
+            // Clear any existing interval
+            if (philosopherModeInterval) {
+                clearInterval(philosopherModeInterval);
+            }
+
+            // Execute first contemplation immediately
+            executeContemplation();
+
+            // Then set up interval for subsequent contemplations (every 30 seconds)
+            philosopherModeInterval = setInterval(() => {
+                if (philosopherModeActive && !philosopherModeContemplating) {
+                    executeContemplation();
+                }
+            }, 30000); // 30 seconds between contemplations
+        }
+
+        // Toggle philosopher mode
+        async function togglePhilosopherMode() {
+            if (philosopherModeActive) {
+                await stopPhilosopherMode();
+            } else {
+                await startPhilosopherMode();
+            }
+        }
+
+        // Add event listener for philosopher mode button
+        if (philosopherModeBtn) {
+            philosopherModeBtn.addEventListener('click', togglePhilosopherMode);
         }
 
         // Persist voice selection when the user changes the dropdown
@@ -7547,13 +7848,35 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
         }
 
         sendBtn.addEventListener('click', async function () { // Handle send button click
+            // Check for philosopher mode trigger phrase
+            const promptText = userInput.value.trim();
+            if (promptText && detectPhilosopherModeTrigger(promptText)) {
+                await startPhilosopherMode();
+                userInput.value = ''; // Clear input
+                return; // Don't send as regular message
+            }
+
+            // If philosopher mode is active or starting, and user sends a message, stop philosopher mode (interruption)
+            const shouldStopPhilosopher = (philosopherModeActive || philosopherModeStarting) && promptText;
+            if (shouldStopPhilosopher) {
+                // Stop philosopher mode but skip message display - we'll add it after the user message
+                await stopPhilosopherMode(true); // Pass true to skip message display
+            }
             await resumeAudioContextOnce(); // Resume audio context on first user action (for autoplay and lip sync)
             const userText = userInput.value; // Get user input text
             if (userText.trim() === '') { // Check if input is empty
                 alert('Please enter some text or record your voice.'); // Show alert if empty
                 return; // Exit early
             } // End empty check
-            fetchOpenAIResponse(userText); // Send message to OpenAI API
+            
+            // Note: fetchOpenAIResponse will add the user message to history, so we don't add it here
+            fetchOpenAIResponse(userText); // Send message to OpenAI API (this will add user message to history)
+            
+            // Add deactivation message after user message if we stopped philosopher mode
+            // This appears after the user message since fetchOpenAIResponse adds it synchronously at the start
+            if (shouldStopPhilosopher) {
+                addMessageToHistory('assistant', 'Philosopher Mode deactivated.');
+            }
             userInput.value = ''; // Clear input field
         }); // End send button click handler
 
@@ -7563,8 +7886,31 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                 event.preventDefault(); // Prevent default newline behavior
                 await resumeAudioContextOnce(); // Resume audio context on first user action (for autoplay and lip sync)
                 const userText = userInput.value; // Get user input text
+                
+                // Check for philosopher mode trigger phrase
+                if (userText.trim() && detectPhilosopherModeTrigger(userText)) {
+                    await startPhilosopherMode();
+                    userInput.value = ''; // Clear input
+                    return; // Don't send as regular message
+                }
+
+                // If philosopher mode is active or starting, and user sends a message, stop philosopher mode (interruption)
+                const shouldStopPhilosopher = (philosopherModeActive || philosopherModeStarting) && userText.trim();
+                if (shouldStopPhilosopher) {
+                    // Stop philosopher mode but skip message display - we'll add it after the user message
+                    await stopPhilosopherMode(true); // Pass true to skip message display
+                }
+                
                 if (userText.trim() !== '') { // Check if input is not empty
-                    fetchOpenAIResponse(userText); // Send message to OpenAI API
+                    // Note: fetchOpenAIResponse will add the user message to history, so we don't add it here
+                    fetchOpenAIResponse(userText); // Send message to OpenAI API (this will add user message to history)
+                    
+                    // Add deactivation message after user message if we stopped philosopher mode
+                    // This appears after the user message since fetchOpenAIResponse adds it synchronously at the start
+                    if (shouldStopPhilosopher) {
+                        addMessageToHistory('assistant', 'Philosopher Mode deactivated.');
+                    }
+                    
                     userInput.value = ''; // Clear input field
                 } else { // If input is empty
                     alert('Please enter some text or record your voice.'); // Show alert
