@@ -5193,13 +5193,13 @@ function saveWAVFile(wavBlob) {
                 type: "function",
                 function: {
                     name: "searchMemories",
-                    description: "Search for relevant memories from previous conversations. Use this tool when the user asks you to recall, remember, or tell them what you know about something. Examples: 'what do you remember about me?', 'tell me what you know about Laura', 'recall my preferences'. Always use this tool before saying you don't have information.",
+                    description: "Search for relevant memories from previous conversations. Use this tool when the user asks you to recall, remember, or tell them what you know about something. Examples: 'what core insights have you made?', 'tell me what you know about the concept of consciousness', 'recall what you've contemplated recently'. Always use this tool before saying you don't have information. These are your own memories, not the user's.",
                     parameters: {
                         type: "object",
                         properties: {
                             query: {
                                 type: "string",
-                                description: "Search query to find relevant memories. Use keywords from the user's question (e.g., 'Laura', 'preferences', 'age', etc.)"
+                                description: "Search query to find relevant memories. Use topic keywords from the user's question (e.g., 'Laura', 'preferences', 'age', etc.)"
                             },
                             limit: {
                                 type: "number",
@@ -5448,7 +5448,7 @@ function saveWAVFile(wavBlob) {
         async function handleSaveToFile({ filename, content }) {
             try {
                 // Construct the full path
-                const savePath = `C:\\Users\\pc\\scratch\\${filename}`;
+                // const savePath = `C:\\Users\\andyjm\\scratch\\${filename}`;
                 
                 // Create a Blob with the content
                 const blob = new Blob([content], { type: 'text/plain' });
@@ -5884,6 +5884,97 @@ function saveWAVFile(wavBlob) {
                 }
             } catch (error) {
                 return { success: false, message: `Error searching memories: ${error.message}` };
+            }
+        }
+
+        // Detect if a question is asking for opinion/knowledge vs an action
+        function isOpinionOrKnowledgeQuestion(prompt) {
+            // Convert to lowercase for case-insensitive matching
+            const lowerPrompt = prompt.toLowerCase().trim();
+            
+            // Patterns that indicate opinion/knowledge questions
+            const opinionKnowledgePatterns = [
+                /what\s+(do\s+you\s+)?think\s+(about|of)/i,
+                /what'?s\s+(your\s+)?(opinion|view|perspective|take|thoughts?)\s+(on|about|of|regarding)/i,
+                /what\s+(do\s+you\s+)?know\s+(about|of)/i,
+                /what\s+(are\s+your\s+)?(thoughts?|views?|beliefs?|ideas?)\s+(on|about|of|regarding)/i,
+                /how\s+do\s+you\s+(feel|see|view|perceive)\s+(about|on|regarding)/i,
+                /tell\s+me\s+(what\s+you\s+)?(think|know|believe|feel)\s+(about|of|on)/i,
+                /what\s+(is|are)\s+your\s+(thoughts?|views?|opinions?|beliefs?|ideas?|insights?)\s+(on|about|of|regarding)/i,
+                /share\s+(your\s+)?(thoughts?|views?|opinions?|perspective)/i,
+                /what\s+(do\s+you\s+)?(believe|understand|consider)\s+(about|of|regarding)/i,
+                /what\s+(are\s+your\s+)?(insights?|reflections?|contemplations?)\s+(on|about|of|regarding)/i
+            ];
+            
+            // Patterns that indicate action-oriented questions (skip memory search)
+            const actionPatterns = [
+                /(search|find|look\s+up|get|fetch|retrieve)\s+(for|information\s+about|details\s+about)/i,
+                /how\s+much\s+(does|do|is|are|cost)/i,
+                /what'?s\s+the\s+(weather|price|cost|temperature|time)/i,
+                /(show|display|list|give\s+me)\s+(me\s+)?(information|data|details|results)/i,
+                /(calculate|compute|determine|find\s+out)\s+(the\s+)?(cost|price|value|amount|total)/i,
+                /(navigate|go\s+to|visit|open|browse)/i,
+                /(read|write|save|load|upload|download)\s+(the\s+)?(file|document|data)/i,
+                /(create|make|build|generate|produce)\s+(a|an|the)/i,
+                /(run|execute|perform|do)\s+(a|an|the)/i
+            ];
+            
+            // Check for action patterns first (higher priority)
+            for (const pattern of actionPatterns) {
+                if (pattern.test(lowerPrompt)) {
+                    return false; // This is an action question, not opinion/knowledge
+                }
+            }
+            
+            // Check for opinion/knowledge patterns
+            for (const pattern of opinionKnowledgePatterns) {
+                if (pattern.test(lowerPrompt)) {
+                    return true; // This is an opinion/knowledge question
+                }
+            }
+            
+            // Default: if it starts with "what do you" or "what's your", treat as opinion/knowledge
+            if (/^what\s+(do\s+you|'?s\s+your)/i.test(lowerPrompt)) {
+                return true;
+            }
+            
+            // Default to false (action-oriented) if no patterns match
+            return false;
+        }
+
+        // Automatically search memories for opinion/knowledge questions (when not in philosopher mode)
+        async function autoSearchMemoriesForQuestion(prompt) {
+            // Only auto-search if not in philosopher mode
+            if (philosopherModeActive) {
+                return null; // Skip auto-search in philosopher mode
+            }
+            
+            // Check if this is an opinion/knowledge question
+            if (!isOpinionOrKnowledgeQuestion(prompt)) {
+                return null; // Skip auto-search for action questions
+            }
+            
+            try {
+                // Extract topic from the question for better search
+                // Try to extract the main topic after common question patterns
+                let searchQuery = prompt;
+                const topicMatch = prompt.match(/(?:think|opinion|view|know|thoughts?|beliefs?|feel|see|perceive|understand|consider|insights?|reflections?|contemplations?)\s+(?:about|of|on|regarding)\s+(.+?)(?:\?|$)/i);
+                if (topicMatch && topicMatch[1]) {
+                    searchQuery = topicMatch[1].trim();
+                }
+                
+                // Search memories
+                const result = await handleSearchMemories({ query: searchQuery, limit: 5 });
+                
+                if (result.success && result.message && result.message !== "No relevant memories found.") {
+                    // Return the memory context string
+                    return result.message;
+                }
+                
+                return null; // No memories found or error
+            } catch (error) {
+                console.warn('Auto memory search failed:', error);
+                return null; // Fail silently, don't block the request
             }
         }
 
@@ -7075,7 +7166,18 @@ Current memory cache contents:
 ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
             
             // Preserve existing system prompt by default; user input overrides it
-            const effectiveSystemPrompt = systemPromptInput.value.trim() || systemPrompt;
+            let effectiveSystemPrompt = systemPromptInput.value.trim() || systemPrompt;
+            
+            // Automatically search memories for opinion/knowledge questions (when not in philosopher mode)
+            let memoryContext = null;
+            if (!philosopherModeActive) {
+                memoryContext = await autoSearchMemoriesForQuestion(promptText);
+                if (memoryContext) {
+                    // Add memory context to system prompt
+                    effectiveSystemPrompt += `\n\nRelevant context from previous conversations:\n${memoryContext}\n\nUse this context to provide more personalized and relevant responses based on what you've discussed before.`;
+                }
+            }
+            
             const messages = [
                 { 
                     role: 'system', 

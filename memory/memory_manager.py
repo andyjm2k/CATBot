@@ -224,7 +224,7 @@ class MemoryManager:
         memory_ids = []
         for mem in extracted:
             # Only store high or medium confidence memories
-            if mem.get("confidence", "low") in ["high", "medium"]:
+            if mem.get("confidence", "low") in ["high"]:
                 memory_id = await self.store_memory(
                     text=mem.get("text", ""),
                     category=mem.get("category", "general"),

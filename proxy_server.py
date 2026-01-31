@@ -726,78 +726,125 @@ async def proxy_search(query: str):
         raise HTTPException(status_code=400, detail="Search query is required")
 
     # Try Brave Search first
-    try:
-        # Get Brave API key from environment variable (required, no fallback)
-        brave_api_key = os.getenv('BRAVE_API_KEY')
-        if not brave_api_key:
-            # If no API key is configured, skip Brave Search and fall back to DuckDuckGo
-            raise ValueError("BRAVE_API_KEY is not configured")
+    brave_api_key = os.getenv('BRAVE_API_KEY')
+    if not brave_api_key:
+        print("⚠️  BRAVE_API_KEY not configured. Falling back to DuckDuckGo.")
+    else:
+        try:
+            print(f"🔍 Using Brave Search API for query: {query[:50]}...")
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.get(
+                    'https://api.search.brave.com/res/v1/web/search',
+                    headers={
+                        'Accept': 'application/json',
+                        'Accept-Encoding': 'gzip',
+                        'X-Subscription-Token': brave_api_key
+                    },
+                    params={
+                        'q': query,
+                        'count': 10,
+                        'search_lang': 'en',
+                        'safesearch': 'moderate',
+                        'freshness': 'past_month'
+                    }
+                )
 
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                'https://api.search.brave.com/res/v1/web/search',
-                headers={
-                    'Accept': 'application/json',
-                    'Accept-Encoding': 'gzip',
-                    'X-Subscription-Token': brave_api_key
-                },
-                params={
-                    'q': query,
-                    'count': 10,
-                    'search_lang': 'en',
-                    'safesearch': 'moderate',
-                    'freshness': 'past_month'
-                }
-            )
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('web', {}).get('results'):
+                    results = []
+                    for result in data['web']['results']:
+                        # Parse date information
+                        date_str = result.get('age') or result.get('published')
+                        parsed_date = parse_date(date_str) if date_str else None
 
-        if response.status_code == 200:
-            data = response.json()
-            if data.get('web', {}).get('results'):
-                results = []
-                for result in data['web']['results']:
-                    # Parse date information
-                    date_str = result.get('age') or result.get('published')
-                    parsed_date = parse_date(date_str) if date_str else None
+                        results.append({
+                            'url': result['url'],
+                            'title': clean_text(result.get('title', '')),
+                            'snippet': clean_text(result.get('description', '')),
+                            'date': parsed_date
+                        })
 
-                    results.append({
-                        'url': result['url'],
-                        'title': clean_text(result.get('title', '')),
-                        'snippet': clean_text(result.get('description', '')),
-                        'date': parsed_date
-                    })
+                    # Sort by date (newest first) and filter valid results
+                    results = [r for r in results if r['title'] and r['snippet']]
+                    results.sort(key=lambda x: parse_date(x.get('date')) or 0, reverse=True)
 
-                # Sort by date (newest first) and filter valid results
-                results = [r for r in results if r['title'] and r['snippet']]
-                results.sort(key=lambda x: parse_date(x.get('date')) or 0, reverse=True)
+                    print(f"✅ Brave Search returned {len(results)} results")
+                    return {"results": results[:5], "source": "brave"}  # Return top 5 results
+                else:
+                    print(f"⚠️  Brave Search returned no results in response")
+            elif response.status_code == 401:
+                print(f"❌ Brave Search API authentication failed (401). Check your BRAVE_API_KEY.")
+                raise HTTPException(
+                    status_code=500,
+                    detail="Brave Search API authentication failed. Please check your BRAVE_API_KEY configuration."
+                )
+            elif response.status_code == 429:
+                print(f"⚠️  Brave Search API rate limit exceeded (429). Falling back to DuckDuckGo.")
+            else:
+                print(f"⚠️  Brave Search API returned status {response.status_code}. Falling back to DuckDuckGo.")
+                try:
+                    error_data = response.json()
+                    print(f"   Error details: {error_data}")
+                except:
+                    print(f"   Error text: {response.text[:200]}")
 
-                return {"results": results[:5]}  # Return top 5 results
+        except httpx.RequestError as e:
+            error_msg = str(e) if str(e) else f"Network error: {type(e).__name__}"
+            print(f"❌ Brave Search network error: {error_msg}")
+            print("   Falling back to DuckDuckGo...")
+        except httpx.HTTPStatusError as e:
+            print(f"❌ Brave Search HTTP error: {e.response.status_code if e.response else 'Unknown'}")
+            print("   Falling back to DuckDuckGo...")
+        except HTTPException:
+            # Re-raise HTTPExceptions (like auth errors) - don't fall back
+            raise
+        except Exception as e:
+            error_msg = str(e) if str(e) else f"Unknown error: {type(e).__name__}"
+            print(f"❌ Brave Search failed: {error_msg}")
+            print("   Falling back to DuckDuckGo...")
+            import traceback
+            print(traceback.format_exc())
 
-    except Exception as e:
-        print(f"Brave Search failed, falling back to DuckDuckGo: {e}")
-
-    # Fallback to DuckDuckGo
+    # Fallback to DuckDuckGo (only if Brave Search is not available or failed)
+    print("🦆 Falling back to DuckDuckGo search...")
     try:
         search_url = f"https://html.duckduckgo.com/html/?q={query}"
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.get(
                 search_url,
                 headers={
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                    'Accept-Language': 'en-US,en;q=0.5'
+                    'Accept-Language': 'en-US,en;q=0.5',
+                    'Referer': 'https://duckduckgo.com/'
                 },
-                timeout=10.0
+                follow_redirects=True
             )
+            
+            # Check response status
+            if response.status_code != 200:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"DuckDuckGo search returned HTTP {response.status_code}. The search service may be temporarily unavailable."
+                )
 
         results = []
         html = response.text
 
-        # Extract results using regex patterns
+        # Extract results using multiple regex patterns (DuckDuckGo HTML structure can vary)
         patterns = [
+            # Pattern 1: Modern DuckDuckGo structure
             r'<div class="links_main links_deep result__body">.*?<a class="result__a" href="([^"]+)".*?>(.*?)</a>.*?<a class="result__snippet".*?>(.*?)</a>',
+            # Pattern 2: Alternative structure
             r'<div class="result__body">.*?<a class="result__url" href="([^"]+)".*?>(.*?)</a>.*?<div class="result__snippet">(.*?)</div>',
-            r'<div class="result__body">.*?<a class="result__a" href="([^"]+)".*?>(.*?)</a>.*?<div class="result__snippet">(.*?)</div>'
+            # Pattern 3: Another variant
+            r'<div class="result__body">.*?<a class="result__a" href="([^"]+)".*?>(.*?)</a>.*?<div class="result__snippet">(.*?)</div>',
+            # Pattern 4: Try to find any links with result classes
+            r'<a[^>]*class="[^"]*result[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?<div[^>]*class="[^"]*snippet[^"]*"[^>]*>(.*?)</div>',
+            # Pattern 5: More generic pattern
+            r'<a[^>]*href="([^"]+)"[^>]*class="[^"]*result__a[^"]*"[^>]*>(.*?)</a>.*?<span[^>]*class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</span>'
         ]
 
         for pattern in patterns:
@@ -806,24 +853,52 @@ async def proxy_search(query: str):
                 if len(results) >= 5:  # Limit to 5 results
                     break
 
-                url, title, snippet = match.groups()
-                url = url.replace('&amp;', '&')
+                try:
+                    url, title, snippet = match.groups()
+                    url = url.replace('&amp;', '&')
+                    
+                    # Clean up the extracted text
+                    title = clean_text(title)
+                    snippet = clean_text(snippet)
 
-                if 'duckduckgo.com' not in url:
-                    results.append({
-                        'url': url,
-                        'title': clean_text(title),
-                        'snippet': clean_text(snippet)
-                    })
+                    # Skip if URL is invalid or is a DuckDuckGo internal link
+                    if url and 'duckduckgo.com' not in url and title and snippet:
+                        results.append({
+                            'url': url,
+                            'title': title,
+                            'snippet': snippet
+                        })
+                except (ValueError, IndexError) as e:
+                    # Skip malformed matches
+                    continue
 
             if len(results) >= 5:
                 break
 
-        return {"results": results}
+        # If no results found with regex, try a simpler approach
+        if len(results) == 0:
+            # Log the HTML snippet for debugging (first 1000 chars)
+            print(f"⚠️  DuckDuckGo search: No results found with regex patterns. HTML preview: {html[:1000]}")
+            # Return empty results rather than failing
+            return {"results": [], "source": "duckduckgo", "message": "No results found. DuckDuckGo HTML structure may have changed."}
 
+        print(f"✅ DuckDuckGo returned {len(results)} results")
+        return {"results": results, "source": "duckduckgo"}
+
+    except httpx.RequestError as e:
+        error_msg = str(e) if str(e) else f"Network error: {type(e).__name__}"
+        print(f"Search error (network): {error_msg}")
+        raise HTTPException(status_code=500, detail=f"Failed to perform search: Network error - {error_msg}")
+    except httpx.HTTPStatusError as e:
+        error_msg = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
+        print(f"Search error (HTTP): {error_msg}")
+        raise HTTPException(status_code=500, detail=f"Failed to perform search: {error_msg}")
     except Exception as e:
-        print(f"Search error: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to perform search: {str(e)}")
+        error_msg = str(e) if str(e) else f"Unknown error: {type(e).__name__}"
+        print(f"Search error: {error_msg}")
+        import traceback
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to perform search: {error_msg}")
 
 # News API search endpoint
 @app.get("/v1/proxy/news")
@@ -1718,7 +1793,7 @@ async def extract_memories(request: MemoryExtractRequest):
             )
         
         # Extract memories from conversation
-        max_memories = request.max_memories or 3
+        max_memories = request.max_memories or 1
         memory_ids = await memory_manager.extract_memories_from_conversation(
             messages=request.messages,
             max_memories=max_memories,
