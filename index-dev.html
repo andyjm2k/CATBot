@@ -116,8 +116,12 @@
 
         .button-group button {
             margin: 0;
-            padding: 8px 15px;
+            padding: 8px;
+            width: 36px;
             height: 36px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
             white-space: nowrap;
         }
 
@@ -488,8 +492,12 @@
         }
 
         .button-group button {
-            padding: 8px 15px;
+            padding: 8px;
+            width: 36px;
             height: 36px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
             white-space: nowrap;
         }
 
@@ -1090,7 +1098,7 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
             <div class="button-group">
                 <button id="paste-btn" title="Paste from Clipboard"><i class="fas fa-clipboard"></i></button>
                 <button id="start-record-btn" title="Start Recording"><i class="fas fa-microphone"></i></button>
-                <button id="philosopher-mode-btn" title="Toggle Philosopher Mode"><i class="fas fa-brain"></i> Philosopher</button>
+                <button id="philosopher-mode-btn" title="Toggle Philosopher Mode"><i class="fas fa-brain"></i></button>
                 <button id="send-btn" title="Send Message"><i class="fas fa-paper-plane"></i></button>
             </div>
             <div id="status"></div>
@@ -1124,7 +1132,7 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
         const ttsModelDropdown = document.getElementById('tts-model-dropdown'); // TTS model dropdown
         const ttsVoiceDropdown = document.getElementById('tts-voice-dropdown'); // TTS voice dropdown
         const refreshTtsVoicesBtn = document.getElementById('refresh-tts-voices-btn'); // Refresh TTS voices button
-        const SELECTED_VOICE_STORAGE_KEY = 'selectedVoiceURI'; // Persist selected voice for this browser session
+        const SELECTED_VOICE_STORAGE_KEY = 'selectedVoiceURI'; // Persist selected voice across browser sessions
         const PROXY_BASE_URL = 'http://localhost:8002';
         let voices = [];
         let audioContextResumed = false; // Flag to track if audio context has been resumed after first user action
@@ -1335,7 +1343,7 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
                     }
                     // Only proceed with UI updates if we successfully activated
                     if (philosopherModeBtn) {
-                        philosopherModeBtn.textContent = '🧠 Stop Philosopher';
+                        philosopherModeBtn.innerHTML = '<i class="fas fa-brain"></i>';
                         philosopherModeBtn.style.backgroundColor = '#ff9800';
                     }
                     addMessageToHistory('assistant', 'Philosopher Mode activated. I will now contemplate questions and share my thoughts.');
@@ -1394,7 +1402,7 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
                 philosopherModeActive = false;
                 philosopherModeContemplating = false;
                 if (philosopherModeBtn) {
-                    philosopherModeBtn.textContent = '🧠 Philosopher';
+                    philosopherModeBtn.innerHTML = '<i class="fas fa-brain"></i>';
                     philosopherModeBtn.style.backgroundColor = '';
                 }
                 
@@ -1414,7 +1422,7 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
                 philosopherModeContemplating = false;
                 philosopherModeStarting = false; // Also clear starting flag on error
                 if (philosopherModeBtn) {
-                    philosopherModeBtn.textContent = '🧠 Philosopher';
+                    philosopherModeBtn.innerHTML = '<i class="fas fa-brain"></i>';
                     philosopherModeBtn.style.backgroundColor = '';
                 }
             }
@@ -1540,9 +1548,10 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
                 const selectedVoiceIndex = parseInt(voiceDropdown.value);
                 if (!isNaN(selectedVoiceIndex) && voices[selectedVoiceIndex]) {
                     try {
-                        sessionStorage.setItem(SELECTED_VOICE_STORAGE_KEY, voices[selectedVoiceIndex].voiceURI);
+                        localStorage.setItem(SELECTED_VOICE_STORAGE_KEY, voices[selectedVoiceIndex].voiceURI);
+                        saveToolSettings(); // Also save in unified settings
                     } catch (persistError) {
-                        console.warn('Could not persist selected voice in sessionStorage:', persistError);
+                        console.warn('Could not persist selected voice in localStorage:', persistError);
                     }
                 }
             });
@@ -2364,12 +2373,12 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
                 return;
             }
 
-            // Read any previously selected voice for this session
+            // Read any previously selected voice from persistent storage
             let storedVoiceURI = null;
             try {
-                storedVoiceURI = sessionStorage.getItem(SELECTED_VOICE_STORAGE_KEY);
+                storedVoiceURI = localStorage.getItem(SELECTED_VOICE_STORAGE_KEY);
             } catch (readError) {
-                console.warn('Could not read selected voice from sessionStorage:', readError);
+                console.warn('Could not read selected voice from localStorage:', readError);
             }
 
             voices.forEach((voice, index) => {
@@ -2397,13 +2406,13 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
 
             voiceDropdown.value = String(selectedIndex);
 
-            // Ensure the chosen voice is persisted for the remainder of the session
+            // Ensure the chosen voice is persisted for future sessions
             try {
                 if (!storedVoiceURI && voices[selectedIndex]) {
-                    sessionStorage.setItem(SELECTED_VOICE_STORAGE_KEY, voices[selectedIndex].voiceURI);
+                    localStorage.setItem(SELECTED_VOICE_STORAGE_KEY, voices[selectedIndex].voiceURI);
                 }
             } catch (persistError) {
-                console.warn('Could not persist default selected voice in sessionStorage:', persistError);
+                console.warn('Could not persist selected voice in localStorage:', persistError);
             }
 
             console.log('Voices loaded:', voices.length, 'Selected voice:', voices[selectedIndex]?.name);
@@ -3841,6 +3850,7 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
         function saveToolSettings() {
             try {
                 const vrmVersionDropdown = document.getElementById('vrm-version-dropdown');
+                const voiceDropdown = document.getElementById('voice-dropdown');
                 const settings = {
                     userName: userNameInput.value,
                     assistantName: assistantNameInput.value,
@@ -3858,6 +3868,7 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
                     ttsEndpoint: ttsEndpointInput.value, // Save TTS endpoint
                     ttsModel: ttsModelDropdown.value, // Save TTS model
                     ttsVoice: ttsVoiceDropdown.value, // Save TTS voice
+                    browserVoiceURI: voiceDropdown && voices[voiceDropdown.value] ? voices[voiceDropdown.value].voiceURI : null, // Save browser voice
                     vrmVersion: vrmVersionDropdown ? vrmVersionDropdown.value : '1.0' // Save VRM version selection
                 };
                 localStorage.setItem('toolSettings', JSON.stringify(settings));
@@ -3950,6 +3961,15 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
                     if (settings.vrmVersion !== undefined && vrmVersionDropdown) {
                         vrmVersionDropdown.value = settings.vrmVersion;
                         vrmVersion = settings.vrmVersion; // Update the global variable
+                    }
+                    
+                    // Restore browser voice selection (must be done after voices are loaded)
+                    if (settings.browserVoiceURI !== undefined && settings.browserVoiceURI) {
+                        try {
+                            localStorage.setItem(SELECTED_VOICE_STORAGE_KEY, settings.browserVoiceURI);
+                        } catch (e) {
+                            console.warn('Could not restore browser voice URI:', e);
+                        }
                     }
                     
                     // If OpenAI-compatible TTS is selected, fetch available voices
