@@ -4574,6 +4574,7 @@ function saveWAVFile(wavBlob) {
                     // Note: fetchOpenAIResponse will add the message to chat history
                     console.log('Calling fetchOpenAIResponse with transcribed text:', transcribedText); // Debug log
                     fetchOpenAIResponse(transcribedText);
+                    userInput.value = ''; // Clear input field after submission
                 } else {
                     // Response format is unexpected - log the full response for debugging
                     console.error('Unexpected response format - no text field found:', data);
