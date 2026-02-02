@@ -851,6 +851,8 @@
         const sendBtn = document.getElementById('send-btn');
         const sttBtn = document.getElementById('stt-btn');
         const philosopherBtn = document.getElementById('philosopher-btn');
+        let voices = []; // Browser voices array
+        const SELECTED_VOICE_STORAGE_KEY = 'selectedVoiceURI'; // Persist selected voice across browser sessions
 
         // Helper function to get settings (must be defined early)
         function getSetting(key, defaultValue = '') {
@@ -1206,7 +1208,23 @@
         let vrmClock;
         let lovePoseTimeoutId = null;
         let isSpeaking = false;
+        let isMuted = false; // TTS mute flag
         let lovePoseWeight = 0;
+        // TTS and lip sync variables
+        let ttsLipSyncIntervalId = null; // Interval used by SpeechSynthesis fallback
+        let ttsRafId = 0; // requestAnimationFrame id for lip sync
+        let ttsCleanupFns = []; // Cleanup functions for TTS
+        let ttsAbortController = null; // AbortController for cancelling TTS requests
+        let ttsGeneration = 0; // Generation token for TTS requests
+        let ttsStreamActive = false; // Tracks if TTS stream is active
+        let ttsAnalyserNode = null; // Shared analyser used for PCM16 streaming lip sync
+        let ttsAnalyserLoopActive = false; // Tracks whether analyser-driven lip sync loop is running
+        // Microsoft TTS lip sync variables (smooth amplitude-based approach)
+        let microsoftTtsRafId = 0; // requestAnimationFrame id for Microsoft TTS lip sync loop
+        let microsoftTtsTargetAmplitude = 0; // Target amplitude for smooth lip sync (0-1)
+        let microsoftTtsSmoothedAmplitude = 0; // Current smoothed amplitude value
+        let microsoftTtsLastBoundaryTs = 0; // Timestamp of last boundary event
+        let microsoftTtsIsActive = false; // Flag to track if Microsoft TTS lip sync is active
         let targetLovePoseWeight = 0;
         let thinkPoseTimeoutId = null;
         let thinkPoseWeight = 0;
@@ -1291,12 +1309,28 @@
         let audioContextResumed = false;
         
         async function resumeAudioContextOnce() {
-            if (audioContextResumed) return;
+            if (audioContextResumed) {
+                // Even if already called, ensure TTS audio context is resumed
+                if (window.__ttsAudioContext && window.__ttsAudioContext.state === 'suspended') {
+                    try {
+                        await window.__ttsAudioContext.resume();
+                        console.log('✅ TTS Audio context resumed');
+                    } catch (e) {
+                        console.warn('⚠️ Failed to resume TTS audio context:', e);
+                    }
+                }
+                return;
+            }
             audioContextResumed = true;
             try {
                 if (window.__opus?.audioCtx && window.__opus.audioCtx.state === 'suspended') {
                     await window.__opus.resume();
                     console.log('✅ Audio context resumed (Opus decoder)');
+                }
+                // Also resume TTS audio context if it exists
+                if (window.__ttsAudioContext && window.__ttsAudioContext.state === 'suspended') {
+                    await window.__ttsAudioContext.resume();
+                    console.log('✅ TTS Audio context resumed');
                 }
             } catch (e) {
                 console.warn('⚠️ Failed to resume audio context:', e);
@@ -2729,8 +2763,33 @@
             }
         }
 
-        // Text to Speech (simplified for mobile)
-        let isMuted = false;
+        // Text to Speech with lip sync support
+        function removeEmojis(text) {
+            const emojiRegex = /[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F700}-\u{1F77F}\u{1F780}-\u{1F7FF}\u{1F800}-\u{1F8FF}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{2300}-\u{23FF}\u{2B50}\u{2B55}\u{231A}\u{231B}\u{2328}\u{23CF}\u{23E9}-\u{23FF}\u{24C2}\u{25AA}-\u{25AB}\u{25B6}\u{25C0}\u{25FB}-\u{25FE}\u{2934}-\u{2935}\u{2B05}-\u{2B07}\u{2B1B}-\u{2B1C}\u{3030}\u{303D}\u{3297}\u{3299}\u{FE0F}\u{200D}]/gu;
+            return text.replace(emojiRegex, '');
+        }
+
+        function stripBracketedContent(text) {
+            const patterns = [/\([^()]*\)/g, /\[[^\[\]]*\]/g, /\{[^{}]*\}/g, /<[^<>]*>/g];
+            let prev = null;
+            let curr = String(text);
+            while (curr !== prev) {
+                prev = curr;
+                for (const re of patterns) { curr = curr.replace(re, ''); }
+            }
+            return curr;
+        }
+
+        function sanitizeTTS(text) {
+            if (!text) return text;
+            let t = String(text);
+            t = removeEmojis(t);
+            t = stripBracketedContent(t);
+            t = t.replace(/\*/g, '');
+            t = t.replace(/[^\w\s\.,!\?;:'"\-]/g, '');
+            t = t.replace(/\s+/g, ' ').trim();
+            return t;
+        }
 
         function textToSpeech(text) {
             if (!text) {
@@ -2743,19 +2802,165 @@
                 return;
             }
 
-            try {
-                speechSynthesis.cancel();
+            // Sanitize text
+            text = sanitizeTTS(text);
+
+            // Cancel any ongoing speech and active lip-sync loops
+            try { speechSynthesis.cancel(); } catch (_) {}
+            try { if (ttsLipSyncIntervalId) { clearInterval(ttsLipSyncIntervalId); ttsLipSyncIntervalId = null; } } catch (_) {}
+            try { if (ttsRafId) { cancelAnimationFrame(ttsRafId); ttsRafId = 0; } } catch (_) {}
+            try { ttsCleanupFns.forEach(fn => { try { fn(); } catch(_){} }); ttsCleanupFns = []; } catch (_) {}
+            try { stopChatterboxLipSync(true); } catch (_) {}
+            try { if (ttsAbortController) { ttsAbortController.abort(); ttsAbortController = null; } } catch (_) {}
+            // Stop Microsoft TTS lip sync if active
+            try { 
+                microsoftTtsIsActive = false;
+                if (microsoftTtsRafId) { 
+                    cancelAnimationFrame(microsoftTtsRafId); 
+                    microsoftTtsRafId = 0; 
+                }
             } catch (_) {}
 
+            // Check TTS service selection
+            const ttsServiceMicrosoft = document.getElementById('settings-tts-service-microsoft');
+            const ttsServiceOpenAI = document.getElementById('settings-tts-service-openai');
+            const useOpenAITTS = (ttsServiceOpenAI && ttsServiceOpenAI.checked) || 
+                                 (getSetting('ttsService', 'microsoft') === 'openai');
+            
+            if (useOpenAITTS) {
+                speakWithOpenAITTS(text);
+                return;
+            }
+
+            // Microsoft TTS path
             const utterance = new SpeechSynthesisUtterance(text);
+            const microsoftVoiceDropdown = document.getElementById('settings-microsoft-voice');
+            
+            // Get voices if not already loaded
+            if (voices.length === 0) {
+                voices = speechSynthesis.getVoices();
+            }
+            
+            // Select voice from dropdown
+            if (microsoftVoiceDropdown && microsoftVoiceDropdown.value !== '') {
+                const selectedVoiceIndex = parseInt(microsoftVoiceDropdown.value);
+                if (!isNaN(selectedVoiceIndex) && voices[selectedVoiceIndex]) {
+                    utterance.voice = voices[selectedVoiceIndex];
+                    console.log('Using voice:', voices[selectedVoiceIndex].name);
+                    // Persist selection
+                    try {
+                        storage.setItem(SELECTED_VOICE_STORAGE_KEY, voices[selectedVoiceIndex].voiceURI);
+                    } catch (e) {
+                        console.warn('Could not save voice selection:', e);
+                    }
+                }
+            } else if (voices.length > 0) {
+                // Fallback to first available voice
+                utterance.voice = voices[0];
+                console.log('Using default voice:', voices[0].name);
+            }
+
+            const mouthOpenY = "ParamMouthOpenY";
+            
+            // Start smooth amplitude-based lip sync for Microsoft TTS
+            function startMicrosoftTtsLipSync() {
+                if (microsoftTtsRafId) return;
+                
+                microsoftTtsIsActive = true;
+                microsoftTtsSmoothedAmplitude = 0;
+                microsoftTtsTargetAmplitude = 0.3;
+                microsoftTtsLastBoundaryTs = performance.now();
+                
+                const attack = 0.6;
+                const release = 0.15;
+                const threshold = 0.05;
+                const boundaryDecayRate = 0.08;
+                const boundaryDecayDelay = 50;
+                
+                const step = () => {
+                    if (!microsoftTtsIsActive || !isSpeaking) {
+                        microsoftTtsRafId = 0;
+                        microsoftTtsSmoothedAmplitude = 0;
+                        if (live2dModel) {
+                            live2dModel.internalModel.coreModel.setParameterValueById(mouthOpenY, 0);
+                        }
+                        if (vrmModel && getSetting('avatarMode', 'live2d') === 'vrm') {
+                            animateVRMLipSync(0);
+                        }
+                        return;
+                    }
+                    
+                    const now = performance.now();
+                    const timeSinceBoundary = now - microsoftTtsLastBoundaryTs;
+                    
+                    if (timeSinceBoundary > boundaryDecayDelay) {
+                        const decayFactor = Math.min(1.0, (timeSinceBoundary - boundaryDecayDelay) / 200);
+                        microsoftTtsTargetAmplitude = Math.max(0, microsoftTtsTargetAmplitude - (boundaryDecayRate * decayFactor));
+                    }
+                    
+                    if (microsoftTtsTargetAmplitude > microsoftTtsSmoothedAmplitude) {
+                        microsoftTtsSmoothedAmplitude += (microsoftTtsTargetAmplitude - microsoftTtsSmoothedAmplitude) * attack;
+                    } else {
+                        microsoftTtsSmoothedAmplitude += (microsoftTtsTargetAmplitude - microsoftTtsSmoothedAmplitude) * release;
+                    }
+                    
+                    const scaled = microsoftTtsSmoothedAmplitude <= threshold ? 0 : Math.min(1, (microsoftTtsSmoothedAmplitude - threshold) * 5.5);
+                    
+                    if (live2dModel) {
+                        live2dModel.internalModel.coreModel.setParameterValueById(mouthOpenY, scaled);
+                    }
+                    
+                    if (vrmModel && getSetting('avatarMode', 'live2d') === 'vrm') {
+                        animateVRMLipSync(scaled);
+                    }
+                    
+                    if (isSpeaking && microsoftTtsIsActive) {
+                        microsoftTtsRafId = requestAnimationFrame(step);
+                    } else {
+                        microsoftTtsRafId = 0;
+                    }
+                };
+                
+                step();
+            }
+            
             utterance.onstart = function() {
                 console.log('Speech started');
                 isSpeaking = true;
+                microsoftTtsLastBoundaryTs = performance.now();
+                startMicrosoftTtsLipSync();
+                if (vrmModel && getSetting('avatarMode', 'live2d') === 'vrm') {
+                    animateVRMLipSync(0.8);
+                }
+            };
+
+            utterance.onboundary = function(event) {
+                const now = performance.now();
+                const timeSinceLastBoundary = now - microsoftTtsLastBoundaryTs;
+                microsoftTtsLastBoundaryTs = now;
+                const amplitudeBoost = Math.min(0.35, 0.15 + (timeSinceLastBoundary / 1000) * 0.08);
+                microsoftTtsTargetAmplitude = Math.min(0.85, microsoftTtsTargetAmplitude + amplitudeBoost);
             };
 
             utterance.onend = function() {
                 console.log('Speech ended');
                 isSpeaking = false;
+                microsoftTtsIsActive = false;
+                if (microsoftTtsRafId) {
+                    try { cancelAnimationFrame(microsoftTtsRafId); } catch(_){}
+                    microsoftTtsRafId = 0;
+                }
+                if (ttsLipSyncIntervalId) { try { clearInterval(ttsLipSyncIntervalId); } catch(_){} ttsLipSyncIntervalId = null; }
+                if (ttsRafId) { try { cancelAnimationFrame(ttsRafId); } catch(_){} ttsRafId = 0; }
+                try { ttsCleanupFns.forEach(fn => { try { fn(); } catch(_){} }); } catch(_){}
+                ttsCleanupFns = [];
+
+                if (live2dModel) {
+                    live2dModel.internalModel.coreModel.setParameterValueById(mouthOpenY, 0);
+                }
+                if (vrmModel && getSetting('avatarMode', 'live2d') === 'vrm') {
+                    animateVRMLipSync(0.0);
+                }
             };
 
             utterance.onerror = function(event) {
@@ -2769,6 +2974,1118 @@
                 speechSynthesis.speak(utterance);
             } catch (error) {
                 console.error('Speech synthesis error:', error);
+            }
+        }
+
+        // Lip sync functions for OpenAI TTS
+        let ttsAnalyserGainNode = null;
+        let ttsAnalyserDataArray = null;
+        let ttsAnalyserStopTimer = null;
+        let ttsPcmActiveSources = 0;
+
+        function ensureChatterboxLipSyncGraph() {
+            if (!window.__opus) { window.__opus = {}; }
+            let ctx = window.__opus.audioCtx;
+            if (!ctx) {
+                ctx = new (window.AudioContext || window.webkitAudioContext)();
+                window.__opus.audioCtx = ctx;
+                window.__opus.playhead = 0;
+            }
+
+            if (!ttsAnalyserNode || ttsAnalyserNode.context !== ctx) {
+                try { if (ttsAnalyserNode) ttsAnalyserNode.disconnect(); } catch (_) {}
+                try { if (ttsAnalyserGainNode) ttsAnalyserGainNode.disconnect(); } catch (_) {}
+                ttsAnalyserNode = ctx.createAnalyser();
+                ttsAnalyserNode.fftSize = 1024;
+                ttsAnalyserNode.smoothingTimeConstant = 0.7;
+                ttsAnalyserGainNode = ctx.createGain();
+                ttsAnalyserGainNode.gain.value = 1.0;
+                ttsAnalyserNode.connect(ttsAnalyserGainNode);
+                ttsAnalyserGainNode.connect(ctx.destination);
+            }
+
+            if (!ttsAnalyserDataArray || ttsAnalyserDataArray.length !== ttsAnalyserNode.fftSize) {
+                ttsAnalyserDataArray = new Uint8Array(ttsAnalyserNode.fftSize);
+            }
+
+            if (ttsAnalyserStopTimer) {
+                clearTimeout(ttsAnalyserStopTimer);
+                ttsAnalyserStopTimer = null;
+            }
+
+            return window.__opus.audioCtx;
+        }
+
+        function startLipSyncFromAnalyserNode() {
+            try {
+                if (!ttsAnalyserNode) return;
+
+                if (!ttsAnalyserDataArray || ttsAnalyserDataArray.length !== ttsAnalyserNode.fftSize) {
+                    ttsAnalyserDataArray = new Uint8Array(ttsAnalyserNode.fftSize);
+                }
+
+                if (ttsAnalyserLoopActive) return;
+
+                let smoothed = 0;
+                const attack = 0.6;
+                const release = 0.15;
+                const threshold = 0.03;
+
+                const step = () => {
+                    if (!ttsAnalyserNode) {
+                        ttsAnalyserLoopActive = false;
+                        ttsRafId = 0;
+                        return;
+                    }
+
+                    ttsAnalyserNode.getByteTimeDomainData(ttsAnalyserDataArray);
+                    let sum = 0;
+                    for (let i = 0; i < ttsAnalyserDataArray.length; i++) {
+                        const v = (ttsAnalyserDataArray[i] - 128) / 128;
+                        sum += v * v;
+                    }
+
+                    const rms = Math.sqrt(sum / ttsAnalyserDataArray.length);
+                    if (rms > smoothed) {
+                        smoothed += (rms - smoothed) * attack;
+                    } else {
+                        smoothed += (rms - smoothed) * release;
+                    }
+
+                    const scaled = smoothed <= threshold ? 0 : Math.min(1, (smoothed - threshold) * 6.0);
+
+                    if (live2dModel) {
+                        live2dModel.internalModel.coreModel.setParameterValueById('ParamMouthOpenY', scaled);
+                    }
+
+                    if (vrmModel && getSetting('avatarMode', 'live2d') === 'vrm') {
+                        animateVRMLipSync(scaled);
+                    }
+
+                    if (ttsStreamActive || ttsPcmActiveSources > 0 || smoothed > 0.0005) {
+                        ttsRafId = requestAnimationFrame(step);
+                    } else {
+                        ttsRafId = 0;
+                        ttsAnalyserLoopActive = false;
+                        if (live2dModel) {
+                            live2dModel.internalModel.coreModel.setParameterValueById('ParamMouthOpenY', 0);
+                        }
+                        if (vrmModel && getSetting('avatarMode', 'live2d') === 'vrm') {
+                            animateVRMLipSync(0);
+                        }
+                    }
+                };
+
+                ttsAnalyserLoopActive = true;
+                step();
+            } catch (e) {
+                console.warn('startLipSyncFromAnalyserNode failed:', e);
+            }
+        }
+
+        function stopChatterboxLipSync(immediate = false) {
+            if (immediate) {
+                ttsStreamActive = false;
+                ttsPcmActiveSources = 0;
+                try { if (window.__opus && typeof window.__opus.playhead !== 'undefined') { window.__opus.playhead = 0; } } catch(_) {}
+                if (ttsAnalyserStopTimer) {
+                    clearTimeout(ttsAnalyserStopTimer);
+                    ttsAnalyserStopTimer = null;
+                }
+                if (ttsRafId) {
+                    try { cancelAnimationFrame(ttsRafId); } catch (_) {}
+                    ttsRafId = 0;
+                }
+                ttsAnalyserLoopActive = false;
+                if (live2dModel) {
+                    live2dModel.internalModel.coreModel.setParameterValueById('ParamMouthOpenY', 0);
+                }
+                if (vrmModel && getSetting('avatarMode', 'live2d') === 'vrm') {
+                    animateVRMLipSync(0);
+                }
+                return;
+            }
+
+            if (ttsAnalyserStopTimer) {
+                clearTimeout(ttsAnalyserStopTimer);
+            }
+
+            ttsAnalyserStopTimer = setTimeout(() => {
+                if (ttsStreamActive || ttsPcmActiveSources > 0) {
+                    return;
+                }
+                stopChatterboxLipSync(true);
+            }, 250);
+        }
+
+        // Parse Server-Sent Events stream for TTS
+        async function streamSSE(response, { onInit, onDelta, onDone, onError, onInfo }) {
+            const reader = response.body.getReader(); // Get stream reader
+            const decoder = new TextDecoder(); // Create text decoder that tolerates chunk splits
+            let buf = ''; // Buffer for incomplete SSE events
+            let chunkCount = 0; // Debug: count chunks received
+            
+            console.log('📡 Starting SSE stream parsing'); // Debug log
+            
+            try { // Guard SSE parsing
+                // Check first chunk to see if it's actually binary audio data
+                const firstChunk = await reader.read();
+                if (firstChunk.done) {
+                    console.log('📡 SSE stream ended immediately (empty)');
+                    onDone?.();
+                    return;
+                }
+                
+                // Check if first chunk is binary audio (RIFF header for WAV, or other audio formats)
+                const firstBytes = new Uint8Array(firstChunk.value);
+                const isBinaryAudio = firstBytes.length >= 4 && (
+                    (firstBytes[0] === 0x52 && firstBytes[1] === 0x49 && firstBytes[2] === 0x46 && firstBytes[3] === 0x46) || // RIFF (WAV)
+                    (firstBytes[0] === 0xFF && firstBytes[1] === 0xFB) || // MP3
+                    (firstBytes[0] === 0x4F && firstBytes[1] === 0x67 && firstBytes[2] === 0x67 && firstBytes[3] === 0x53) || // OggS
+                    (firstBytes[0] === 0x1A && firstBytes[1] === 0x45 && firstBytes[2] === 0xDF && firstBytes[3] === 0xA3) // WebM/EBML
+                );
+                
+                if (isBinaryAudio) {
+                    console.log('📡 Detected binary audio in SSE stream, collecting all chunks');
+                    // This is actually binary audio, not SSE - collect all chunks
+                    const audioChunks = [firstChunk.value];
+                    while (true) {
+                        const { value, done } = await reader.read();
+                        if (done) break;
+                        audioChunks.push(value);
+                    }
+                    // Create blob from all chunks
+                    const audioBlob = new Blob(audioChunks);
+                    console.log('📡 Collected binary audio blob, size:', audioBlob.size, 'bytes');
+                    // Attach blob to error so catch handler can use it
+                    const error = new Error('BINARY_AUDIO_IN_SSE_STREAM');
+                    error.audioBlob = audioBlob; // Attach blob to error
+                    throw error;
+                }
+                
+                // It's actually text/SSE, process normally
+                chunkCount = 1;
+                const decoded = decoder.decode(firstChunk.value, { stream: true });
+                console.log('📡 Received SSE chunk #' + chunkCount + ', length:', decoded.length, 'preview:', decoded.substring(0, 200)); // Debug log
+                buf += decoded; // Add to buffer
+                
+                while (true) { // Loop until stream ends
+                    const { value, done } = await reader.read(); // Read next chunk
+                    if (done) {
+                        console.log('📡 SSE stream ended, total chunks:', chunkCount, 'buffer length:', buf.length); // Debug log
+                        break; // Exit when stream completes
+                    }
+                    chunkCount++; // Increment chunk counter
+                    const decoded = decoder.decode(value, { stream: true }); // Decode partial chunk
+                    console.log('📡 Received SSE chunk #' + chunkCount + ', length:', decoded.length, 'preview:', decoded.substring(0, 200)); // Debug log
+                    buf += decoded; // Add to buffer
+                    
+                    // SSE events end with a blank line (\n\n)
+                    let idx; // Index of double newline
+                    let eventCount = 0; // Debug: count events found
+                    while ((idx = buf.indexOf('\n\n')) !== -1) { // Find complete SSE event
+                        eventCount++; // Increment event counter
+                        const rawEvent = buf.slice(0, idx); // Extract complete event
+                        console.log('📡 Found SSE event #' + eventCount + ', length:', rawEvent.length, 'content:', rawEvent.substring(0, 300)); // Debug log
+                        buf = buf.slice(idx + 2); // Remove processed event from buffer
+                        
+                        // Ignore comments/heartbeats starting with ":" lines
+                        const lines = rawEvent.split(/\r?\n/).filter(l => !l.startsWith(':')); // Split by newline and filter comments
+                        
+                        // Concatenate multiple data: lines (valid SSE format)
+                        let eventName = null; // Event type from event: line
+                        const dataParts = []; // Array to collect data: lines
+                        for (const line of lines) { // Process each line of the event
+                            if (line.startsWith('event:')) { // Check for event type declaration
+                                eventName = line.slice(6).trim(); // Extract event name
+                            } else if (line.startsWith('data:')) { // Check for data line
+                                dataParts.push(line.slice(5).trim()); // Extract data (remove 'data:' prefix)
+                            } // End data line check
+                        } // End line processing loop
+                        
+                        if (dataParts.length === 0) continue; // Skip events with no data
+                        const dataStr = dataParts.join('\n'); // Join multiple data lines
+                        if (dataStr === '[DONE]') { // Check for OpenAI-style completion
+                            onDone?.(); // Call completion handler
+                            return; // Exit parser
+                        } // End [DONE] check
+                        
+                        // Expect JSON object per Chatterbox docs
+                        let evt; // Parsed event object
+                        try { // Guard JSON parsing
+                            evt = JSON.parse(dataStr); // Parse JSON from data string
+                        } catch (parseError) { // Catch JSON parse errors
+                            console.warn('⚠️ Failed to parse SSE JSON:', parseError, 'Data:', dataStr.substring(0, 100)); // Debug log
+                            continue; // Skip invalid JSON events
+                        } // End JSON parse try/catch
+                        
+                        // Debug: Log all events to understand the format
+                        console.log('🎵 SSE event received, type:', evt?.type, 'has audio:', !!evt?.audio, 'keys:', Object.keys(evt || {})); // Debug log
+                        
+                        // OpenAI-compatible naming from Chatterbox docs:
+                        //   speech.audio.info   (metadata: sample_rate, channels, bits_per_sample)
+                        //   speech.audio.init   (base64 WebM init segment)
+                        //   speech.audio.delta  (base64 in evt.audio)
+                        //   speech.audio.done
+                        if (evt?.type === 'speech.audio.info') { // Check for metadata/info event
+                            console.log('🎵 Received audio info:', evt); // Log metadata
+                            onInfo?.(evt); // Pass metadata to handler
+                        } else if (evt?.type === 'speech.audio.init' && evt?.audio) { // Check for init segment event
+                            console.log('🎵 Received init event, size:', evt.audio.length); // Log init event
+                            onInit?.(evt.audio); // Pass base64 init segment to handler
+                        } else if (evt?.type === 'speech.audio.delta' && evt?.audio) { // Check for audio delta event
+                            console.log('🎵 Received delta event, audio length:', evt.audio.length); // Debug log
+                            onDelta?.(evt.audio); // Pass base64 string to handler
+                        } else if (evt?.type === 'speech.audio.done') { // Check for completion event
+                            console.log('🎵 Received done event'); // Log completion
+                            onDone?.(evt.usage); // Call completion handler with usage info
+                            return; // Exit parser
+                        } else { // Unknown event type
+                            console.warn('🎵 Unknown SSE event type:', evt?.type, 'Full event:', evt); // Log unknown event
+                        } // End event type check
+                    } // End event parsing loop
+                } // End stream reading loop
+                onDone?.(); // Call completion handler when stream ends
+            } catch (e) { // Catch SSE parsing errors
+                onError?.(e); // Call error handler
+            } // End try/catch
+        } // End streamSSE
+
+        // Play PCM16 delta chunk using Web Audio API
+        function playPcm16Delta(base64, sampleRate = 24000, channels = 1) {
+            let bin; // Declare bin variable
+            try {
+                bin = atob(base64); // Decode base64 to binary string
+            } catch (decodeError) {
+                console.error('❌ Failed to decode base64 PCM16 chunk:', decodeError);
+                return;
+            }
+            
+            const totalSamples = bin.length / 2; // Calculate total number of int16 samples across all channels (2 bytes/sample)
+            if (!Number.isFinite(totalSamples) || totalSamples <= 0) {
+                console.warn('⚠️ Received empty PCM16 chunk, bin length:', bin.length);
+                return;
+            }
+            console.log('🔊 Decoding PCM16 chunk:', totalSamples, 'samples,', sampleRate, 'Hz,', channels, 'channels'); // Debug log
+
+            const i16 = new Int16Array(totalSamples); // Create Int16Array for signed 16-bit samples
+            
+            // Convert little-endian bytes to int16 samples
+            for (let i = 0, o = 0; i < totalSamples; i++, o += 2) { // Loop through samples (2 bytes each)
+                // little-endian 16-bit signed conversion
+                i16[i] = (bin.charCodeAt(o) | (bin.charCodeAt(o + 1) << 8)); // Combine bytes (little-endian)
+            } // End byte conversion loop
+
+            // Convert Int16 to Float32 [-1, 1] range
+            const f32 = new Float32Array(totalSamples); // Create Float32Array for normalized samples
+            for (let i = 0; i < totalSamples; i++) { // Loop through samples
+                f32[i] = Math.max(-1, Math.min(1, i16[i] / 32768)); // Normalize to [-1, 1] range and clamp
+            } // End normalization loop
+
+            // Reuse existing AudioContext and playhead scheduling pattern
+            const ctx = ensureChatterboxLipSyncGraph(); // Prepare shared audio context and analyser chain
+            if (ctx.state === 'suspended') { // Resume context if autoplay policies suspended it
+                try { ctx.resume(); } catch (_) {} // Ignore resume errors (will resume on user gesture)
+            }
+
+            const safeChannels = Math.max(1, channels | 0); // Ensure channel count is a positive integer
+            const framesPerChannel = Math.floor(totalSamples / safeChannels); // Sample frames available for each channel
+            if (framesPerChannel <= 0) {
+                console.warn('⚠️ PCM16 chunk shorter than declared channel count, skipping playback');
+                return;
+            }
+            const trailingSamples = totalSamples - framesPerChannel * safeChannels;
+            if (trailingSamples !== 0) {
+                console.warn('⚠️ Dropping', trailingSamples, 'sample(s) that do not fit evenly across', safeChannels, 'channels');
+            }
+            const buf = ctx.createBuffer(safeChannels, framesPerChannel, sampleRate); // Create audio buffer with specified channels, length, and sample rate
+
+            // Set channel data from decoded PCM
+            if (safeChannels === 1) { // If mono channel
+                const channelData = buf.getChannelData(0);
+                channelData.set(f32.subarray(0, framesPerChannel)); // Set single channel data
+            } else { // If multi-channel (stereo or more)
+                // Split interleaved samples into channel arrays
+                for (let ch = 0; ch < safeChannels; ch++) { // Loop through each channel
+                    const channelData = buf.getChannelData(ch); // Reference channel buffer directly
+                    for (let i = 0; i < framesPerChannel; i++) { // Loop through samples in channel
+                        channelData[i] = f32[i * safeChannels + ch]; // Extract interleaved sample for this channel
+                    } // End sample extraction loop
+                } // End channel loop
+            } // End channel data assignment
+
+            // Create and schedule audio source (same pattern as existing schedule function)
+            const src = ctx.createBufferSource(); // Create buffer source node
+            src.buffer = buf; // Set decoded buffer
+            if (ttsAnalyserNode) { // Route through analyser when available for lip sync
+                src.connect(ttsAnalyserNode);
+            } else {
+                src.connect(ctx.destination); // Fallback directly to destination if analyser missing
+            }
+
+            ttsPcmActiveSources += 1; // Track active sources so we know when playback has finished
+            const handleEnded = () => { // Cleanup when buffer playback completes
+                if (src) {
+                    try { src.removeEventListener('ended', handleEnded); } catch (_) {}
+                }
+                if (ttsPcmActiveSources > 0) {
+                    ttsPcmActiveSources -= 1;
+                }
+                if (ttsPcmActiveSources === 0) { // Schedule mouth close once final buffer finishes
+                    stopChatterboxLipSync(false);
+                }
+            };
+            src.addEventListener('ended', handleEnded, { once: true }); // Ensure cleanup runs only once
+
+            // Ensure we can immediately stop scheduled sources on interruption
+            ttsCleanupFns.push(() => {
+                try { src.removeEventListener('ended', handleEnded); } catch(_) {}
+                try { src.stop(0); } catch(_) {}
+                try { src.disconnect(); } catch(_) {}
+            });
+
+            // Keep the same playhead logic (reuse from existing scheduler)
+            window.__opus.playhead = Math.max(ctx.currentTime, window.__opus.playhead || 0); // Calculate start time with playhead overlap
+            src.start(window.__opus.playhead); // Schedule playback at playhead position
+            window.__opus.playhead += buf.duration - 0.02; // Update playhead with 20ms overlap to hide seams
+            
+            console.log('🔊 Scheduled PCM16 chunk:', framesPerChannel, 'frames per channel (', totalSamples, 'total samples ),', sampleRate, 'Hz,', safeChannels, 'channels, duration:', buf.duration.toFixed(3), 's'); // Log playback info
+        } // End playPcm16Delta
+
+        // OpenAI-compatible TTS function
+        async function speakWithOpenAITTS(text) {
+            let localGen = 0;
+            let localController = null;
+            try {
+                if (!text) return;
+                
+                text = sanitizeTTS(text);
+                
+                const ttsEndpointInput = document.getElementById('settings-tts-endpoint');
+                if (!ttsEndpointInput || !ttsEndpointInput.value || !ttsEndpointInput.value.trim()) {
+                    console.error('TTS endpoint not configured');
+                    textToSpeech(text); // Fallback to browser TTS
+                    return;
+                }
+                
+                const ttsEndpointBase = ttsEndpointInput.value.trim().replace(/\/$/, '');
+                let baseUrl;
+                try {
+                    const endpointUrl = new URL(ttsEndpointBase);
+                    baseUrl = endpointUrl.origin;
+                } catch (e) {
+                    const match = ttsEndpointBase.match(/^(https?:\/\/[^\/]+)/);
+                    baseUrl = match ? match[1] : ttsEndpointBase.replace(/\/v1$/, '');
+                }
+                
+                const endpoint = `${PROXY_BASE_URL}/v1/proxy/tts/speech?endpoint=${encodeURIComponent(baseUrl)}`;
+                const ttsModelDropdown = document.getElementById('settings-tts-model');
+                const ttsVoiceDropdown = document.getElementById('settings-tts-voice');
+                const modelId = (ttsModelDropdown && ttsModelDropdown.value) ? ttsModelDropdown.value : 'tts-1';
+                const voiceId = (ttsVoiceDropdown && ttsVoiceDropdown.value) ? ttsVoiceDropdown.value : 'alloy';
+
+                const reqBody = {
+                    model: modelId,
+                    voice: voiceId,
+                    input: text,
+                    stream: true
+                };
+
+                const headers = {
+                    'Content-Type': 'application/json',
+                    'Accept': 'text/event-stream'
+                };
+
+                try { if (ttsAbortController) { ttsAbortController.abort(); } } catch (_) {}
+                localController = new AbortController();
+                ttsAbortController = localController;
+                localGen = (++ttsGeneration);
+
+                const res = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: headers,
+                    body: JSON.stringify(reqBody),
+                    signal: localController.signal
+                });
+
+                if (localGen !== ttsGeneration || (localController && localController.signal.aborted)) {
+                    console.log('TTS request cancelled');
+                    stopChatterboxLipSync(true);
+                    return;
+                }
+                
+                if (!res.ok) {
+                    const errText = await res.text().catch(() => '');
+                    console.error('TTS error:', res.status, errText);
+                    stopChatterboxLipSync(true);
+                    textToSpeech(text);
+                    return;
+                }
+                
+                const ct = (res.headers.get('content-type') || '').toLowerCase();
+                const isBinaryAudio = ct.includes('audio/');
+                const isSSE = ct.includes('text/event-stream'); // Check if response is SSE format (Chatterbox/OpenAI streaming)
+                
+                // Check if SSE response actually contains binary audio (content-type mismatch)
+                // Clone the response to peek at first bytes without consuming the stream
+                let actualIsBinaryAudio = isBinaryAudio;
+                if (isSSE && !isBinaryAudio) {
+                    // Peek at the first chunk to see if it's actually binary audio
+                    const responseClone = res.clone();
+                    const reader = responseClone.body.getReader();
+                    const firstChunk = await reader.read();
+                    reader.releaseLock();
+                    
+                    if (!firstChunk.done && firstChunk.value) {
+                        const firstBytes = new Uint8Array(firstChunk.value);
+                        // Check for common audio file signatures
+                        const isBinary = firstBytes.length >= 4 && (
+                            (firstBytes[0] === 0x52 && firstBytes[1] === 0x49 && firstBytes[2] === 0x46 && firstBytes[3] === 0x46) || // RIFF (WAV)
+                            (firstBytes[0] === 0xFF && firstBytes[1] === 0xFB) || // MP3
+                            (firstBytes[0] === 0x4F && firstBytes[1] === 0x67 && firstBytes[2] === 0x67 && firstBytes[3] === 0x53) || // OggS
+                            (firstBytes[0] === 0x1A && firstBytes[1] === 0x45 && firstBytes[2] === 0xDF && firstBytes[3] === 0xA3) // WebM/EBML
+                        );
+                        if (isBinary) {
+                            console.log('🔄 Detected binary audio in SSE response (content-type mismatch), treating as binary audio');
+                            actualIsBinaryAudio = true;
+                        }
+                    }
+                }
+                
+                // Handle binary audio first (even if content-type says SSE but data is binary)
+                if (actualIsBinaryAudio) {
+                    console.log('Received binary audio format:', ct);
+                    stopChatterboxLipSync(true);
+                    
+                    try {
+                        // Ensure audio context is resumed (critical for iOS Safari)
+                        await resumeAudioContextOnce();
+                        
+                        let mimeType = 'audio/mpeg';
+                        if (ct.includes('audio/wav') || ct.includes('audio/wave')) {
+                            mimeType = 'audio/wav';
+                        } else if (ct.includes('audio/webm')) {
+                            mimeType = 'audio/webm';
+                        } else if (ct.includes('audio/ogg')) {
+                            mimeType = 'audio/ogg';
+                        } else if (ct.includes('audio/mp4') || ct.includes('audio/m4a')) {
+                            mimeType = 'audio/mp4';
+                        } else {
+                            // Default to WAV if we detected RIFF header
+                            mimeType = 'audio/wav';
+                        }
+                        
+                        const audioBlob = await res.blob();
+                        const audioUrl = URL.createObjectURL(audioBlob);
+                        const audio = new Audio(audioUrl);
+                        audio.preload = 'auto';
+                        audio.crossOrigin = 'anonymous';
+                        
+                        // iOS Safari fix: Add audio element to DOM (required for some iOS versions)
+                        audio.style.display = 'none';
+                        audio.style.position = 'absolute';
+                        audio.style.width = '1px';
+                        audio.style.height = '1px';
+                        audio.style.opacity = '0';
+                        document.body.appendChild(audio);
+                        
+                        // Cleanup function to remove audio element from DOM
+                        const cleanupAudioElement = () => {
+                            try {
+                                if (audio && audio.parentNode) {
+                                    audio.parentNode.removeChild(audio);
+                                }
+                                URL.revokeObjectURL(audioUrl);
+                            } catch (e) {
+                                console.warn('Error cleaning up audio element:', e);
+                            }
+                        };
+                        
+                        // Update onended handler to stop lip sync when audio ends
+                        audio.onended = () => {
+                            ttsStreamActive = false; // Stop lip sync loop
+                            cleanupAudioElement();
+                            try { if (ttsLipSyncIntervalId) { clearInterval(ttsLipSyncIntervalId); ttsLipSyncIntervalId = null; } } catch(_){}
+                            try { if (ttsRafId) { cancelAnimationFrame(ttsRafId); ttsRafId = 0; } } catch(_){}
+                            try { ttsCleanupFns.forEach(fn => { try { fn(); } catch(_){} }); } catch(_){}
+                            ttsCleanupFns = [];
+                            if (live2dModel) { live2dModel.internalModel.coreModel.setParameterValueById('ParamMouthOpenY', 0); }
+                            if (vrmModel && getSetting('avatarMode', 'live2d') === 'vrm') { animateVRMLipSync(0); }
+                        };
+                        
+                        // iOS Safari fix: Use a single global audio context and check if already connected
+                        let audioContext = window.__ttsAudioContext;
+                        if (!audioContext) {
+                            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                            window.__ttsAudioContext = audioContext;
+                        }
+                        
+                        // iOS Safari fix: Resume audio context if suspended (required for autoplay)
+                        if (audioContext.state === 'suspended') {
+                            try {
+                                await audioContext.resume();
+                                console.log('✅ Audio context resumed for playback');
+                            } catch (resumeError) {
+                                console.warn('⚠️ Could not resume audio context:', resumeError);
+                            }
+                        }
+                        
+                        // iOS Safari fix: Check if audio element already has a source node
+                        // createMediaElementSource can only be called once per element
+                        let source = audio.__mediaElementSource;
+                        if (!source) {
+                            try {
+                                source = audioContext.createMediaElementSource(audio);
+                                audio.__mediaElementSource = source; // Cache the source
+                            } catch (sourceError) {
+                                // If source already exists or can't be created, try to reuse existing
+                                console.warn('Could not create media element source, may already exist:', sourceError);
+                                // Fallback: try to get existing source or create new audio element
+                                if (sourceError.message && sourceError.message.includes('already been connected')) {
+                                    // Create a new audio element if the old one was already connected
+                                    const newAudio = new Audio(audioUrl);
+                                    newAudio.preload = 'auto';
+                                    newAudio.crossOrigin = 'anonymous';
+                                    newAudio.style.display = 'none';
+                                    newAudio.style.position = 'absolute';
+                                    newAudio.style.width = '1px';
+                                    newAudio.style.height = '1px';
+                                    newAudio.style.opacity = '0';
+                                    document.body.appendChild(newAudio);
+                                    
+                                    // Copy event handlers
+                                    newAudio.onended = audio.onended;
+                                    
+                                    // Cleanup old audio
+                                    try {
+                                        if (audio && audio.parentNode) {
+                                            audio.parentNode.removeChild(audio);
+                                        }
+                                    } catch (_) {}
+                                    
+                                    audio = newAudio;
+                                    source = audioContext.createMediaElementSource(audio);
+                                    audio.__mediaElementSource = source;
+                                } else {
+                                    throw sourceError;
+                                }
+                            }
+                        }
+                        
+                        const analyser = audioContext.createAnalyser();
+                        analyser.fftSize = 256;
+                        source.connect(analyser);
+                        analyser.connect(audioContext.destination);
+                        
+                        // Use the analyser for lip sync
+                        ttsAnalyserNode = analyser;
+                        
+                        // Set flag to keep lip sync loop running while audio plays
+                        ttsStreamActive = true;
+                        
+                        // Start lip sync before playing audio
+                        startLipSyncFromAnalyserNode();
+                        
+                        // iOS Safari fix: Play audio with proper error handling
+                        try {
+                            // Set volume to ensure audio plays (iOS Safari sometimes requires this)
+                            audio.volume = 1.0;
+                            
+                            // Play audio and wait for it to start
+                            const playPromise = audio.play();
+                            
+                            if (playPromise !== undefined) {
+                                await playPromise;
+                                console.log('✅ Audio playback started successfully');
+                            }
+                            
+                            console.log('Playing binary audio from TTS service');
+                        } catch (playError) {
+                            console.error('❌ Error playing audio:', playError);
+                            ttsStreamActive = false; // Stop lip sync on error
+                            
+                            // iOS Safari specific: If play fails, it might be due to autoplay policy
+                            // Try to provide user feedback or fallback
+                            if (playError.name === 'NotAllowedError' || playError.name === 'NotSupportedError') {
+                                console.warn('⚠️ Audio playback blocked by browser policy. User interaction may be required.');
+                                // Cleanup and fallback to browser TTS
+                                cleanupAudioElement();
+                                stopChatterboxLipSync(true);
+                                textToSpeech(text);
+                                return;
+                            }
+                            
+                            throw playError; // Re-throw if it's a different error
+                        }
+                        
+                        return;
+                    } catch (audioError) {
+                        console.error('Error playing binary audio:', audioError);
+                        stopChatterboxLipSync(true);
+                        textToSpeech(text);
+                        return;
+                    }
+                } else if (isSSE) {
+                    // Handle SSE format (Chatterbox/PCM streaming) - only if it's actually SSE
+                    console.log('📡 Received SSE format (Chatterbox/PCM) - processing stream'); // Log format detection
+                    
+                    // iOS Safari fix: Ensure audio context is resumed before starting SSE (critical for iOS)
+                    await resumeAudioContextOnce();
+                    
+                    // Prepare analyser-driven lip sync graph for PCM streaming
+                    stopChatterboxLipSync(true); // Reset any previous PCM lip sync loop before starting a new stream
+                    const pcmCtx = ensureChatterboxLipSyncGraph(); // Ensure audio context and analyser exist
+                    console.log('🎵 Audio context state:', pcmCtx.state, 'sampleRate:', pcmCtx.sampleRate); // Debug log
+                    if (pcmCtx.state === 'suspended') { // Resume context if required by autoplay policies
+                        try { 
+                            await pcmCtx.resume(); 
+                            console.log('✅ Audio context resumed for SSE streaming, new state:', pcmCtx.state);
+                        } catch (e) {
+                            console.warn('⚠️ Could not resume audio context, will resume on user gesture:', e);
+                        } // Swallow resume errors; user interaction will resume if needed
+                    } else {
+                        console.log('✅ Audio context already running'); // Log if already active
+                    }
+                    ttsStreamActive = true; // Mark stream active so analyser loop stays alive between chunks
+                    startLipSyncFromAnalyserNode(); // Start analyser-driven lip sync updates
+                    ttsCleanupFns.push(() => { // Ensure cleanup when speech is cancelled elsewhere
+                        try { stopChatterboxLipSync(true); } catch(_) {}
+                        try { if (localController) { localController.abort(); } } catch(_) {}
+                    });
+
+                    if (window.__opus.playhead === undefined) { // Check if playhead exists
+                        window.__opus.playhead = 0; // Initialize playhead to 0
+                    } // End playhead initialization
+                    
+                    // Capture sample_rate and channels from speech.audio.info event
+                    let ttsSampleRate = 24000; // Default sample rate (fallback)
+                    let ttsChannels = 1; // Default channels (mono, fallback)
+                    
+                    // Wire SSE events to PCM16 decoder
+                    try {
+                        await streamSSE(res, { // Start SSE parsing with callbacks
+                            onInfo: (evt) => { // Handle metadata/info event
+                                if (localGen !== ttsGeneration || (localController && localController.signal.aborted)) { return; }
+                                ttsSampleRate = evt.sample_rate || evt.sampleRate || 24000; // Capture sample rate from metadata
+                                ttsChannels = evt.channels || 1; // Capture channel count from metadata
+                                console.log('🎵 PCM16 audio info - sample_rate:', ttsSampleRate, 'channels:', ttsChannels); // Log audio info
+                            }, // End onInfo handler
+                            onInit: (b64) => { // Handle init event (if any - PCM16 may not need init)
+                                if (localGen !== ttsGeneration || (localController && localController.signal.aborted)) { return; }
+                                console.log('🎵 Received init event (PCM16 may not require init)'); // Log init event
+                                // PCM16 typically doesn't need init segment, but handle if provided
+                            }, // End onInit handler
+                            onDelta: (b64) => { // Decode and play each PCM16 delta chunk
+                                if (localGen !== ttsGeneration || (localController && localController.signal.aborted)) { 
+                                    console.log('⚠️ Delta chunk skipped - generation mismatch or aborted');
+                                    return; 
+                                }
+                                if (!b64 || b64.length === 0) {
+                                    console.warn('⚠️ Received empty delta chunk');
+                                    return;
+                                }
+                                console.log('🎵 Processing delta chunk, length:', b64.length, 'sampleRate:', ttsSampleRate, 'channels:', ttsChannels); // Debug log
+                                playPcm16Delta(b64, ttsSampleRate, ttsChannels);
+                            },
+                            onDone: () => { // Handle stream completion
+                                if (localGen !== ttsGeneration || (localController && localController.signal.aborted)) { return; }
+                                console.log('🎵 SSE stream complete (PCM16)'); // Log completion
+                                ttsStreamActive = false; // Mark stream inactive so lip sync can wind down
+                                stopChatterboxLipSync(false); // Allow mouth to close after buffers finish
+                                // Reset playhead for next stream (optional)
+                                // window.__opus.playhead = 0; // Uncomment if you want to reset between streams
+                            }, // End onDone handler
+                            onError: (e) => { // Handle parsing errors
+                                // Skip fallback if this was an intentional abort (cancellation) or if generation token is stale
+                                if (localGen !== ttsGeneration || (e && e.name === 'AbortError') || (localController && localController.signal.aborted)) {
+                                    console.log('🛑 SSE stream cancelled (intentional abort), skipping fallback'); // Log cancellation
+                                    ttsStreamActive = false; // Mark stream inactive on abort
+                                    stopChatterboxLipSync(true); // Immediately stop lip sync
+                                    return; // Exit without fallback
+                                }
+                                console.error('❌ SSE parsing error:', e); // Log error
+                                ttsStreamActive = false; // Mark stream inactive on error
+                                stopChatterboxLipSync(false); // Schedule cleanup for analyser-driven lip sync
+                                textToSpeech(text); // Fall back to browser TTS if error occurs
+                            } // End onError handler
+                        }); // End streamSSE call
+                        return; // Exit after handling SSE stream
+                    } catch (sseError) {
+                        // Check if this is the binary audio in SSE stream error
+                        if (sseError && sseError.message === 'BINARY_AUDIO_IN_SSE_STREAM' && sseError.audioBlob) {
+                        console.log('🔄 Binary audio detected in SSE stream, using collected blob');
+                        // The stream was actually binary audio, use the blob collected in streamSSE
+                        stopChatterboxLipSync(true);
+                        
+                        try {
+                            // Ensure audio context is resumed (critical for iOS Safari)
+                            await resumeAudioContextOnce();
+                            
+                            // Use the blob that was collected in streamSSE
+                            const audioBlob = sseError.audioBlob;
+                            const audioUrl = URL.createObjectURL(audioBlob);
+                            const audio = new Audio(audioUrl);
+                            audio.preload = 'auto';
+                            audio.crossOrigin = 'anonymous';
+                            
+                            // iOS Safari fix: Add audio element to DOM
+                            audio.style.display = 'none';
+                            audio.style.position = 'absolute';
+                            audio.style.width = '1px';
+                            audio.style.height = '1px';
+                            audio.style.opacity = '0';
+                            document.body.appendChild(audio);
+                            
+                            const cleanupAudioElement = () => {
+                                try {
+                                    if (audio && audio.parentNode) {
+                                        audio.parentNode.removeChild(audio);
+                                    }
+                                    URL.revokeObjectURL(audioUrl);
+                                } catch (e) {
+                                    console.warn('Error cleaning up audio element:', e);
+                                }
+                            };
+                            
+                            audio.onended = () => {
+                                cleanupAudioElement();
+                                try { if (ttsLipSyncIntervalId) { clearInterval(ttsLipSyncIntervalId); ttsLipSyncIntervalId = null; } } catch(_){}
+                                try { if (ttsRafId) { cancelAnimationFrame(ttsRafId); ttsRafId = 0; } } catch(_){}
+                                try { ttsCleanupFns.forEach(fn => { try { fn(); } catch(_){} }); } catch(_){}
+                                ttsCleanupFns = [];
+                                if (live2dModel) { live2dModel.internalModel.coreModel.setParameterValueById('ParamMouthOpenY', 0); }
+                                if (vrmModel && getSetting('avatarMode', 'live2d') === 'vrm') { animateVRMLipSync(0); }
+                            };
+                            
+                            // iOS Safari fix: Use global audio context
+                            let audioContext = window.__ttsAudioContext;
+                            if (!audioContext) {
+                                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                                window.__ttsAudioContext = audioContext;
+                            }
+                            
+                            if (audioContext.state === 'suspended') {
+                                try {
+                                    await audioContext.resume();
+                                    console.log('✅ Audio context resumed for playback');
+                                } catch (resumeError) {
+                                    console.warn('⚠️ Could not resume audio context:', resumeError);
+                                }
+                            }
+                            
+                            let source = audio.__mediaElementSource;
+                            if (!source) {
+                                try {
+                                    source = audioContext.createMediaElementSource(audio);
+                                    audio.__mediaElementSource = source;
+                                } catch (sourceError) {
+                                    if (sourceError.message && sourceError.message.includes('already been connected')) {
+                                        const newAudio = new Audio(audioUrl);
+                                        newAudio.preload = 'auto';
+                                        newAudio.crossOrigin = 'anonymous';
+                                        newAudio.style.display = 'none';
+                                        newAudio.style.position = 'absolute';
+                                        newAudio.style.width = '1px';
+                                        newAudio.style.height = '1px';
+                                        newAudio.style.opacity = '0';
+                                        document.body.appendChild(newAudio);
+                                        newAudio.onended = audio.onended;
+                                        try {
+                                            if (audio && audio.parentNode) {
+                                                audio.parentNode.removeChild(audio);
+                                            }
+                                        } catch (_) {}
+                                        audio = newAudio;
+                                        source = audioContext.createMediaElementSource(audio);
+                                        audio.__mediaElementSource = source;
+                                    } else {
+                                        throw sourceError;
+                                    }
+                                }
+                            }
+                            
+                            const analyser = audioContext.createAnalyser();
+                            analyser.fftSize = 256;
+                            source.connect(analyser);
+                            analyser.connect(audioContext.destination);
+                            
+                            ttsAnalyserNode = analyser;
+                            
+                            // Update onended handler to stop lip sync when audio ends
+                            const originalOnEnded = audio.onended;
+                            audio.onended = () => {
+                                ttsStreamActive = false; // Stop lip sync loop
+                                if (originalOnEnded) originalOnEnded();
+                                cleanupAudioElement();
+                                try { if (ttsLipSyncIntervalId) { clearInterval(ttsLipSyncIntervalId); ttsLipSyncIntervalId = null; } } catch(_){}
+                                try { if (ttsRafId) { cancelAnimationFrame(ttsRafId); ttsRafId = 0; } } catch(_){}
+                                try { ttsCleanupFns.forEach(fn => { try { fn(); } catch(_){} }); } catch(_){}
+                                ttsCleanupFns = [];
+                                if (live2dModel) { live2dModel.internalModel.coreModel.setParameterValueById('ParamMouthOpenY', 0); }
+                                if (vrmModel && getSetting('avatarMode', 'live2d') === 'vrm') { animateVRMLipSync(0); }
+                            };
+                            
+                            // Set flag to keep lip sync loop running while audio plays
+                            ttsStreamActive = true;
+                            
+                            // Start lip sync before playing audio
+                            startLipSyncFromAnalyserNode();
+                            
+                            try {
+                                audio.volume = 1.0;
+                                const playPromise = audio.play();
+                                if (playPromise !== undefined) {
+                                    await playPromise;
+                                    console.log('✅ Audio playback started successfully');
+                                }
+                                console.log('Playing binary audio from TTS service (detected in SSE stream)');
+                            } catch (playError) {
+                                console.error('❌ Error playing audio:', playError);
+                                if (playError.name === 'NotAllowedError' || playError.name === 'NotSupportedError') {
+                                    console.warn('⚠️ Audio playback blocked by browser policy');
+                                    cleanupAudioElement();
+                                    stopChatterboxLipSync(true);
+                                    textToSpeech(text);
+                                    return;
+                                }
+                                throw playError;
+                            }
+                            
+                            return;
+                        } catch (audioError) {
+                            console.error('Error playing binary audio from SSE stream:', audioError);
+                            stopChatterboxLipSync(true);
+                            textToSpeech(text);
+                            return;
+                        }
+                    } else {
+                        throw sseError; // Re-throw other errors
+                    }
+                    } // End catch block for SSE errors
+                } else {
+                    // Unknown format - neither SSE nor binary audio
+                    console.warn('⚠️ Unknown TTS response format:', ct, '- falling back to browser TTS'); // Log format mismatch
+                    stopChatterboxLipSync(true); // Reset lip sync state before fallback
+                    textToSpeech(text); // Fall back to browser TTS
+                    return; // Exit early
+                } // End format handling
+            } catch (e) {
+                if (localGen !== ttsGeneration) {
+                    console.log('TTS request superseded');
+                    ttsStreamActive = false;
+                    stopChatterboxLipSync(true);
+                    return;
+                }
+                const isAbortError = (e && (e.name === 'AbortError' || e.message?.includes('aborted'))) || 
+                                    (localController && localController.signal && localController.signal.aborted && localGen === ttsGeneration);
+                if (isAbortError) {
+                    console.log('TTS cancelled');
+                    ttsStreamActive = false;
+                    stopChatterboxLipSync(true);
+                    return;
+                }
+                console.error('TTS failed:', e);
+                ttsStreamActive = false;
+                stopChatterboxLipSync(false);
+                textToSpeech(text);
+            }
+        }
+
+        // Load Microsoft browser voices
+        function loadMicrosoftVoices() {
+            const microsoftVoiceDropdown = document.getElementById('settings-microsoft-voice');
+            if (!microsoftVoiceDropdown) return;
+            
+            voices = speechSynthesis.getVoices();
+            
+            if (voices.length === 0) {
+                console.warn('No voices available yet, waiting for voices to load');
+                // Try again after voices are loaded
+                if (speechSynthesis.onvoiceschanged !== undefined) {
+                    speechSynthesis.onvoiceschanged = loadMicrosoftVoices;
+                }
+                return;
+            }
+            
+            // Read previously selected voice from storage
+            let storedVoiceURI = null;
+            try {
+                storedVoiceURI = storage.getItem(SELECTED_VOICE_STORAGE_KEY);
+            } catch (readError) {
+                console.warn('Could not read selected voice from localStorage:', readError);
+            }
+            
+            microsoftVoiceDropdown.innerHTML = '';
+            
+            let defaultVoiceIndex = 0;
+            
+            voices.forEach((voice, index) => {
+                const option = document.createElement('option');
+                option.value = index;
+                option.textContent = `${voice.name} (${voice.lang})`;
+                
+                // Check if this is the previously selected voice
+                if (storedVoiceURI && voice.voiceURI === storedVoiceURI) {
+                    defaultVoiceIndex = index;
+                }
+                
+                microsoftVoiceDropdown.appendChild(option);
+            });
+            
+            // Set the previously selected voice or default
+            microsoftVoiceDropdown.selectedIndex = defaultVoiceIndex;
+        }
+
+        // Load Microsoft browser voices
+        function loadMicrosoftVoices() {
+            const microsoftVoiceDropdown = document.getElementById('settings-microsoft-voice');
+            if (!microsoftVoiceDropdown) return;
+            
+            voices = speechSynthesis.getVoices();
+            
+            if (voices.length === 0) {
+                console.warn('No voices available yet, waiting for voices to load');
+                // Try again after voices are loaded
+                if (speechSynthesis.onvoiceschanged !== undefined) {
+                    speechSynthesis.onvoiceschanged = loadMicrosoftVoices;
+                }
+                return;
+            }
+            
+            // Read previously selected voice from storage
+            let storedVoiceURI = null;
+            try {
+                storedVoiceURI = storage.getItem(SELECTED_VOICE_STORAGE_KEY);
+            } catch (readError) {
+                console.warn('Could not read selected voice from localStorage:', readError);
+            }
+            
+            microsoftVoiceDropdown.innerHTML = '';
+            
+            let defaultVoiceIndex = 0;
+            
+            voices.forEach((voice, index) => {
+                const option = document.createElement('option');
+                option.value = index;
+                option.textContent = `${voice.name} (${voice.lang})`;
+                microsoftVoiceDropdown.appendChild(option);
+                
+                // Prefer Microsoft Ana Online; otherwise choose first English voice as default
+                if (voice.name === 'Microsoft Ana Online (Natural) - English (United States)') {
+                    defaultVoiceIndex = index;
+                } else if (voice.lang.includes('en-') && defaultVoiceIndex === 0) {
+                    defaultVoiceIndex = index;
+                }
+            });
+            
+            // Determine which voice should be selected
+            let selectedIndex = defaultVoiceIndex;
+            if (storedVoiceURI) {
+                const idx = voices.findIndex(v => v.voiceURI === storedVoiceURI);
+                if (idx !== -1) {
+                    selectedIndex = idx;
+                }
+            }
+            
+            microsoftVoiceDropdown.value = String(selectedIndex);
+            
+            // Persist the selection
+            try {
+                if (!storedVoiceURI && voices[selectedIndex]) {
+                    storage.setItem(SELECTED_VOICE_STORAGE_KEY, voices[selectedIndex].voiceURI);
+                }
+            } catch (saveError) {
+                console.warn('Could not save voice selection:', saveError);
+            }
+            
+            // Add change listener to save selection
+            microsoftVoiceDropdown.addEventListener('change', function() {
+                const selectedVoiceIndex = parseInt(microsoftVoiceDropdown.value);
+                if (!isNaN(selectedVoiceIndex) && voices[selectedVoiceIndex]) {
+                    try {
+                        storage.setItem(SELECTED_VOICE_STORAGE_KEY, voices[selectedVoiceIndex].voiceURI);
+                        saveSettings();
+                    } catch (e) {
+                        console.warn('Could not save voice selection:', e);
+                    }
+                }
+            });
+        }
+
+        // Fetch TTS voices from OpenAI-compatible endpoint
+        async function fetchTtsVoices() {
+            try {
+                const ttsEndpointInput = document.getElementById('settings-tts-endpoint');
+                const endpoint = (ttsEndpointInput && ttsEndpointInput.value && ttsEndpointInput.value.trim()) 
+                    ? ttsEndpointInput.value.trim().replace(/\/$/, '') 
+                    : 'http://localhost:4123/v1';
+                
+                let baseUrl;
+                try {
+                    const endpointUrl = new URL(endpoint);
+                    baseUrl = endpointUrl.origin;
+                } catch (e) {
+                    const match = endpoint.match(/^(https?:\/\/[^\/]+)/);
+                    baseUrl = match ? match[1] : endpoint.replace(/\/v1$/, '');
+                }
+                
+                console.log('Fetching voices through proxy from TTS endpoint:', baseUrl);
+                
+                const proxyUrl = `${PROXY_BASE_URL}/v1/proxy/tts/voices?endpoint=${encodeURIComponent(baseUrl)}`;
+                const response = await fetch(proxyUrl, {
+                    method: 'GET',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                
+                if (!response.ok) {
+                    console.error('Failed to fetch voices');
+                    return;
+                }
+                
+                const responseData = await response.json();
+                let voicesData = responseData;
+                if (responseData && typeof responseData === 'object' && responseData.voices) {
+                    voicesData = responseData.voices;
+                } else if (!Array.isArray(responseData)) {
+                    console.warn('Unexpected voices response format:', responseData);
+                    voicesData = [];
+                }
+                
+                const ttsVoiceDropdown = document.getElementById('settings-tts-voice');
+                if (!ttsVoiceDropdown) return;
+                
+                const storedVoice = getSetting('ttsVoice', '');
+                ttsVoiceDropdown.innerHTML = '';
+                
+                if (Array.isArray(voicesData) && voicesData.length > 0) {
+                    voicesData.forEach(voice => {
+                        const option = document.createElement('option');
+                        const voiceValue = typeof voice === 'string' ? voice : (voice.id || voice.name || voice);
+                        const voiceLabel = typeof voice === 'string' ? voice : (voice.name || voice.id || voice);
+                        option.value = voiceValue;
+                        option.textContent = voiceLabel;
+                        ttsVoiceDropdown.appendChild(option);
+                    });
+                } else {
+                    const defaultVoices = ['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer', 'Empress'];
+                    defaultVoices.forEach(voice => {
+                        const option = document.createElement('option');
+                        option.value = voice;
+                        option.textContent = voice;
+                        ttsVoiceDropdown.appendChild(option);
+                    });
+                }
+                
+                const availableVoiceValues = Array.from(ttsVoiceDropdown.options).map(option => option.value);
+                if (storedVoice && availableVoiceValues.includes(storedVoice)) {
+                    ttsVoiceDropdown.value = storedVoice;
+                } else if (ttsVoiceDropdown.options.length > 0) {
+                    ttsVoiceDropdown.value = ttsVoiceDropdown.options[0].value;
+                }
+                
+                console.log('TTS voices updated successfully');
+            } catch (error) {
+                console.error('Error fetching TTS voices:', error);
             }
         }
 
@@ -2992,6 +4309,13 @@
                         <span class="helper-text">Choose between Microsoft browser TTS or local Chatterbox TTS API</span>
                     </div>
                     <div class="settings-group">
+                        <label class="settings-label" for="settings-microsoft-voice">Microsoft Voice:</label>
+                        <select class="settings-select" id="settings-microsoft-voice">
+                            <option value="">Loading voices...</option>
+                        </select>
+                        <span class="helper-text">Select a Microsoft browser voice for TTS</span>
+                    </div>
+                    <div class="settings-group">
                         <label class="settings-label" for="settings-tts-endpoint">TTS API Endpoint:</label>
                         <input type="text" class="settings-input" id="settings-tts-endpoint" value="${escapeHtml(settings.ttsEndpoint)}" placeholder="http://localhost:4123/v1">
                         <span class="helper-text">Endpoint for OpenAI-compatible TTS service</span>
@@ -3006,7 +4330,14 @@
                     </div>
                     <div class="settings-group">
                         <label class="settings-label" for="settings-tts-voice">TTS Voice:</label>
-                        <input type="text" class="settings-input" id="settings-tts-voice" value="${escapeHtml(settings.ttsVoice)}" placeholder="Empress">
+                        <div style="display: flex; gap: 8px; align-items: center;">
+                            <select class="settings-select" id="settings-tts-voice" style="flex: 1;">
+                                <option value="">Loading voices...</option>
+                            </select>
+                            <button type="button" id="refresh-tts-voices-btn" class="action-btn" style="width: auto; padding: 8px 12px;" title="Refresh voices from TTS endpoint">
+                                <i class="fas fa-sync-alt"></i>
+                            </button>
+                        </div>
                         <span class="helper-text">Voice for OpenAI-compatible TTS</span>
                     </div>
                 </div>
@@ -3161,6 +4492,20 @@
                     fetchAvailableModels();
                 });
             }
+
+            // TTS voice refresh button
+            const refreshTtsVoicesBtn = document.getElementById('refresh-tts-voices-btn');
+            if (refreshTtsVoicesBtn) {
+                refreshTtsVoicesBtn.addEventListener('click', () => {
+                    fetchTtsVoices();
+                });
+            }
+
+            // Load Microsoft browser voices when settings render
+            loadMicrosoftVoices();
+
+            // Initialize TTS voices on settings render
+            fetchTtsVoices();
 
             // Update range value displays and apply changes
             const live2dOffsetRange = document.getElementById('settings-live2d-offset');
@@ -3662,6 +5007,13 @@
             // Initialize settings on load
             loadToolSettings();
             renderSettings();
+            
+            // Load Microsoft voices when page loads
+            if (speechSynthesis.onvoiceschanged !== undefined) {
+                speechSynthesis.onvoiceschanged = loadMicrosoftVoices;
+            }
+            // Try loading voices immediately (may be empty on first load)
+            setTimeout(loadMicrosoftVoices, 100);
 
             // Re-render settings when drawer opens and fetch models
             if (settingsBtn) {
