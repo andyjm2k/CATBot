@@ -282,7 +282,7 @@ def main():
     """
     # Get port from environment or use default
     port = int(os.environ.get('PORT', 5001))
-    host = os.environ.get('HOST', '127.0.0.1')
+    host = os.environ.get('HOST', '0.0.0.0')  # Default to 0.0.0.0 for network access
     
     logger.info(f"Starting MCP Browser HTTP Server on {host}:{port}")
     logger.info("Available endpoints:")

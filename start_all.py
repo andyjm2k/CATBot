@@ -2,10 +2,10 @@ import subprocess
 
 # Define the different commands
 commands = [
-    'start cmd /k "%venv% && python -m http.server"',  # Start Http.server
+    'start cmd /k "%venv% && python -m http.server 8000 --bind 0.0.0.0"',  # Start Http.server
     'start cmd /k "%venv% && cd ..\whisper-api-server && python main.py"',  # Start Whisper
     'start cmd /k "C:\\Users\\andyj\\AI_assistant\\venv312\\Scripts\\python C:\\Users\\andyj\\AI_assistant\\proxy_server.py"',  # Start Proxy server
-    'start cmd /k "%venv% && autogenstudio serve --team team-config.json --port 8084"',  # Start executable with parameter
+    'start cmd /k "%venv% && autogenstudio serve --team team-config.json --host 0.0.0.0 --port 8084"',  # Start executable with parameter
     'start cmd /k "cd mcp-browser-use && uv --directory . run mcp-server-browser-use"',  # Start MCP Browser Use Server
     'start cmd /k "C:\\Users\\andyj\\AI_assistant\\venv312\\Scripts\\python start_mcp_browser_server.py"'  # Start Browser Server Flask APIs
 ]

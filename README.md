@@ -400,10 +400,38 @@ python start_mcp_browser_server.py
 
 ### Accessing the Application
 
+#### Local Access (localhost)
+
 1. **Web Interface**: Open `index-dev.html` in your browser (served on port 8000)
 2. **AutoGen Studio**: Navigate to `http://localhost:8084`
 3. **Proxy Server API**: `http://localhost:8002` (FastAPI with comprehensive endpoints)
 4. **MCP Browser HTTP Server**: `http://localhost:5001` (Flask-based HTTP bridge)
+
+#### Remote Network Access
+
+All services are configured to accept connections from devices on your local network. To access from a remote device:
+
+1. **Find your server's IP address:**
+   - **Windows**: Run `ipconfig` in Command Prompt and look for "IPv4 Address" under your active network adapter
+   - **Linux/Mac**: Run `ifconfig` or `ip addr` and look for your network interface IP
+   - Example: `192.168.1.100`
+
+2. **Access services from remote devices:**
+   - **Web Interface**: `http://<server-ip>:8000` (e.g., `http://192.168.1.100:8000`)
+   - **AutoGen Studio**: `http://<server-ip>:8084`
+   - **Proxy Server API**: `http://<server-ip>:8002`
+   - **MCP Browser HTTP Server**: `http://<server-ip>:5001`
+
+3. **Frontend auto-detection:**
+   - The web interface automatically detects if it's being accessed remotely and adjusts API endpoints accordingly
+   - You can also manually specify the server IP using a URL parameter: `http://<server-ip>:8000?server=<server-ip>`
+
+4. **Firewall configuration:**
+   - Ensure your firewall allows incoming connections on ports: 8000, 8002, 5001, and 8084
+   - **Windows Firewall**: Add inbound rules for these ports
+   - **Linux**: Use `ufw` or `iptables` to allow the ports
+
+**Security Note**: This configuration allows any device on your local network to access the services. For production use, consider adding authentication or restricting access via firewall rules.
 
 ### API Endpoints
 

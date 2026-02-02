@@ -1133,7 +1133,30 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
         const ttsVoiceDropdown = document.getElementById('tts-voice-dropdown'); // TTS voice dropdown
         const refreshTtsVoicesBtn = document.getElementById('refresh-tts-voices-btn'); // Refresh TTS voices button
         const SELECTED_VOICE_STORAGE_KEY = 'selectedVoiceURI'; // Persist selected voice across browser sessions
-        const PROXY_BASE_URL = 'http://localhost:8002';
+        
+        // Server configuration for remote access
+        // Detect server IP from URL parameter, current hostname, or default to localhost
+        function getServerBase() {
+            // Check for server parameter in URL (e.g., ?server=192.168.1.100)
+            const urlParams = new URLSearchParams(window.location.search);
+            const serverParam = urlParams.get('server');
+            if (serverParam) {
+                return serverParam; // Return IP from URL parameter
+            }
+            // If accessed via IP address (not localhost), use current hostname
+            const currentHost = window.location.hostname;
+            if (currentHost !== 'localhost' && currentHost !== '127.0.0.1') {
+                return currentHost; // Use the IP/hostname from which the page was accessed
+            }
+            // Default to localhost for local access
+            return 'localhost';
+        }
+        
+        // Get the server base (IP or hostname)
+        const SERVER_BASE = getServerBase();
+        // Construct base URLs using the detected server
+        const PROXY_BASE_URL = `http://${SERVER_BASE}:8002`;
+        const MCP_BROWSER_BASE_URL = `http://${SERVER_BASE}:5001`;
         let voices = [];
         let audioContextResumed = false; // Flag to track if audio context has been resumed after first user action
         
@@ -4476,7 +4499,7 @@ function saveWAVFile(wavBlob) {
             }
             
             // Use the proxy server endpoint which has CORS configured
-            const whisperEndpoint = 'http://localhost:8002/v1/audio/transcriptions';
+            const whisperEndpoint = `${PROXY_BASE_URL}/v1/audio/transcriptions`;
 
             const formData = new FormData();
             formData.append('file', audioBlob, 'recording.wav');
@@ -5500,7 +5523,7 @@ function saveWAVFile(wavBlob) {
         async function handleReadFile({ filename }) {
             try {
                 // Call the proxy server to read the file
-                const response = await fetch('http://localhost:8002/v1/files/read', {
+                const response = await fetch(`${PROXY_BASE_URL}/v1/files/read`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
@@ -5544,7 +5567,7 @@ function saveWAVFile(wavBlob) {
                 }
 
                 // Call the proxy server to write the file
-                const response = await fetch('http://localhost:8002/v1/files/write', {
+                const response = await fetch(`${PROXY_BASE_URL}/v1/files/write`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
@@ -5583,7 +5606,7 @@ function saveWAVFile(wavBlob) {
         async function handleListFiles() {
             try {
                 // Call the proxy server to list files
-                const response = await fetch('http://localhost:8002/v1/files/list', {
+                const response = await fetch(`${PROXY_BASE_URL}/v1/files/list`, {
                     method: 'GET',
                     headers: {
                         'Content-Type': 'application/json'
@@ -6198,7 +6221,7 @@ function saveWAVFile(wavBlob) {
                 const urlObj = new URL(url);
                 
                 // Use the proxy endpoint for fetching the webpage content
-                const proxyUrl = `http://localhost:8002/v1/proxy/fetch?url=${encodeURIComponent(url)}`;
+                const proxyUrl = `${PROXY_BASE_URL}/v1/proxy/fetch?url=${encodeURIComponent(url)}`;
                 
                 // Fetch the webpage content through the proxy
                 const response = await fetch(proxyUrl, {
@@ -6274,7 +6297,7 @@ function saveWAVFile(wavBlob) {
         async function handleWebSearch({ query }) {
             try {
                 // Use the proxy endpoint for searching
-                const proxyUrl = `http://localhost:8002/v1/proxy/search?query=${encodeURIComponent(query)}`;
+                const proxyUrl = `${PROXY_BASE_URL}/v1/proxy/search?query=${encodeURIComponent(query)}`;
                 
                 const response = await fetch(proxyUrl, {
                     method: 'GET',
@@ -11440,7 +11463,7 @@ ${fullText.substring(0, 6000)}...${minimalImageInfo}`;
                     formData.append('fileName', fileName);
                 }
 
-                const response = await fetch('http://localhost:8002/v1/proxy/upload-to-drive', {
+                const response = await fetch(`${PROXY_BASE_URL}/v1/proxy/upload-to-drive`, {
                     method: 'POST',
                     headers: {
                         'Authorization': `Bearer ${apiKeyInput.value}`
@@ -11485,7 +11508,7 @@ ${fullText.substring(0, 6000)}...${minimalImageInfo}`;
                 }
                 
                 // Call the MCP browser server HTTP endpoint
-                const response = await fetch('http://127.0.0.1:5001/api/browser-agent', {
+                const response = await fetch(`${MCP_BROWSER_BASE_URL}/api/browser-agent`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
@@ -11554,7 +11577,7 @@ ${fullText.substring(0, 6000)}...${minimalImageInfo}`;
                 }
                 
                 // Call the MCP browser server HTTP endpoint for deep research
-                const response = await fetch('http://127.0.0.1:5001/api/deep-research', {
+                const response = await fetch(`${MCP_BROWSER_BASE_URL}/api/deep-research`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'

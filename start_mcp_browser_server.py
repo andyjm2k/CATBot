@@ -66,7 +66,7 @@ print(f"Browser Headless: {os.environ.get('MCP_BROWSER_HEADLESS', 'false')}")
 print(f"Keep Browser Open: {os.environ.get('MCP_BROWSER_KEEP_OPEN', 'false')}")
 print(f"Max Parallel Browsers: {os.environ.get('MCP_RESEARCH_TOOL_MAX_PARALLEL_BROWSERS', '3')}")
 print(f"Server Port: {os.environ.get('PORT', '5001')}")
-print(f"Server Host: {os.environ.get('HOST', '127.0.0.1')}")
+print(f"Server Host: {os.environ.get('HOST', '0.0.0.0')}")
 print("="*50 + "\n")
 
 # Import and start the server

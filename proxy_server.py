@@ -474,13 +474,19 @@ app.add_middleware(
 )
 
 def build_cors_headers(request: Request) -> Dict[str, str]:
-    """Build CORS headers for the request origin."""
+    """Build CORS headers for the request origin. Supports both localhost and remote access."""
     try:
         # Safely get origin from request headers, with fallback
-        origin = request.headers.get("origin", "http://localhost:8000") if hasattr(request, 'headers') else "http://localhost:8000"
+        if hasattr(request, 'headers'):
+            origin = request.headers.get("origin")
+            # If no origin header (e.g., same-origin request), allow all origins for network access
+            if not origin:
+                origin = "*"
+        else:
+            origin = "*"
     except Exception:
-        # If we can't access headers, use default origin
-        origin = "http://localhost:8000"
+        # If we can't access headers, allow all origins for network access
+        origin = "*"
     
     return {
         "Access-Control-Allow-Origin": origin,
