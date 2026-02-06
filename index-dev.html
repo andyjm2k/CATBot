@@ -1651,6 +1651,7 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
         let vrmThinkVrmaAction = null; // Prepared AnimationAction for thinking VRMA
         let vrmCryVrmaAction = null; // Prepared AnimationAction for cry VRMA
         let vrmAngryVrmaAction = null; // Prepared AnimationAction for angry VRMA
+        let vrmIdleVrmaAction = null; // Prepared AnimationAction for idle VRMA
 
         // Pose configuration (tweak these numbers to adjust poses)
         const POSE_CONFIG = {
@@ -7391,6 +7392,10 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                                 if (vrmLoveVrmaAction) {
                                     try {
                                         console.log('Playing VRMA love action');
+                                        // Stop idle animation if playing
+                                        if (vrmIdleVrmaAction && vrmIdleVrmaAction.isRunning()) {
+                                            vrmIdleVrmaAction.stop();
+                                        }
                                         vrmLoveVrmaAction.stop();
                                         vrmLoveVrmaAction.reset();
                                         vrmLoveVrmaAction.setEffectiveWeight(1.0);
@@ -7443,6 +7448,10 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                                 if (vrmThinkVrmaAction) {
                                     try {
                                         console.log('Playing VRMA thinking action');
+                                        // Stop idle animation if playing
+                                        if (vrmIdleVrmaAction && vrmIdleVrmaAction.isRunning()) {
+                                            vrmIdleVrmaAction.stop();
+                                        }
                                         vrmThinkVrmaAction.stop();
                                         vrmThinkVrmaAction.reset();
                                         vrmThinkVrmaAction.setEffectiveWeight(1.0);
@@ -7490,6 +7499,10 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                                 if (vrmCryVrmaAction) {
                                     try {
                                         console.log('Playing VRMA cry action');
+                                        // Stop idle animation if playing
+                                        if (vrmIdleVrmaAction && vrmIdleVrmaAction.isRunning()) {
+                                            vrmIdleVrmaAction.stop();
+                                        }
                                         vrmCryVrmaAction.stop();
                                         vrmCryVrmaAction.reset();
                                         vrmCryVrmaAction.setEffectiveWeight(1.0);
@@ -7548,6 +7561,10 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                                 if (vrmAngryVrmaAction) {
                                     try {
                                         console.log('Playing VRMA angry action');
+                                        // Stop idle animation if playing
+                                        if (vrmIdleVrmaAction && vrmIdleVrmaAction.isRunning()) {
+                                            vrmIdleVrmaAction.stop();
+                                        }
                                         vrmAngryVrmaAction.stop();
                                         vrmAngryVrmaAction.reset();
                                         vrmAngryVrmaAction.setEffectiveWeight(1.0);
@@ -7755,6 +7772,10 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                                 if (vrmLoveVrmaAction) {
                                     try {
                                         console.log('Playing VRMA love action');
+                                        // Stop idle animation if playing
+                                        if (vrmIdleVrmaAction && vrmIdleVrmaAction.isRunning()) {
+                                            vrmIdleVrmaAction.stop();
+                                        }
                                         vrmLoveVrmaAction.stop();
                                         vrmLoveVrmaAction.reset();
                                         vrmLoveVrmaAction.setEffectiveWeight(1.0);
@@ -7806,6 +7827,10 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                                 if (vrmThinkVrmaAction) {
                                     try {
                                         console.log('Playing VRMA thinking action');
+                                        // Stop idle animation if playing
+                                        if (vrmIdleVrmaAction && vrmIdleVrmaAction.isRunning()) {
+                                            vrmIdleVrmaAction.stop();
+                                        }
                                         vrmThinkVrmaAction.stop();
                                         vrmThinkVrmaAction.reset();
                                         vrmThinkVrmaAction.setEffectiveWeight(1.0);
@@ -7853,6 +7878,10 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                                 if (vrmCryVrmaAction) {
                                     try {
                                         console.log('Playing VRMA cry action');
+                                        // Stop idle animation if playing
+                                        if (vrmIdleVrmaAction && vrmIdleVrmaAction.isRunning()) {
+                                            vrmIdleVrmaAction.stop();
+                                        }
                                         vrmCryVrmaAction.stop();
                                         vrmCryVrmaAction.reset();
                                         vrmCryVrmaAction.setEffectiveWeight(1.0);
@@ -7911,6 +7940,10 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                                 if (vrmAngryVrmaAction) {
                                     try {
                                         console.log('Playing VRMA angry action');
+                                        // Stop idle animation if playing
+                                        if (vrmIdleVrmaAction && vrmIdleVrmaAction.isRunning()) {
+                                            vrmIdleVrmaAction.stop();
+                                        }
                                         vrmAngryVrmaAction.stop();
                                         vrmAngryVrmaAction.reset();
                                         vrmAngryVrmaAction.setEffectiveWeight(1.0);
@@ -8885,6 +8918,74 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                     console.warn('Failed to preload Angry VRMA animation:', e);
                 }
                 
+                // Optional: preload VRMA animation clip for idle animation (only for VRM 1.0)
+                let idleVrmaAction = null;
+                try {
+                    // VRMA animations only work with VRM 1.0, skip for VRM 0.0
+                    if (vrmVersion === '1.0') {
+                        const vrmaUrl = encodeURI('./model_avatar/Eva/VRMA_06.vrma');
+                        console.log('Loading Idle VRMA from', vrmaUrl);
+                        const vrmaGltf = await new Promise((resolve, reject) => {
+                            loader.load(vrmaUrl, resolve, undefined, reject);
+                        });
+                        // Check multiple possible locations for VRMA data
+                        let vrma = null;
+
+                        // Try userData first
+                        if (vrmaGltf?.userData?.vrmAnimations && Array.isArray(vrmaGltf.userData.vrmAnimations) && vrmaGltf.userData.vrmAnimations.length > 0) {
+                            vrma = vrmaGltf.userData.vrmAnimations[0];
+                        }
+                        // Try extensions
+                        else if (vrmaGltf?.extensions?.VRMC_vrm_animation) {
+                            vrma = vrmaGltf.extensions.VRMC_vrm_animation;
+                        }
+                        // Try parser userData
+                        else if (vrmaGltf?.parser?.userData?.vrmAnimations) {
+                            vrma = vrmaGltf.parser.userData.vrmAnimations[0];
+                        }
+
+                        let clip = null;
+                        
+                        // Try instance method on VRMAnimation to retarget to this VRM
+                        if (!clip && vrma && typeof vrma.createAnimationClip === 'function') {
+                            try { 
+                                clip = vrma.createAnimationClip(vrm); 
+                            } catch(e) { 
+                                console.warn('vrma.createAnimationClip failed for idle:', e);
+                            }
+                        }
+                        // Static helper fallback if available
+                        if (!clip && window.VRMAnimation && typeof window.VRMAnimation.createAnimationClip === 'function') {
+                            try { 
+                                clip = window.VRMAnimation.createAnimationClip(vrma, vrm); 
+                            } catch(e) { 
+                                console.warn('VRMAnimation.createAnimationClip failed for idle:', e);
+                            }
+                        }
+                        // Synthesise THREE.AnimationClip if tracks array present
+                        if (!clip) {
+                            const built = buildClipFromVRMAObject(vrma, vrm);
+                            if (built) { 
+                                clip = built;
+                            }
+                        }
+
+                        if (clip) {
+                            const boundClip = retargetClipToVRM(clip, vrm) || clip;
+                            idleVrmaAction = mixer.clipAction(boundClip, vrm.scene);
+                            idleVrmaAction.clampWhenFinished = false; // Allow looping
+                            idleVrmaAction.setEffectiveWeight(1.0);
+                            idleVrmaAction.setEffectiveTimeScale(1.0);
+                            idleVrmaAction.loop = window.THREE.LoopRepeat; // Loop continuously
+                            console.log('Idle VRMA clip prepared. Tracks:', Array.isArray(boundClip.tracks) ? boundClip.tracks.length : 'unknown');
+                        } else {
+                            console.warn('No animation clip found in Idle VRMA');
+                        }
+                    }
+                } catch (e) {
+                    console.warn('Failed to preload Idle VRMA animation:', e);
+                }
+                
                 const clock = new window.THREE.Clock();
 
                 // Store references
@@ -8898,6 +8999,7 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                 vrmThinkVrmaAction = thinkVrmaAction;
                 vrmCryVrmaAction = cryVrmaAction;
                 vrmAngryVrmaAction = angryVrmaAction;
+                vrmIdleVrmaAction = idleVrmaAction;
 
                 // Apply initial transforms
                 updateVRMTransform();
@@ -9304,6 +9406,30 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                         // Update mixer AFTER VRM so animation has final control over bones
                         if (vrmMixer) {
                             vrmMixer.update(delta);
+                            
+                            // Check if any other animation is running
+                            const hasActiveAnimation = 
+                                (vrmLoveVrmaAction && vrmLoveVrmaAction.isRunning()) ||
+                                (vrmThinkVrmaAction && vrmThinkVrmaAction.isRunning()) ||
+                                (vrmCryVrmaAction && vrmCryVrmaAction.isRunning()) ||
+                                (vrmAngryVrmaAction && vrmAngryVrmaAction.isRunning());
+                            
+                            // Play idle animation if no other animation is running
+                            if (vrmIdleVrmaAction && !hasActiveAnimation) {
+                                if (!vrmIdleVrmaAction.isRunning()) {
+                                    vrmIdleVrmaAction.reset();
+                                    vrmIdleVrmaAction.setEffectiveWeight(1.0);
+                                    vrmIdleVrmaAction.setEffectiveTimeScale(1.0);
+                                    vrmIdleVrmaAction.enabled = true;
+                                    vrmIdleVrmaAction.play();
+                                }
+                            } else if (vrmIdleVrmaAction && hasActiveAnimation) {
+                                // Stop idle animation when other animations are playing
+                                if (vrmIdleVrmaAction.isRunning()) {
+                                    vrmIdleVrmaAction.stop();
+                                }
+                            }
+                            
                             // Debug animation state periodically
                             if (window.debugAnimationFrames === undefined) window.debugAnimationFrames = 0;
                             window.debugAnimationFrames++;
