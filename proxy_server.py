@@ -10,14 +10,17 @@ import os
 import re
 import time
 import base64
+import hmac
+import hashlib
+import secrets
 from typing import Dict, List, Optional, Any
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from urllib.parse import urlparse, urlunparse
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -162,6 +165,28 @@ class FileResponse(BaseModel):
     message: str  # Human-readable message
     data: Optional[Dict[str, Any]] = None  # Optional data payload
 
+class AuthSignupRequest(BaseModel):
+    username: str
+    password: str
+
+
+class AuthLoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class AuthTokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int
+    username: str
+
+
+class AuthUserResponse(BaseModel):
+    username: str
+    created_at: str
+
+
 class TelegramChatMessage(BaseModel):
     role: str
     content: str
@@ -253,6 +278,128 @@ TELEGRAM_OPENAI_CHAT_PATH = os.getenv("TELEGRAM_OPENAI_CHAT_PATH", "/chat/comple
 OPENAI_ORG_ID = os.getenv("OPENAI_ORG_ID") or os.getenv("OPENAI_ORGANIZATION")
 OPENAI_PROJECT_ID = os.getenv("OPENAI_PROJECT_ID")
 
+# Auth configuration
+AUTH_USERS_FILE = Path(__file__).parent / "auth_users.json"
+JWT_SECRET = os.getenv("JWT_SECRET", "change-this-secret-in-production")
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRATION_SECONDS = int(os.getenv("JWT_EXPIRATION_SECONDS", "3600"))
+
+# Simple in-memory user storage with JSON persistence
+users_db: Dict[str, Dict[str, str]] = {}
+
+
+def _base64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode().rstrip("=")
+
+
+def _base64url_decode(data: str) -> bytes:
+    padding = "=" * (-len(data) % 4)
+    return base64.urlsafe_b64decode(f"{data}{padding}")
+
+
+def hash_password(password: str, salt: str) -> str:
+    hashed = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt.encode("utf-8"),
+        100_000,
+    )
+    return _base64url_encode(hashed)
+
+
+def create_password_record(password: str) -> Dict[str, str]:
+    salt = secrets.token_hex(16)
+    return {
+        "salt": salt,
+        "password_hash": hash_password(password, salt),
+    }
+
+
+def verify_password(password: str, salt: str, expected_hash: str) -> bool:
+    candidate_hash = hash_password(password, salt)
+    return hmac.compare_digest(candidate_hash, expected_hash)
+
+
+def save_users_db() -> None:
+    AUTH_USERS_FILE.write_text(json.dumps(users_db, indent=2), encoding="utf-8")
+
+
+def load_users_db() -> None:
+    global users_db
+    if not AUTH_USERS_FILE.exists():
+        users_db = {}
+        return
+
+    try:
+        users_db = json.loads(AUTH_USERS_FILE.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"⚠️ Failed to load users database: {e}")
+        users_db = {}
+
+
+def create_jwt(payload: Dict[str, Any], expires_in: int = JWT_EXPIRATION_SECONDS) -> str:
+    now = datetime.now(timezone.utc)
+    body = payload.copy()
+    body["iat"] = int(now.timestamp())
+    body["exp"] = int((now + timedelta(seconds=expires_in)).timestamp())
+
+    header = {"alg": JWT_ALGORITHM, "typ": "JWT"}
+    header_b64 = _base64url_encode(json.dumps(header, separators=(",", ":")).encode("utf-8"))
+    payload_b64 = _base64url_encode(json.dumps(body, separators=(",", ":")).encode("utf-8"))
+
+    signing_input = f"{header_b64}.{payload_b64}".encode("utf-8")
+    signature = hmac.new(JWT_SECRET.encode("utf-8"), signing_input, hashlib.sha256).digest()
+    signature_b64 = _base64url_encode(signature)
+    return f"{header_b64}.{payload_b64}.{signature_b64}"
+
+
+def decode_and_validate_jwt(token: str) -> Dict[str, Any]:
+    try:
+        header_b64, payload_b64, signature_b64 = token.split(".")
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail="Invalid token format") from exc
+
+    signing_input = f"{header_b64}.{payload_b64}".encode("utf-8")
+    expected_sig = hmac.new(JWT_SECRET.encode("utf-8"), signing_input, hashlib.sha256).digest()
+    actual_sig = _base64url_decode(signature_b64)
+
+    if not hmac.compare_digest(expected_sig, actual_sig):
+        raise HTTPException(status_code=401, detail="Invalid token signature")
+
+    try:
+        payload = json.loads(_base64url_decode(payload_b64).decode("utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="Invalid token payload") from exc
+
+    exp = payload.get("exp")
+    if not isinstance(exp, int):
+        raise HTTPException(status_code=401, detail="Token missing expiration")
+    if datetime.now(timezone.utc).timestamp() > exp:
+        raise HTTPException(status_code=401, detail="Token expired")
+
+    return payload
+
+
+def get_current_user(authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+
+    try:
+        scheme, token = authorization.split(" ", 1)
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail="Invalid Authorization header") from exc
+
+    if scheme.lower() != "bearer":
+        raise HTTPException(status_code=401, detail="Authorization scheme must be Bearer")
+
+    payload = decode_and_validate_jwt(token)
+    username = payload.get("sub")
+    if not username or username not in users_db:
+        raise HTTPException(status_code=401, detail="Invalid token subject")
+
+    return {"username": username, **users_db[username]}
+
+
 # Helper utilities for Telegram integration
 def build_openai_url(path: str) -> str:
     """Return absolute URL for OpenAI-compatible endpoints."""
@@ -276,6 +423,7 @@ def trim_telegram_history(history: List[Dict[str, str]]) -> None:
 
 # Create scratch directory if it doesn't exist
 SCRATCH_DIR.mkdir(parents=True, exist_ok=True)
+load_users_db()
 
 # Global AutoGen team instance
 autogen_team = None
@@ -1497,6 +1645,62 @@ async def list_tools(server_id: str):
 async def root():
     """Root endpoint."""
     return {"message": "CATBot Proxy Server", "version": "2.0.0"}
+
+@app.post("/v1/auth/signup", response_model=AuthTokenResponse)
+async def auth_signup(request: AuthSignupRequest):
+    """Create a new user account and return a signed JWT."""
+    username = request.username.strip().lower()
+    password = request.password
+
+    if len(username) < 3:
+        raise HTTPException(status_code=400, detail="username must be at least 3 characters")
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="password must be at least 8 characters")
+    if username in users_db:
+        raise HTTPException(status_code=409, detail="username already exists")
+
+    password_record = create_password_record(password)
+    users_db[username] = {
+        **password_record,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    save_users_db()
+
+    token = create_jwt({"sub": username})
+    return AuthTokenResponse(
+        access_token=token,
+        expires_in=JWT_EXPIRATION_SECONDS,
+        username=username,
+    )
+
+
+@app.post("/v1/auth/login", response_model=AuthTokenResponse)
+async def auth_login(request: AuthLoginRequest):
+    """Authenticate a user and return a signed JWT."""
+    username = request.username.strip().lower()
+    user = users_db.get(username)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    if not verify_password(request.password, user["salt"], user["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    token = create_jwt({"sub": username})
+    return AuthTokenResponse(
+        access_token=token,
+        expires_in=JWT_EXPIRATION_SECONDS,
+        username=username,
+    )
+
+
+@app.get("/v1/auth/me", response_model=AuthUserResponse)
+async def auth_me(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """Return the profile of the authenticated user based on JWT bearer token."""
+    return AuthUserResponse(
+        username=current_user["username"],
+        created_at=current_user["created_at"],
+    )
+
 
 @app.post("/v1/telegram/chat", response_model=TelegramChatResponse)
 async def telegram_chat_endpoint(request: TelegramChatRequest):
