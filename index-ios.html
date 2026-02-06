@@ -6,7 +6,7 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="theme-color" content="#000000">
-    <title>Chat to Eva - Enhanced Voice Assistant</title>
+    <title>CATBot</title>
     <!-- Add this in the <head> section -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     
@@ -1077,7 +1077,7 @@
             </button>
         </div>
         <div class="header-center">
-            <h1>Chat to Eva</h1>
+            <h1>CATBot</h1>
             <span class="beta-badge">beta</span>
         </div>
         <div class="header-right">
@@ -1409,12 +1409,11 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
             });
         }
 
-        // Think button (placeholder - could link to philosopher mode)
+        // Think button - toggles philosopher mode
         if (thinkBtn) {
-            thinkBtn.addEventListener('click', function() {
-                if (philosopherModeBtn) {
-                    philosopherModeBtn.click();
-                }
+            thinkBtn.addEventListener('click', async function() {
+                // Toggle philosopher mode on/off
+                await togglePhilosopherMode();
             });
         }
 
@@ -1699,6 +1698,11 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
                         philosopherModeBtn.innerHTML = '<i class="fas fa-brain"></i>';
                         philosopherModeBtn.style.backgroundColor = '#ff9800';
                     }
+                    // Update Think button visual state when philosopher mode is active
+                    if (thinkBtn) {
+                        thinkBtn.style.backgroundColor = '#ff9800';
+                        thinkBtn.style.opacity = '1';
+                    }
                     addMessageToHistory('assistant', 'Philosopher Mode activated. I will now contemplate questions and share my thoughts.');
                     // Start contemplation loop
                     startPhilosopherContemplationLoop();
@@ -1758,6 +1762,11 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
                     philosopherModeBtn.innerHTML = '<i class="fas fa-brain"></i>';
                     philosopherModeBtn.style.backgroundColor = '';
                 }
+                // Reset Think button visual state when philosopher mode is deactivated
+                if (thinkBtn) {
+                    thinkBtn.style.backgroundColor = '';
+                    thinkBtn.style.opacity = '';
+                }
                 
                 // Show appropriate message based on whether it was starting or already active
                 // Skip message display if skipMessage is true (used during interruption to maintain message order)
@@ -1777,6 +1786,11 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
                 if (philosopherModeBtn) {
                     philosopherModeBtn.innerHTML = '<i class="fas fa-brain"></i>';
                     philosopherModeBtn.style.backgroundColor = '';
+                }
+                // Reset Think button visual state on error
+                if (thinkBtn) {
+                    thinkBtn.style.backgroundColor = '';
+                    thinkBtn.style.opacity = '';
                 }
             }
         }
@@ -4470,20 +4484,29 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
                 }
                 
                 // New conversation button handler
-                document.getElementById('new-conversation-btn').addEventListener('click', () => {
-                    const newConv = createNewConversation('New Conversation');
-                    switchToConversation(newConv.id);
-                });
+                const newConversationBtn = document.getElementById('new-conversation-btn');
+                if (newConversationBtn) {
+                    newConversationBtn.addEventListener('click', () => {
+                        const newConv = createNewConversation('New Conversation');
+                        switchToConversation(newConv.id);
+                    });
+                }
                 
                 // Sidebar toggle button handler
-                document.getElementById('sidebar-toggle-btn').addEventListener('click', () => {
-                    toggleSidebar();
-                });
+                const sidebarToggleBtn = document.getElementById('sidebar-toggle-btn');
+                if (sidebarToggleBtn) {
+                    sidebarToggleBtn.addEventListener('click', () => {
+                        toggleSidebar();
+                    });
+                }
 
                 // Right panel toggle button handler
-                document.getElementById('right-panel-toggle-btn').addEventListener('click', () => {
-                    toggleRightPanel();
-                });
+                const rightPanelToggleBtn = document.getElementById('right-panel-toggle-btn');
+                if (rightPanelToggleBtn) {
+                    rightPanelToggleBtn.addEventListener('click', () => {
+                        toggleRightPanel();
+                    });
+                }
                 
                 // Load right panel state
                 loadRightPanelState();
@@ -5198,6 +5221,10 @@ function saveWAVFile(wavBlob) {
         // Function to render the conversation list in the sidebar
         function renderConversationList() {
             const conversationList = document.getElementById('conversation-list');
+            // Return early if conversation list element doesn't exist (e.g., in mobile version)
+            if (!conversationList) {
+                return;
+            }
             conversationList.innerHTML = '';
             
             // Sort conversations by updated date (most recent first)
@@ -5295,6 +5322,10 @@ function saveWAVFile(wavBlob) {
         function toggleSidebar() {
             const sidebar = document.getElementById('conversation-sidebar');
             const toggleBtn = document.getElementById('sidebar-toggle-btn');
+            // Return early if sidebar elements don't exist (e.g., in mobile version)
+            if (!sidebar || !toggleBtn) {
+                return;
+            }
             const toggleIcon = toggleBtn.querySelector('i');
             
             sidebarCollapsed = !sidebarCollapsed;
@@ -5302,11 +5333,15 @@ function saveWAVFile(wavBlob) {
             if (sidebarCollapsed) {
                 sidebar.classList.add('collapsed');
                 toggleBtn.classList.remove('sidebar-open');
-                toggleIcon.className = 'fas fa-chevron-right';
+                if (toggleIcon) {
+                    toggleIcon.className = 'fas fa-chevron-right';
+                }
             } else {
                 sidebar.classList.remove('collapsed');
                 toggleBtn.classList.add('sidebar-open');
-                toggleIcon.className = 'fas fa-chevron-left';
+                if (toggleIcon) {
+                    toggleIcon.className = 'fas fa-chevron-left';
+                }
             }
             
             // Save state to localStorage
@@ -8358,6 +8393,13 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
 
         // Handle Enter key submission and Shift+Enter for newlines
         userInput.addEventListener('keydown', async function (event) { // Handle keyboard input
+            // Handle semicolon key for STT shortcut (even when input is focused) - start recording
+            if (event.key === ';' && !event.repeat && !isRecording) {
+                event.preventDefault(); // Prevent semicolon from being typed
+                await resumeAudioContextOnce(); // Resume audio context on first user action (for autoplay and lip sync)
+                toggleRecording(); // Start recording
+                return; // Exit early to prevent other handlers
+            }
             if (event.key === 'Enter' && !event.shiftKey) { // Check if Enter key pressed (not Shift+Enter)
                 event.preventDefault(); // Prevent default newline behavior
                 await resumeAudioContextOnce(); // Resume audio context on first user action (for autoplay and lip sync)
@@ -8394,6 +8436,14 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
             } // End Enter key check
             // Shift+Enter allows normal newline behavior (default)
         }); // End keyboard input handler
+
+        // Handle semicolon keyup for STT shortcut (when input is focused)
+        userInput.addEventListener('keyup', (e) => {
+            if (e.key === ';' && isRecording) {
+                e.preventDefault(); // Prevent semicolon from being typed
+                toggleRecording(); // Stop recording
+            }
+        });
 
         // Update the initLive2D function
         async function initLive2D() {

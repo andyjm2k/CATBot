@@ -385,7 +385,7 @@ class MCPClientManager:
             pass
 
 # FastAPI app
-app = FastAPI(title="AI Assistant Proxy Server", version="2.0.0")
+app = FastAPI(title="CATBot Proxy Server", version="2.0.0")
 
 # Startup event to verify app initialization
 @app.on_event("startup")
@@ -1496,7 +1496,7 @@ async def list_tools(server_id: str):
 @app.get("/")
 async def root():
     """Root endpoint."""
-    return {"message": "AI Assistant Proxy Server", "version": "2.0.0"}
+    return {"message": "CATBot Proxy Server", "version": "2.0.0"}
 
 @app.post("/v1/telegram/chat", response_model=TelegramChatResponse)
 async def telegram_chat_endpoint(request: TelegramChatRequest):
@@ -3308,7 +3308,7 @@ async def upload_to_drive(request: Request):
 
 if __name__ == "__main__":
     # Start the server
-    print("[START] Starting AI Assistant Proxy Server with File Operations...")
+    print("[START] Starting CATBot Proxy Server with File Operations...")
     print(f"[INFO] Scratch directory: {SCRATCH_DIR}")
     uvicorn.run(
         "proxy_server:app",

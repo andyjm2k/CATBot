@@ -228,7 +228,7 @@ Expected: Success response with page title information.
 
 ## Step 7: Frontend Integration
 
-1. **Open your AI assistant**: Open `index-dev.html` in a web browser
+1. **Open CATBot**: Open `index-dev.html` in a web browser
 2. **Check console**: Open browser DevTools (F12) and check for errors
 3. **Test with assistant**: Ask "Go to example.com and tell me about the page"
 

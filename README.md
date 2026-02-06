@@ -1,4 +1,4 @@
-# 🤖 AI Assistant — Personal AI Assistant
+# 🤖 CATBot — Personal AI Assistant
 
 <p align="center">
   <strong>Your comprehensive AI assistant with browser automation, speech, and 3D avatars</strong>
@@ -10,7 +10,7 @@
   <a href="https://modelcontextprotocol.io/"><img src="https://img.shields.io/badge/MCP-Protocol-green?style=for-the-badge" alt="MCP"></a>
 </p>
 
-**AI Assistant** is a _comprehensive AI assistant system_ you run on your own devices. It features browser automation, speech-to-text, text-to-speech, multi-agent collaboration, and 3D avatar integration with VRM/Live2D support. The system provides a unified interface for interacting with AI models through multiple channels and capabilities.
+**CATBot** is a _comprehensive AI assistant system_ you run on your own devices. It features browser automation, speech-to-text, text-to-speech, multi-agent collaboration, and 3D avatar integration with VRM/Live2D support. The system provides a unified interface for interacting with AI models through multiple channels and capabilities.
 
 If you want a personal, feature-rich assistant that combines conversational AI, browser automation, and immersive 3D avatars, this is it.
 
