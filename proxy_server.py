@@ -380,12 +380,16 @@ def decode_and_validate_jwt(token: str) -> Dict[str, Any]:
     return payload
 
 
-def get_current_user(authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
-    if not authorization:
+def get_current_user_from_headers(authorization: Optional[str], x_auth_token: Optional[str]) -> Dict[str, Any]:
+    auth_value = authorization
+    if not auth_value and x_auth_token:
+        auth_value = f"Bearer {x_auth_token}"
+
+    if not auth_value:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
 
     try:
-        scheme, token = authorization.split(" ", 1)
+        scheme, token = auth_value.split(" ", 1)
     except ValueError as exc:
         raise HTTPException(status_code=401, detail="Invalid Authorization header") from exc
 
@@ -398,6 +402,13 @@ def get_current_user(authorization: Optional[str] = Header(default=None)) -> Dic
         raise HTTPException(status_code=401, detail="Invalid token subject")
 
     return {"username": username, **users_db[username]}
+
+
+def get_current_user(
+    authorization: Optional[str] = Header(default=None),
+    x_auth_token: Optional[str] = Header(default=None, alias="X-Auth-Token"),
+) -> Dict[str, Any]:
+    return get_current_user_from_headers(authorization, x_auth_token)
 
 
 # Helper utilities for Telegram integration
@@ -620,6 +631,28 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def require_auth_for_v1_routes(request: Request, call_next):
+    path = request.url.path
+
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
+    if path.startswith("/v1/") and path not in {
+        "/v1/auth/signup",
+        "/v1/auth/login",
+    }:
+        try:
+            get_current_user_from_headers(
+                request.headers.get("authorization"),
+                request.headers.get("x-auth-token"),
+            )
+        except HTTPException as exc:
+            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+    return await call_next(request)
 
 def build_cors_headers(request: Request) -> Dict[str, str]:
     """Build CORS headers for the request origin. Supports both localhost and remote access."""

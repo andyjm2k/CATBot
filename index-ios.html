@@ -57,6 +57,50 @@
             font-weight: 600;
         }
 
+        .auth-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.55);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 9999;
+            padding: 20px;
+        }
+
+        .auth-card {
+            width: min(420px, 95vw);
+            background: #fff;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+        }
+
+        .auth-card h2 {
+            margin-top: 0;
+            margin-bottom: 10px;
+            color: #007BFF;
+        }
+
+        .auth-help {
+            margin: 0 0 10px 0;
+            color: #666;
+            font-size: 0.92rem;
+        }
+
+        .auth-status {
+            min-height: 1.2em;
+            margin-top: 8px;
+            font-size: 0.9rem;
+            color: #b00020;
+        }
+
+        .auth-actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 8px;
+        }
+
         /* Mobile Header */
         .mobile-header {
             display: flex;
@@ -1335,6 +1379,22 @@
     </script>
 </head>
 <body>
+    <div class="auth-overlay" id="auth-overlay">
+        <div class="auth-card">
+            <h2>Authentication Required</h2>
+            <p class="auth-help">Log in or create an account to use CATBot.</p>
+            <label for="auth-username">Username</label>
+            <input type="text" id="auth-username" autocomplete="username" placeholder="Username">
+            <label for="auth-password">Password</label>
+            <input type="password" id="auth-password" autocomplete="current-password" placeholder="Password">
+            <div class="auth-actions">
+                <button id="auth-login-btn">Login</button>
+                <button id="auth-signup-btn">Sign up</button>
+                <button id="auth-logout-btn" type="button">Log out</button>
+            </div>
+            <div class="auth-status" id="auth-status"></div>
+        </div>
+    </div>
     <!-- Mobile Header -->
     <div class="mobile-header">
         <div class="header-left">
@@ -1837,6 +1897,98 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
         // Construct base URLs using the detected server
         const PROXY_BASE_URL = `http://${SERVER_BASE}:8002`;
         const MCP_BROWSER_BASE_URL = `http://${SERVER_BASE}:5001`;
+        const AUTH_TOKEN_STORAGE_KEY = 'jwtAuthToken';
+        let authToken = localStorage.getItem(AUTH_TOKEN_STORAGE_KEY) || '';
+
+        const authOverlay = document.getElementById('auth-overlay');
+        const authUsernameInput = document.getElementById('auth-username');
+        const authPasswordInput = document.getElementById('auth-password');
+        const authStatus = document.getElementById('auth-status');
+        const authLoginBtn = document.getElementById('auth-login-btn');
+        const authSignupBtn = document.getElementById('auth-signup-btn');
+        const authLogoutBtn = document.getElementById('auth-logout-btn');
+
+        function showAuthOverlay(message = '') {
+            if (authOverlay) authOverlay.style.display = 'flex';
+            if (authStatus) authStatus.textContent = message;
+        }
+
+        function hideAuthOverlay() {
+            if (authOverlay) authOverlay.style.display = 'none';
+            if (authStatus) authStatus.textContent = '';
+        }
+
+        function setAuthToken(token) {
+            authToken = token || '';
+            if (authToken) localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, authToken);
+            else localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+        }
+
+        const originalFetch = window.fetch.bind(window);
+        window.fetch = async function(input, init = {}) {
+            const requestUrl = typeof input === 'string' ? input : input?.url || '';
+            const isProxyRequest = requestUrl.startsWith(PROXY_BASE_URL) || requestUrl.startsWith('/v1/');
+            const isAuthRoute = requestUrl.includes('/v1/auth/login') || requestUrl.includes('/v1/auth/signup');
+
+            if (isProxyRequest && authToken && !isAuthRoute) {
+                const headers = new Headers(init.headers || (input instanceof Request ? input.headers : undefined) || {});
+                if (!headers.has('Authorization')) headers.set('Authorization', `Bearer ${authToken}`);
+                init = { ...init, headers };
+            }
+
+            const response = await originalFetch(input, init);
+            if (isProxyRequest && response.status === 401 && !isAuthRoute) {
+                showAuthOverlay('Session expired. Please log in again.');
+                setAuthToken('');
+            }
+            return response;
+        };
+
+        async function performAuth(action) {
+            const username = (authUsernameInput?.value || '').trim();
+            const password = authPasswordInput?.value || '';
+            if (!username || !password) {
+                showAuthOverlay('Username and password are required.');
+                return false;
+            }
+
+            authStatus.textContent = 'Authenticating...';
+            const response = await originalFetch(`${PROXY_BASE_URL}/v1/auth/${action}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username, password })
+            });
+
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                showAuthOverlay(data.detail || 'Authentication failed.');
+                return false;
+            }
+
+            setAuthToken(data.access_token);
+            hideAuthOverlay();
+            return true;
+        }
+
+        async function verifyExistingAuth() {
+            if (!authToken) {
+                showAuthOverlay('Please log in to continue.');
+                return false;
+            }
+
+            const response = await originalFetch(`${PROXY_BASE_URL}/v1/auth/me`, {
+                headers: { Authorization: `Bearer ${authToken}` }
+            });
+
+            if (!response.ok) {
+                setAuthToken('');
+                showAuthOverlay('Please log in to continue.');
+                return false;
+            }
+
+            hideAuthOverlay();
+            return true;
+        }
         let voices = [];
         let audioContextResumed = false; // Flag to track if audio context has been resumed after first user action
         
@@ -4766,9 +4918,21 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
             console.log('Tool settings persistence enabled');
         }
 
+        authLoginBtn?.addEventListener('click', () => performAuth('login'));
+        authSignupBtn?.addEventListener('click', () => performAuth('signup'));
+        authLogoutBtn?.addEventListener('click', () => {
+            setAuthToken('');
+            showAuthOverlay('Logged out.');
+        });
+
         // Replace the document load event listener
         document.addEventListener('DOMContentLoaded', async function() {
             try {
+                const isAuthenticated = await verifyExistingAuth();
+                if (!isAuthenticated) {
+                    return;
+                }
+
                 // Initialize variables from localStorage if available
                 try {
                     todoList = JSON.parse(localStorage.getItem('todoList')) || [];
