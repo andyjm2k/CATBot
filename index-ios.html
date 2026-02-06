@@ -323,7 +323,42 @@
         }
 
         .toggle-container input[type="radio"] {
-            margin-right: 5px;
+            margin-right: 8px;
+            width: 20px;
+            height: 20px;
+            min-width: 20px;
+            min-height: 20px;
+            cursor: pointer;
+            accent-color: #4a9eff;
+            -webkit-appearance: none;
+            -moz-appearance: none;
+            appearance: none;
+            border: 2px solid #666;
+            border-radius: 50%;
+            background-color: #2a2a2a;
+            position: relative;
+            flex-shrink: 0;
+        }
+
+        .toggle-container input[type="radio"]:checked {
+            border-color: #4a9eff;
+            background-color: #2a2a2a;
+        }
+
+        .toggle-container input[type="radio"]:checked::before {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background-color: #4a9eff;
+        }
+
+        .toggle-container input[type="radio"]:hover {
+            border-color: #6bb3ff;
         }
 
         .toggle-container label {
@@ -488,6 +523,166 @@
             background-color: #2a2a2a;
             border: 1px solid #3a3a3a;
             color: #ffffff;
+        }
+
+        /* Conversation History Slide-out Panel */
+        .conversation-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: rgba(0, 0, 0, 0.5);
+            z-index: 199;
+            display: none;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+
+        .conversation-overlay.active {
+            display: block;
+            opacity: 1;
+        }
+
+        .conversation-history-panel {
+            position: fixed;
+            top: 0;
+            right: 0;
+            bottom: 0;
+            width: 85%;
+            max-width: 400px;
+            background-color: #1a1a1a;
+            z-index: 200;
+            transform: translateX(100%);
+            transition: transform 0.3s ease;
+            overflow-y: auto;
+            -webkit-overflow-scrolling: touch;
+            padding-top: env(safe-area-inset-top);
+            padding-bottom: env(safe-area-inset-bottom);
+            box-shadow: -2px 0 10px rgba(0, 0, 0, 0.5);
+        }
+
+        .conversation-history-panel.active {
+            transform: translateX(0);
+        }
+
+        .conversation-history-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 16px;
+            border-bottom: 1px solid #2a2a2a;
+        }
+
+        .conversation-history-header h2 {
+            margin: 0;
+            color: #ffffff;
+            font-size: 1.25rem;
+            font-weight: 600;
+        }
+
+        .close-conversation-btn {
+            background: none;
+            border: none;
+            color: #ffffff;
+            font-size: 1.2rem;
+            padding: 8px;
+            cursor: pointer;
+            width: auto;
+            height: auto;
+            margin: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 44px;
+            min-height: 44px;
+        }
+
+        .conversation-history-content {
+            padding: 16px;
+        }
+
+        .new-conversation-btn-mobile {
+            width: 100%;
+            padding: 12px;
+            background-color: #007BFF;
+            color: #ffffff;
+            border: none;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 500;
+            cursor: pointer;
+            margin-bottom: 16px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            transition: background-color 0.2s;
+        }
+
+        .new-conversation-btn-mobile:active {
+            background-color: #0056b3;
+        }
+
+        .conversation-history-content .conversation-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .conversation-history-content .conversation-item {
+            padding: 12px;
+            background: #2a2a2a;
+            border: 2px solid #3a3a3a;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s;
+            position: relative;
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+
+        .conversation-history-content .conversation-item:active {
+            background: #3a3a3a;
+            border-color: #007BFF;
+        }
+
+        .conversation-history-content .conversation-item.active {
+            background: #1a3a5a;
+            border-color: #007BFF;
+            font-weight: 500;
+        }
+
+        .conversation-history-content .conversation-title {
+            font-size: 0.95rem;
+            color: #ffffff;
+            word-wrap: break-word;
+            flex: 1;
+        }
+
+        .conversation-history-content .conversation-date {
+            font-size: 0.75rem;
+            color: #888;
+        }
+
+        .conversation-history-content .conversation-actions {
+            display: flex;
+            gap: 5px;
+            margin-top: 5px;
+        }
+
+        .conversation-history-content .conversation-actions button {
+            padding: 4px 8px;
+            font-size: 0.75rem;
+            width: auto;
+            margin: 0;
+            background-color: #3a3a3a;
+            color: #ffffff;
+        }
+
+        .conversation-history-content .conversation-actions button:active {
+            background-color: #4a4a4a;
         }
 
         /* Collapsible Section - Dark Theme */
@@ -1144,7 +1339,7 @@
     <div class="mobile-header">
         <div class="header-left">
             <button class="hamburger-btn" id="hamburger-btn" title="Settings">
-                <i class="fas fa-bars"></i>
+                <i class="fas fa-cog"></i>
             </button>
         </div>
         <div class="header-center">
@@ -1152,8 +1347,8 @@
             <span class="beta-badge">beta</span>
         </div>
         <div class="header-right">
-            <button class="new-chat-btn" id="new-chat-btn-mobile" title="New Chat">
-                <i class="fas fa-edit"></i>
+            <button class="new-chat-btn" id="new-chat-btn-mobile" title="Conversation History">
+                <i class="fas fa-bars"></i>
             </button>
         </div>
     </div>
@@ -1370,6 +1565,25 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
         </div>
     </div>
 
+    <!-- Conversation History Slide-out Panel -->
+    <div class="conversation-overlay" id="conversation-overlay"></div>
+    <div class="conversation-history-panel" id="conversation-history-panel">
+        <div class="conversation-history-header">
+            <h2>Conversations</h2>
+            <button class="close-conversation-btn" id="close-conversation-btn">
+                <i class="fas fa-times"></i>
+            </button>
+        </div>
+        <div class="conversation-history-content">
+            <button class="new-conversation-btn-mobile" id="new-conversation-btn-mobile">
+                <i class="fas fa-plus"></i> New Chat
+            </button>
+            <div class="conversation-list" id="conversation-list-mobile">
+                <!-- Conversation items will be populated here -->
+            </div>
+        </div>
+    </div>
+
     <!-- Hide Chat Button - Above Input Area -->
     <div class="hide-chat-button-container">
         <button class="hide-chat-btn" id="hide-chat-btn" title="Hide Chat">
@@ -1385,10 +1599,6 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
             </button>
             <textarea id="user-input" rows="1" placeholder="Ask Anything"></textarea>
             <div class="input-actions">
-                <button class="input-action-btn" id="deepsearch-btn" title="DeepSearch">
-                    <i class="fas fa-search"></i>
-                    <span>DeepSearch</span>
-                </button>
                 <button class="input-action-btn" id="think-btn" title="Think">
                     <i class="fas fa-lightbulb"></i>
                     <span>Think</span>
@@ -1431,7 +1641,6 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
         const hideChatBtn = document.getElementById('hide-chat-btn');
         const hideChatIcon = document.getElementById('hide-chat-icon');
         const attachBtn = document.getElementById('attach-btn');
-        const deepsearchBtn = document.getElementById('deepsearch-btn');
         const thinkBtn = document.getElementById('think-btn');
 
         // Settings menu toggle
@@ -1482,13 +1691,54 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
             });
         }
 
-        // New chat button
-        if (newChatBtnMobile) {
+        // Conversation history panel toggle
+        const conversationOverlay = document.getElementById('conversation-overlay');
+        const conversationPanel = document.getElementById('conversation-history-panel');
+        const closeConversationBtn = document.getElementById('close-conversation-btn');
+        const newConversationBtnMobile = document.getElementById('new-conversation-btn-mobile');
+        
+        // Ensure conversation overlay is hidden by default on page load - trigger close action
+        if (conversationOverlay && conversationPanel) {
+            conversationOverlay.classList.remove('active');
+            conversationPanel.classList.remove('active');
+        }
+
+        if (newChatBtnMobile && conversationOverlay && conversationPanel) {
+            // Toggle conversation history panel when burger button is clicked
             newChatBtnMobile.addEventListener('click', function() {
-                if (typeof window.newConversation !== 'undefined') {
-                    window.newConversation();
-                } else if (document.getElementById('new-conversation-btn')) {
-                    document.getElementById('new-conversation-btn').click();
+                conversationOverlay.classList.add('active');
+                conversationPanel.classList.add('active');
+                // Render conversation list when panel opens
+                renderConversationList();
+            });
+
+            // Close panel when close button is clicked
+            if (closeConversationBtn) {
+                closeConversationBtn.addEventListener('click', function() {
+                    conversationOverlay.classList.remove('active');
+                    conversationPanel.classList.remove('active');
+                });
+                
+                // Trigger close action on page load to ensure overlay is hidden by default
+                closeConversationBtn.click();
+            }
+
+            // Close panel when overlay is clicked
+            conversationOverlay.addEventListener('click', function() {
+                conversationOverlay.classList.remove('active');
+                conversationPanel.classList.remove('active');
+            });
+        }
+
+        // New conversation button in mobile panel
+        if (newConversationBtnMobile) {
+            newConversationBtnMobile.addEventListener('click', function() {
+                const newConv = createNewConversation('New Conversation');
+                switchToConversation(newConv.id);
+                // Close the panel after creating new conversation
+                if (conversationOverlay && conversationPanel) {
+                    conversationOverlay.classList.remove('active');
+                    conversationPanel.classList.remove('active');
                 }
             });
         }
@@ -1507,14 +1757,6 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
             attachBtn.addEventListener('click', function() {
                 // Placeholder for attachment functionality
                 console.log('Attach clicked');
-            });
-        }
-
-        // DeepSearch button (placeholder)
-        if (deepsearchBtn) {
-            deepsearchBtn.addEventListener('click', function() {
-                // Placeholder for deep search functionality
-                console.log('DeepSearch clicked');
             });
         }
 
@@ -4587,6 +4829,17 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
                 // Load sidebar state
                 loadSidebarState();
                 
+                // Ensure conversation overlay is hidden on page load - trigger close action
+                setTimeout(function() {
+                    const conversationOverlay = document.getElementById('conversation-overlay');
+                    const conversationPanel = document.getElementById('conversation-history-panel');
+                    if (conversationOverlay && conversationPanel) {
+                        // Trigger the same action as clicking the close button
+                        conversationOverlay.classList.remove('active');
+                        conversationPanel.classList.remove('active');
+                    }
+                }, 0);
+                
                 // Initialize clipboard monitoring if Clipboard Vision Mode is already enabled
                 if (clipboardToggle && clipboardToggle.checked) {
                     clipboardVisionEnabled = true;
@@ -5330,76 +5583,98 @@ function saveWAVFile(wavBlob) {
 
         // Function to render the conversation list in the sidebar
         function renderConversationList() {
+            // Get both desktop and mobile conversation lists
             const conversationList = document.getElementById('conversation-list');
-            // Return early if conversation list element doesn't exist (e.g., in mobile version)
-            if (!conversationList) {
+            const conversationListMobile = document.getElementById('conversation-list-mobile');
+            
+            // Helper function to render to a specific list element
+            const renderToElement = (listElement) => {
+                if (!listElement) return;
+                
+                listElement.innerHTML = '';
+                
+                // Sort conversations by updated date (most recent first)
+                const sortedConversations = [...conversations].sort((a, b) => 
+                    new Date(b.updatedAt) - new Date(a.updatedAt)
+                );
+                
+                sortedConversations.forEach(conv => {
+                    const convItem = document.createElement('div');
+                    convItem.className = 'conversation-item' + (conv.id === activeConversationId ? ' active' : '');
+                    convItem.dataset.conversationId = conv.id;
+                    
+                    // Create title element
+                    const titleDiv = document.createElement('div');
+                    titleDiv.className = 'conversation-title';
+                    titleDiv.textContent = conv.title;
+                    
+                    // Create date element
+                    const dateDiv = document.createElement('div');
+                    dateDiv.className = 'conversation-date';
+                    const date = new Date(conv.updatedAt);
+                    dateDiv.textContent = date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+                    
+                    // Create actions container
+                    const actionsDiv = document.createElement('div');
+                    actionsDiv.className = 'conversation-actions';
+                    
+                    // Rename button
+                    const renameBtn = document.createElement('button');
+                    renameBtn.className = 'rename-btn';
+                    renameBtn.innerHTML = '<i class="fas fa-edit"></i> Rename';
+                    renameBtn.onclick = (e) => {
+                        e.stopPropagation();
+                        const newTitle = prompt('Enter new title:', conv.title);
+                        if (newTitle && newTitle.trim()) {
+                            renameConversation(conv.id, newTitle.trim());
+                        }
+                    };
+                    
+                    // Delete button
+                    const deleteBtn = document.createElement('button');
+                    deleteBtn.className = 'delete-btn';
+                    deleteBtn.innerHTML = '<i class="fas fa-trash"></i> Delete';
+                    deleteBtn.onclick = (e) => {
+                        e.stopPropagation();
+                        if (confirm('Are you sure you want to delete this conversation?')) {
+                            deleteConversation(conv.id);
+                        }
+                    };
+                    
+                    // Add buttons to actions container
+                    actionsDiv.appendChild(renameBtn);
+                    actionsDiv.appendChild(deleteBtn);
+                    
+                    // Add click handler to switch conversation
+                    convItem.addEventListener('click', function() {
+                        switchToConversation(conv.id);
+                        // Close mobile panel after switching
+                        const overlay = document.getElementById('conversation-overlay');
+                        const panel = document.getElementById('conversation-history-panel');
+                        if (overlay && panel) {
+                            overlay.classList.remove('active');
+                            panel.classList.remove('active');
+                        }
+                    });
+                    
+                    // Append elements to conversation item
+                    convItem.appendChild(titleDiv);
+                    convItem.appendChild(dateDiv);
+                    convItem.appendChild(actionsDiv);
+                    
+                    // Append conversation item to list
+                    listElement.appendChild(convItem);
+                });
+            };
+            
+            // Render to both desktop and mobile lists if they exist
+            renderToElement(conversationList);
+            renderToElement(conversationListMobile);
+            
+            // Return early if neither list exists
+            if (!conversationList && !conversationListMobile) {
                 return;
             }
-            conversationList.innerHTML = '';
-            
-            // Sort conversations by updated date (most recent first)
-            const sortedConversations = [...conversations].sort((a, b) => 
-                new Date(b.updatedAt) - new Date(a.updatedAt)
-            );
-            
-            sortedConversations.forEach(conv => {
-                const convItem = document.createElement('div');
-                convItem.className = 'conversation-item' + (conv.id === activeConversationId ? ' active' : '');
-                convItem.dataset.conversationId = conv.id;
-                
-                // Create title element
-                const titleDiv = document.createElement('div');
-                titleDiv.className = 'conversation-title';
-                titleDiv.textContent = conv.title;
-                
-                // Create date element
-                const dateDiv = document.createElement('div');
-                dateDiv.className = 'conversation-date';
-                const date = new Date(conv.updatedAt);
-                dateDiv.textContent = date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
-                
-                // Create actions container
-                const actionsDiv = document.createElement('div');
-                actionsDiv.className = 'conversation-actions';
-                
-                // Rename button
-                const renameBtn = document.createElement('button');
-                renameBtn.className = 'rename-btn';
-                renameBtn.innerHTML = '<i class="fas fa-edit"></i> Rename';
-                renameBtn.onclick = (e) => {
-                    e.stopPropagation();
-                    const newTitle = prompt('Enter new title:', conv.title);
-                    if (newTitle && newTitle.trim()) {
-                        renameConversation(conv.id, newTitle.trim());
-                    }
-                };
-                
-                // Delete button
-                const deleteBtn = document.createElement('button');
-                deleteBtn.className = 'delete-btn';
-                deleteBtn.innerHTML = '<i class="fas fa-trash"></i> Delete';
-                deleteBtn.onclick = (e) => {
-                    e.stopPropagation();
-                    if (confirm('Are you sure you want to delete this conversation?')) {
-                        deleteConversation(conv.id);
-                    }
-                };
-                
-                actionsDiv.appendChild(renameBtn);
-                actionsDiv.appendChild(deleteBtn);
-                
-                // Click handler for switching conversations
-                convItem.onclick = () => {
-                    if (conv.id !== activeConversationId) {
-                        switchToConversation(conv.id);
-                    }
-                };
-                
-                convItem.appendChild(titleDiv);
-                convItem.appendChild(dateDiv);
-                convItem.appendChild(actionsDiv);
-                conversationList.appendChild(convItem);
-            });
         }
 
         // Function to update active conversation when messages change
