@@ -388,13 +388,25 @@ def get_current_user_from_headers(authorization: Optional[str], x_auth_token: Op
     if not auth_value:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
 
+    # Strip whitespace and handle potential formatting issues
+    auth_value = auth_value.strip()
+    
     try:
         scheme, token = auth_value.split(" ", 1)
     except ValueError as exc:
         raise HTTPException(status_code=401, detail="Invalid Authorization header") from exc
 
+    # Strip token whitespace as well
+    token = token.strip()
+    
     if scheme.lower() != "bearer":
         raise HTTPException(status_code=401, detail="Authorization scheme must be Bearer")
+
+    # Debug logging for token issues
+    if not token or len(token.split(".")) != 3:
+        print(f"🔒 Token format issue - token length: {len(token) if token else 0}, parts: {len(token.split('.')) if token else 0}")
+        print(f"   Token preview: {token[:50] if token else 'None'}...")
+        raise HTTPException(status_code=401, detail="Invalid token format")
 
     payload = decode_and_validate_jwt(token)
     username = payload.get("sub")
@@ -628,7 +640,7 @@ app.add_middleware(
     allow_origins=["*"],  # Allow all origins for development (be more permissive to debug)
     allow_credentials=False,  # Set to False to allow more flexible CORS handling
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
-    allow_headers=["*"],
+    allow_headers=["*", "Authorization", "X-Auth-Token", "Content-Type", "Accept"],  # Explicitly allow Authorization header
     expose_headers=["*"],
 )
 
@@ -645,11 +657,45 @@ async def require_auth_for_v1_routes(request: Request, call_next):
         "/v1/auth/login",
     }:
         try:
+            # Get authorization header - FastAPI headers are case-insensitive, but check both for robustness
+            # Use get() with case-insensitive lookup
+            auth_header = None
+            x_auth_token = None
+            
+            # Try to get authorization header (case-insensitive)
+            for key, value in request.headers.items():
+                if key.lower() == "authorization":
+                    auth_header = value
+                    break
+                elif key.lower() == "x-auth-token":
+                    x_auth_token = value
+                    break
+            
+            # Fallback to direct get if not found in loop
+            if not auth_header:
+                auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
+            if not x_auth_token:
+                x_auth_token = request.headers.get("x-auth-token") or request.headers.get("X-Auth-Token")
+            
+            # Debug logging for auth issues
+            if not auth_header and not x_auth_token:
+                print(f"🔒 Auth check failed for {path}: No authorization header found")
+                print(f"   Available headers: {list(request.headers.keys())}")
+            elif auth_header:
+                # Log token preview for debugging (first 50 chars)
+                token_preview = auth_header[:50] + "..." if len(auth_header) > 50 else auth_header
+                print(f"🔒 Auth check for {path}: Found auth header (length: {len(auth_header)}, preview: {token_preview})")
+            
             get_current_user_from_headers(
-                request.headers.get("authorization"),
-                request.headers.get("x-auth-token"),
+                auth_header,
+                x_auth_token,
             )
         except HTTPException as exc:
+            print(f"🔒 Auth check failed for {path}: {exc.detail}")
+            # Log the actual header value for debugging (truncated)
+            auth_debug = request.headers.get("authorization") or request.headers.get("Authorization") or "None"
+            if auth_debug != "None":
+                print(f"   Auth header value (first 100 chars): {auth_debug[:100]}")
             return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
     return await call_next(request)

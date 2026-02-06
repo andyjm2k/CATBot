@@ -7138,10 +7138,11 @@ function saveWAVFile(wavBlob) {
                 const proxyUrl = `${PROXY_BASE_URL}/v1/proxy/fetch?url=${encodeURIComponent(url)}`;
                 
                 // Fetch the webpage content through the proxy
+                // Use authToken for proxy authentication (the global fetch interceptor will also add it, but be explicit)
                 const response = await fetch(proxyUrl, {
                     method: 'GET',
                     headers: {
-                        'Authorization': `Bearer ${apiKeyInput.value}`
+                        'Authorization': `Bearer ${authToken}`
                     }
                 });
 
@@ -7213,10 +7214,11 @@ function saveWAVFile(wavBlob) {
                 // Use the proxy endpoint for searching
                 const proxyUrl = `${PROXY_BASE_URL}/v1/proxy/search?query=${encodeURIComponent(query)}`;
                 
+                // Use authToken for authentication (the global fetch interceptor will also add it, but be explicit)
                 const response = await fetch(proxyUrl, {
                     method: 'GET',
                     headers: {
-                        'Authorization': `Bearer ${apiKeyInput.value}`
+                        'Authorization': `Bearer ${authToken}`
                     }
                 });
 
@@ -12517,10 +12519,11 @@ ${fullText.substring(0, 6000)}...${minimalImageInfo}`;
                     formData.append('fileName', fileName);
                 }
 
+                // Use authToken for proxy authentication (the global fetch interceptor will also add it, but be explicit)
                 const response = await fetch(`${PROXY_BASE_URL}/v1/proxy/upload-to-drive`, {
                     method: 'POST',
                     headers: {
-                        'Authorization': `Bearer ${apiKeyInput.value}`
+                        'Authorization': `Bearer ${authToken}`
                     },
                     body: formData
                 });
