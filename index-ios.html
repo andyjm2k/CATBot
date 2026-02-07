@@ -1895,7 +1895,7 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
         // Get the server base (IP or hostname)
         const SERVER_BASE = getServerBase();
         // Get the current protocol (http or https) - use https for secure connections
-        const PROTOCOL = window.location.protocol === 'https:' ? 'https:' : 'https:';
+        const PROTOCOL = window.location.protocol === 'https:' ? 'https:' : 'http:';
         // Construct base URLs using the detected server with HTTPS
         const PROXY_BASE_URL = `${PROTOCOL}//${SERVER_BASE}:8002`;
         const MCP_BROWSER_BASE_URL = `${PROTOCOL}//${SERVER_BASE}:5001`;
