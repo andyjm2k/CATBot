@@ -1,3 +1,5 @@
+<img src="CATBot_logo.png" alt="CATBot Logo" width="60" height="60" align="left">
+
 # 🤖 CATBot — Personal AI Assistant
 
 <p align="center">
