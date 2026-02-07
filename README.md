@@ -1,4 +1,5 @@
-<img src="CATBot_logo.png" alt="CATBot Logo" width="60" height="60" align="center"># CATBot — Personal AI Assistant
+# CATBot — Central Agentic Tools Bot
+<img src="CATBot_logo.png" alt="CATBot Logo" width="80" height="80" align="center">
 
 <p align="center">
   <strong>Your comprehensive AI assistant with browser automation, speech, and 3D avatars</strong>
