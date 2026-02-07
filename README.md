@@ -1,5 +1,5 @@
 # CATBot — Central Agentic Tools Bot
-<p> align="center">
+<p align="center">
 <img src="CATBot_logo.png" alt="CATBot Logo" width="80" height="80" align="center">
 </p>
 <p align="center">
