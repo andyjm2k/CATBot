@@ -24,8 +24,8 @@ Runtime: **Node.js ≥16** and **Python ≥3.11**.
 
 ```bash
 # Clone the repository
-git clone <repository-url>
-cd AI_assistant
+git clone https://github.com/andyjm2k/CATBot.git
+cd CATBot
 
 # Install Node.js dependencies
 npm install
