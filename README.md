@@ -1,6 +1,6 @@
 # CATBot — Central Agentic Tools Bot
 <p align="center">
-<img src="CATBot_logo.png" alt="CATBot Logo" width="80" height="80" align="center">
+<img src="CATBot_logo.png" alt="CATBot Logo" width="100" height="100" align="center">
 </p>
 <p align="center">
   <strong>Your comprehensive AI assistant with browser automation, speech, and 3D avatars</strong>
