@@ -2,8 +2,16 @@ window.runWorkflow = async function(contentPrompt) {
     console.log('ai-autogen-call.js - runWorkflow called with:', contentPrompt);
     
     try {
-        // Call the autogen API through the proxy server to avoid CORS issues
-        const response = await fetch('http://localhost:8002/v1/proxy/autogen', {
+        // Always construct URL from current page location - simple and reliable
+        // Use the same protocol and hostname as the current page, just change port to 8002
+        const protocol = window.location.protocol; // https: or http:
+        const hostname = window.location.hostname; // anton.local, IP address, etc.
+        const proxyBaseUrl = `${protocol}//${hostname}:8002`;
+        
+        console.log('ai-autogen-call.js - Using proxy URL:', proxyBaseUrl);
+        
+        // Call the autogen API through the proxy server to avoid CORS and mixed content issues
+        const response = await fetch(`${proxyBaseUrl}/v1/proxy/autogen`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'

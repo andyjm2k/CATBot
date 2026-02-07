@@ -1214,9 +1214,30 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
         
         // Get the server base (IP or hostname)
         const SERVER_BASE = getServerBase();
-        // Construct base URLs using the detected server
-        const PROXY_BASE_URL = `http://${SERVER_BASE}:8002`;
-        const MCP_BROWSER_BASE_URL = `http://${SERVER_BASE}:5001`;
+        // Get the current protocol (http or https) - use https for secure connections
+        const PROTOCOL = window.location.protocol === 'https:' ? 'https:' : 'https:';
+        // Construct base URLs using the detected server with HTTPS
+        const PROXY_BASE_URL = `${PROTOCOL}//${SERVER_BASE}:8002`;
+        const MCP_BROWSER_BASE_URL = `${PROTOCOL}//${SERVER_BASE}:5001`;
+        
+        // Make PROXY_BASE_URL available globally for ai-autogen-call.js
+        window.PROXY_BASE_URL = PROXY_BASE_URL;
+        
+        // Helper function to resolve relative model paths to absolute URLs for remote access
+        function resolveModelPath(relativePath) {
+            // If path is already absolute (starts with http:// or https://), return as-is
+            if (relativePath.startsWith('http://') || relativePath.startsWith('https://')) {
+                return relativePath;
+            }
+            // Convert relative path to absolute URL using current origin
+            const baseUrl = `${PROTOCOL}//${window.location.hostname}:${window.location.port || (PROTOCOL === 'https:' ? '8000' : '8000')}`;
+            // Remove leading ./ if present
+            const cleanPath = relativePath.startsWith('./') ? relativePath.substring(2) : relativePath;
+            // Ensure path starts with /
+            const normalizedPath = cleanPath.startsWith('/') ? cleanPath : '/' + cleanPath;
+            return baseUrl + normalizedPath;
+        }
+        
         const AUTH_TOKEN_STORAGE_KEY = 'jwtAuthToken';
         let authToken = localStorage.getItem(AUTH_TOKEN_STORAGE_KEY) || '';
 
@@ -1956,8 +1977,11 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
 
         // Add this function to fetch available models
         async function fetchAvailableModels() {
-            const endpoint = endpointInput.value.replace('/chat/completions', '/models');
+            const originalEndpoint = endpointInput.value.replace('/chat/completions', '/models');
             const apiKey = apiKeyInput.value.trim();
+            
+            // Route through proxy server to avoid mixed content issues with HTTPS
+            const endpoint = `${PROXY_BASE_URL}/v1/proxy/models?endpoint=${encodeURIComponent(originalEndpoint)}`;
 
             try {
                 // Ensure VRM ES modules have loaded and THREE globals are present
@@ -7082,6 +7106,9 @@ function saveWAVFile(wavBlob) {
             
             let endpoint = endpointInput.value;
             const apiKey = apiKeyInput.value.trim();
+            
+            // Store the original endpoint for proxy routing
+            const originalEndpoint = endpoint;
 
             // Initialize context object for both single and chained tool calls
             const context = {
@@ -7120,6 +7147,11 @@ function saveWAVFile(wavBlob) {
                 endpoint = 'http://localhost:1234/v1/chat/completions';
             }
                 endpointInput.value = endpoint;
+            
+            // Route through proxy server to avoid mixed content issues with HTTPS
+            // Use the proxy endpoint and pass the original endpoint as a query parameter
+            const proxyEndpoint = `${PROXY_BASE_URL}/v1/proxy/chat/completions?endpoint=${encodeURIComponent(endpoint)}`;
+            endpoint = proxyEndpoint;
 
             const systemPrompt = `You are EVA, a useful AI assistant that can use various tools to help users.
 
@@ -8298,8 +8330,12 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                     live2dTickerRegistered = true;
                 }
 
+                // Resolve model path to absolute URL for remote access
+                const resolvedModelPath = resolveModelPath(modelPath);
+                console.log(`Loading Live2D model from: ${resolvedModelPath} (original: ${modelPath})`);
+                
                 // Load model
-                const model = await PIXI.live2d.Live2DModel.from(modelPath, {
+                const model = await PIXI.live2d.Live2DModel.from(resolvedModelPath, {
                     autoInteract: false,
                     focus: false
                 });
@@ -8526,9 +8562,13 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                     loader.register(parser => new window.VRMAnimationLoaderPlugin(parser));
                 }
 
+                // Resolve model path to absolute URL for remote access
+                const resolvedVRMPath = resolveModelPath(currentVRMModelPath);
+                console.log(`Loading VRM model from: ${resolvedVRMPath} (original: ${currentVRMModelPath})`);
+                
                 const gltf = await new Promise((resolve, reject) => {
                     loader.load(
-                        currentVRMModelPath,
+                        resolvedVRMPath,
                         resolve,
                         undefined,
                         reject

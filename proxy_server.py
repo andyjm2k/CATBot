@@ -13,7 +13,9 @@ import base64
 import hmac
 import hashlib
 import secrets
-from typing import Dict, List, Optional, Any
+import glob
+import socket
+from typing import Dict, List, Optional, Any, Tuple
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
@@ -652,10 +654,24 @@ async def require_auth_for_v1_routes(request: Request, call_next):
     if request.method == "OPTIONS":
         return await call_next(request)
 
-    if path.startswith("/v1/") and path not in {
+    # Exempt certain routes from authentication (public endpoints)
+    exempt_paths = {
         "/v1/auth/signup",
         "/v1/auth/login",
-    }:
+        "/v1/audio/transcriptions",  # Whisper endpoint - public for audio transcription
+        "/v1/proxy/chat/completions",  # Chat completions proxy - public to avoid mixed content
+        "/v1/proxy/models",  # Models list proxy - public to avoid mixed content
+        "/v1/proxy/autogen",  # AutoGen workflow proxy - public to avoid mixed content
+        "/v1/proxy/browser-agent",  # Browser automation proxy - public to avoid mixed content
+        "/v1/proxy/deep-research",  # Deep research proxy - public to avoid mixed content
+        "/v1/proxy/tts/voices",  # TTS voices endpoint - public
+        "/v1/proxy/tts/speech",  # TTS speech endpoint - public
+        "/v1/proxy/search",  # Search proxy - public
+        "/v1/proxy/news",  # News proxy - public
+        "/v1/proxy/fetch",  # Web fetch proxy - public
+    }
+    
+    if path.startswith("/v1/") and path not in exempt_paths:
         try:
             # Get authorization header - FastAPI headers are case-insensitive, but check both for robustness
             # Use get() with case-insensitive lookup
@@ -696,7 +712,13 @@ async def require_auth_for_v1_routes(request: Request, call_next):
             auth_debug = request.headers.get("authorization") or request.headers.get("Authorization") or "None"
             if auth_debug != "None":
                 print(f"   Auth header value (first 100 chars): {auth_debug[:100]}")
-            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+            # Include CORS headers in error response
+            cors_headers = build_cors_headers(request)
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={"detail": exc.detail},
+                headers=cors_headers
+            )
 
     return await call_next(request)
 
@@ -2652,6 +2674,413 @@ async def health_check():
         sys.stdout.flush()
         raise
 
+# Models list proxy endpoint to handle CORS and mixed content
+@app.get("/v1/proxy/models")
+async def proxy_models(request: Request, endpoint: Optional[str] = None):
+    """
+    Proxy models list requests to handle CORS and avoid mixed content issues.
+    Routes requests to the OpenAI-compatible API endpoint specified in the request.
+    """
+    try:
+        # Get the endpoint from query parameter or use default
+        if not endpoint:
+            endpoint = request.query_params.get('endpoint', '')
+        
+        # If still no endpoint, use default from environment or localhost
+        if not endpoint:
+            endpoint = os.getenv('OPENAI_API_BASE', 'http://localhost:1234/v1/models')
+        else:
+            # Ensure the endpoint includes the full path if not already present
+            if not endpoint.endswith('/models'):
+                endpoint = endpoint.rstrip('/') + '/models'
+        
+        # Get Authorization header from the request
+        auth_header = request.headers.get('Authorization', '')
+        
+        # Build headers for the forwarded request
+        headers = {}
+        if auth_header:
+            headers['Authorization'] = auth_header
+        
+        # Add organization/project headers if present in original request
+        org_header = request.headers.get('OpenAI-Organization')
+        if org_header:
+            headers['OpenAI-Organization'] = org_header
+        
+        project_header = request.headers.get('OpenAI-Project')
+        if project_header:
+            headers['OpenAI-Project'] = project_header
+        
+        print(f"📋 Proxying models list request to: {endpoint}")
+        
+        # Forward the request to the LLM service
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(
+                endpoint,
+                headers=headers
+            )
+        
+        print(f"✅ Models list response status: {response.status_code}")
+        
+        # Check if the response is successful
+        if response.status_code != 200:
+            print(f"❌ LLM service returned error: {response.status_code}")
+            print(f"   Response text: {response.text[:500]}")
+            return JSONResponse(
+                content=response.json() if response.headers.get('content-type', '').startswith('application/json') else {"error": response.text},
+                status_code=response.status_code
+            )
+        
+        # Return the JSON response
+        try:
+            response_data = response.json()
+            return JSONResponse(content=response_data, status_code=200)
+        except Exception as json_error:
+            print(f"❌ Failed to parse JSON response: {json_error}")
+            return JSONResponse(
+                content={"error": "Invalid JSON response from LLM service"},
+                status_code=500
+            )
+    
+    except httpx.ConnectError as e:
+        print(f"❌ Connection error: Could not connect to LLM service")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Could not connect to LLM service. Please check the endpoint configuration."
+        )
+    except Exception as e:
+        print(f"❌ Models list proxy error: {e}")
+        import traceback
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to proxy models list request: {str(e)}")
+
+# Browser automation proxy endpoints to handle CORS and mixed content
+@app.post("/v1/proxy/browser-agent")
+async def proxy_browser_agent(request: Request):
+    """
+    Proxy browser automation requests to the MCP browser server.
+    Routes requests to avoid mixed content issues with HTTPS.
+    """
+    try:
+        # Get the request body
+        body = await request.json()
+        
+        # Get MCP browser server URL from environment or use default
+        # Try multiple connection methods for better reliability
+        mcp_browser_url = os.getenv('MCP_BROWSER_SERVER_URL', None)
+        
+        # If not set, try to determine the best URL to use
+        if not mcp_browser_url:
+            # Try to get local IP address
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.connect(("8.8.8.8", 80))
+                local_ip = s.getsockname()[0]
+                s.close()
+                # Try using the local IP first, then fall back to 127.0.0.1
+                mcp_browser_url = f"http://{local_ip}:5001"
+                print(f"   Detected local IP: {local_ip}, using {mcp_browser_url}")
+            except Exception:
+                # Fall back to 127.0.0.1
+                mcp_browser_url = "http://127.0.0.1:5001"
+                print(f"   Using default: {mcp_browser_url}")
+        else:
+            print(f"   Using configured MCP_BROWSER_SERVER_URL: {mcp_browser_url}")
+        
+        endpoint = f"{mcp_browser_url.rstrip('/')}/api/browser-agent"
+        
+        print(f"🌐 Proxying browser-agent request to: {endpoint}")
+        print(f"   Request body keys: {list(body.keys()) if isinstance(body, dict) else 'N/A'}")
+        
+        # First, try a quick health check to see if the server is responsive
+        health_endpoint = f"{mcp_browser_url.rstrip('/')}/api/health"
+        health_check_passed = False
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as health_client:
+                health_response = await health_client.get(health_endpoint)
+                if health_response.status_code == 200:
+                    print(f"   ✅ MCP browser server health check passed")
+                    health_check_passed = True
+                else:
+                    print(f"   ⚠️  MCP browser server health check returned: {health_response.status_code}")
+        except Exception as health_err:
+            print(f"   ⚠️  MCP browser server health check failed: {health_err}")
+            # If health check fails with IP, try 127.0.0.1 as fallback
+            if not mcp_browser_url.startswith("http://127.0.0.1"):
+                print(f"   Trying fallback to 127.0.0.1...")
+                mcp_browser_url = "http://127.0.0.1:5001"
+                endpoint = f"{mcp_browser_url.rstrip('/')}/api/browser-agent"
+                try:
+                    async with httpx.AsyncClient(timeout=5.0) as health_client:
+                        health_response = await health_client.get(f"{mcp_browser_url.rstrip('/')}/api/health")
+                        if health_response.status_code == 200:
+                            print(f"   ✅ MCP browser server health check passed with 127.0.0.1")
+                            health_check_passed = True
+                except Exception:
+                    print(f"   ⚠️  Health check also failed with 127.0.0.1")
+        
+        if not health_check_passed:
+            print(f"   ⚠️  Warning: Health check failed, but continuing with request")
+        
+        # Create a timeout configuration - longer for browser automation tasks
+        # Use a timeout that allows for long-running browser tasks
+        # connect: time to establish connection (10s)
+        # read: time to read response (10 minutes for browser automation)
+        # write: time to write request (10s)
+        # pool: time to get connection from pool (10s)
+        timeout = httpx.Timeout(connect=10.0, read=600.0, write=10.0, pool=10.0)
+        
+        # Forward the request to the MCP browser server
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            try:
+                print(f"   Sending POST request to MCP browser server...")
+                response = await client.post(
+                    endpoint,
+                    json=body,
+                    headers={'Content-Type': 'application/json'}
+                )
+                print(f"   Received response from MCP browser server")
+            except httpx.ConnectError as conn_err:
+                print(f"❌ Connection error to MCP browser server: {conn_err}")
+                print(f"   Attempted endpoint: {endpoint}")
+                print(f"   Please ensure the MCP browser server is running: python start_mcp_browser_server.py")
+                raise HTTPException(
+                    status_code=503,
+                    detail="Could not connect to MCP browser server. Please ensure it's running on port 5001."
+                )
+            except httpx.ReadTimeout as timeout_err:
+                print(f"❌ Read timeout from MCP browser server: {timeout_err}")
+                print(f"   The browser automation task may be taking longer than expected.")
+                print(f"   This could indicate:")
+                print(f"   1. The MCP browser server is processing a long-running task")
+                print(f"   2. The MCP browser server is not responding")
+                print(f"   3. Network connectivity issues")
+                raise HTTPException(
+                    status_code=504,
+                    detail="Browser automation task timed out after 10 minutes. The task may be taking longer than expected. Please try again or check the MCP browser server logs."
+                )
+            except httpx.TimeoutException as timeout_err:
+                print(f"❌ General timeout from MCP browser server: {timeout_err}")
+                raise HTTPException(
+                    status_code=504,
+                    detail="Browser automation task timed out. Please try again or check the MCP browser server logs."
+                )
+        
+        print(f"✅ Browser-agent response status: {response.status_code}")
+        
+        # Return the response
+        if response.status_code != 200:
+            error_content = response.json() if response.headers.get('content-type', '').startswith('application/json') else {"error": response.text}
+            print(f"   Error response: {error_content}")
+            return JSONResponse(
+                content=error_content,
+                status_code=response.status_code
+            )
+        
+        return JSONResponse(content=response.json(), status_code=200)
+    
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
+    except Exception as e:
+        print(f"❌ Browser-agent proxy error: {e}")
+        import traceback
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to proxy browser-agent request: {str(e)}")
+
+@app.post("/v1/proxy/deep-research")
+async def proxy_deep_research(request: Request):
+    """
+    Proxy deep research requests to the MCP browser server.
+    Routes requests to avoid mixed content issues with HTTPS.
+    """
+    try:
+        # Get the request body
+        body = await request.json()
+        
+        # Get MCP browser server URL from environment or use default
+        # Try multiple connection methods for better reliability
+        mcp_browser_url = os.getenv('MCP_BROWSER_SERVER_URL', None)
+        
+        # If not set, try to determine the best URL to use
+        if not mcp_browser_url:
+            # Try to get local IP address
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.connect(("8.8.8.8", 80))
+                local_ip = s.getsockname()[0]
+                s.close()
+                # Try using the local IP first, then fall back to 127.0.0.1
+                mcp_browser_url = f"http://{local_ip}:5001"
+                print(f"   Detected local IP: {local_ip}, using {mcp_browser_url}")
+            except Exception:
+                # Fall back to 127.0.0.1
+                mcp_browser_url = "http://127.0.0.1:5001"
+                print(f"   Using default: {mcp_browser_url}")
+        else:
+            print(f"   Using configured MCP_BROWSER_SERVER_URL: {mcp_browser_url}")
+        
+        endpoint = f"{mcp_browser_url.rstrip('/')}/api/deep-research"
+        
+        print(f"🔬 Proxying deep-research request to: {endpoint}")
+        print(f"   Request body keys: {list(body.keys()) if isinstance(body, dict) else 'N/A'}")
+        
+        # Create a timeout configuration - even longer for deep research tasks
+        timeout = httpx.Timeout(connect=10.0, read=1200.0, write=10.0, pool=10.0)  # 20 minutes for deep research
+        
+        # Forward the request to the MCP browser server
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            try:
+                response = await client.post(
+                    endpoint,
+                    json=body,
+                    headers={'Content-Type': 'application/json'}
+                )
+            except httpx.ConnectError as conn_err:
+                print(f"❌ Connection error to MCP browser server: {conn_err}")
+                print(f"   Attempted endpoint: {endpoint}")
+                print(f"   Please ensure the MCP browser server is running: python start_mcp_browser_server.py")
+                raise HTTPException(
+                    status_code=503,
+                    detail="Could not connect to MCP browser server. Please ensure it's running on port 5001."
+                )
+            except httpx.ReadTimeout as timeout_err:
+                print(f"❌ Read timeout from MCP browser server: {timeout_err}")
+                print(f"   The deep research task may be taking longer than expected.")
+                raise HTTPException(
+                    status_code=504,
+                    detail="Deep research task timed out. The task may be taking longer than expected. Please try again or check the MCP browser server logs."
+                )
+        
+        print(f"✅ Deep-research response status: {response.status_code}")
+        
+        # Return the response
+        if response.status_code != 200:
+            error_content = response.json() if response.headers.get('content-type', '').startswith('application/json') else {"error": response.text}
+            print(f"   Error response: {error_content}")
+            return JSONResponse(
+                content=error_content,
+                status_code=response.status_code
+            )
+        
+        return JSONResponse(content=response.json(), status_code=200)
+    
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
+    except Exception as e:
+        print(f"❌ Deep-research proxy error: {e}")
+        import traceback
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to proxy deep-research request: {str(e)}")
+
+# Chat completions proxy endpoint to handle CORS and mixed content
+@app.post("/v1/proxy/chat/completions")
+async def proxy_chat_completions(request: Request):
+    """
+    Proxy chat completions requests to handle CORS and avoid mixed content issues.
+    Routes requests to the OpenAI-compatible API endpoint specified in the request.
+    """
+    try:
+        # Get the request body
+        body = await request.json()
+        
+        # Get the endpoint from query parameter or request body, or use default
+        endpoint = request.query_params.get('endpoint', '')
+        if not endpoint:
+            # Try to get from body (some clients might send it)
+            endpoint = body.get('_endpoint', '')
+        
+        # If still no endpoint, use default from environment or localhost
+        if not endpoint:
+            endpoint = os.getenv('OPENAI_API_BASE', 'http://localhost:1234/v1/chat/completions')
+        else:
+            # Ensure the endpoint includes the full path if not already present
+            if not endpoint.endswith('/chat/completions'):
+                endpoint = endpoint.rstrip('/') + '/chat/completions'
+        
+        # Remove internal endpoint parameter from body before forwarding
+        body_clean = {k: v for k, v in body.items() if k != '_endpoint'}
+        
+        # Get Authorization header from the request
+        auth_header = request.headers.get('Authorization', '')
+        
+        # Build headers for the forwarded request
+        headers = {
+            'Content-Type': 'application/json'
+        }
+        if auth_header:
+            headers['Authorization'] = auth_header
+        
+        # Add organization/project headers if present in original request
+        org_header = request.headers.get('OpenAI-Organization')
+        if org_header:
+            headers['OpenAI-Organization'] = org_header
+        
+        project_header = request.headers.get('OpenAI-Project')
+        if project_header:
+            headers['OpenAI-Project'] = project_header
+        
+        print(f"💬 Proxying chat completions request to: {endpoint}")
+        print(f"   Model: {body_clean.get('model', 'unknown')}")
+        
+        # Forward the request to the LLM service
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            response = await client.post(
+                endpoint,
+                json=body_clean,
+                headers=headers
+            )
+        
+        print(f"✅ Chat completions response status: {response.status_code}")
+        
+        # Check if the response is successful
+        if response.status_code != 200:
+            print(f"❌ LLM service returned error: {response.status_code}")
+            print(f"   Response text: {response.text[:500]}")
+            return JSONResponse(
+                content=response.json() if response.headers.get('content-type', '').startswith('application/json') else {"error": response.text},
+                status_code=response.status_code
+            )
+        
+        # Return the JSON response
+        try:
+            response_data = response.json()
+            return JSONResponse(content=response_data, status_code=200)
+        except Exception as json_error:
+            print(f"❌ Failed to parse JSON response: {json_error}")
+            return JSONResponse(
+                content={"error": "Invalid JSON response from LLM service"},
+                status_code=500
+            )
+    
+    except httpx.ConnectError as e:
+        print(f"❌ Connection error: Could not connect to LLM service")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Could not connect to LLM service. Please check the endpoint configuration."
+        )
+    except Exception as e:
+        print(f"❌ Chat completions proxy error: {e}")
+        import traceback
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to proxy chat completions request: {str(e)}")
+
+# OPTIONS handler for Whisper endpoint to handle CORS preflight
+@app.options("/v1/audio/transcriptions")
+async def proxy_whisper_options(request: Request):
+    """Handle CORS preflight requests for Whisper endpoint."""
+    return JSONResponse(
+        content={},
+        status_code=200,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+            "Access-Control-Max-Age": "3600",
+        }
+    )
+
 # Whisper proxy endpoint to handle CORS
 @app.post("/v1/audio/transcriptions")
 async def proxy_whisper(request: Request):
@@ -3589,14 +4018,111 @@ async def upload_to_drive(request: Request):
 # END GOOGLE DRIVE UPLOAD ENDPOINT
 # ============================================================================
 
+# ============================================================================
+# SSL CERTIFICATE UTILITIES
+# ============================================================================
+
+def get_local_ip() -> Optional[str]:
+    """
+    Get the local IP address of this machine.
+    Returns the IP address or None if unable to determine.
+    """
+    try:
+        # Connect to a remote address to determine local IP (doesn't actually send data)
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return None
+
+def find_mkcert_certificates() -> Tuple[Optional[str], Optional[str]]:
+    """
+    Find mkcert-generated certificates in the project directory.
+    Returns a tuple of (cert_file, key_file) or (None, None) if not found.
+    mkcert creates files like: anton.local+2.pem, anton.local+2-key.pem, etc.
+    """
+    # Search for mkcert certificate files (pattern: anton.local*.pem)
+    cert_files = glob.glob('anton.local*.pem')
+    
+    # Filter out key files and find matching pairs
+    cert_key_pairs = []
+    for cert_file in cert_files:
+        # Skip key files themselves
+        if '-key' in cert_file:
+            continue
+        # Find the corresponding key file
+        key_file = cert_file.replace('.pem', '-key.pem')
+        if os.path.exists(key_file):
+            # Get modification time to find the most recent
+            cert_time = os.path.getmtime(cert_file)
+            cert_key_pairs.append((cert_file, key_file, cert_time))
+    
+    if cert_key_pairs:
+        # Return the most recent certificate pair
+        cert_key_pairs.sort(key=lambda x: x[2], reverse=True)
+        return cert_key_pairs[0][0], cert_key_pairs[0][1]
+    
+    return None, None
+
+def get_ssl_certificates() -> Tuple[Optional[str], Optional[str]]:
+    """
+    Get SSL certificate files for HTTPS server.
+    First tries to find mkcert certificates, then falls back to default names.
+    Returns a tuple of (cert_file, key_file) or (None, None) if not found.
+    """
+    # Try to find mkcert certificates first
+    cert_file, key_file = find_mkcert_certificates()
+    if cert_file and key_file and os.path.exists(cert_file) and os.path.exists(key_file):
+        print(f"[SSL] Found mkcert certificate: {cert_file}")
+        return cert_file, key_file
+    
+    # Fall back to default certificate file names
+    default_cert = 'anton.local+2.pem'
+    default_key = 'anton.local+2-key.pem'
+    
+    if os.path.exists(default_cert) and os.path.exists(default_key):
+        print(f"[SSL] Using default certificate: {default_cert}")
+        return default_cert, default_key
+    
+    # Return None if no certificates found
+    print("[SSL] No SSL certificates found. Server will run without HTTPS.")
+    return None, None
+
+# ============================================================================
+# END SSL CERTIFICATE UTILITIES
+# ============================================================================
+
 if __name__ == "__main__":
     # Start the server
     print("[START] Starting CATBot Proxy Server with File Operations...")
     print(f"[INFO] Scratch directory: {SCRATCH_DIR}")
-    uvicorn.run(
-        "proxy_server:app",
-        host="0.0.0.0",
-        port=8002,
-        reload=True,
-        log_level="info"
-    )
+    
+    # Get SSL certificates for HTTPS
+    cert_file, key_file = get_ssl_certificates()
+    
+    # Configure uvicorn with SSL if certificates are available
+    if cert_file and key_file:
+        print(f"[SSL] Starting HTTPS server on port 8002")
+        print(f"[SSL] Certificate: {cert_file}")
+        print(f"[SSL] Key: {key_file}")
+        uvicorn.run(
+            "proxy_server:app",
+            host="0.0.0.0",
+            port=8002,
+            reload=True,
+            log_level="info",
+            ssl_keyfile=key_file,
+            ssl_certfile=cert_file
+        )
+    else:
+        print("[WARN] Starting HTTP server (no SSL certificates found)")
+        print("[INFO] To enable HTTPS, ensure mkcert certificate files are in the project directory")
+        uvicorn.run(
+            "proxy_server:app",
+            host="0.0.0.0",
+            port=8002,
+            reload=True,
+            log_level="info"
+        )
