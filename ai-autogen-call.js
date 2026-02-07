@@ -1,5 +1,10 @@
-window.runWorkflow = async function(contentPrompt) {
+window.runWorkflow = async function(contentPrompt, options = {}) {
     console.log('ai-autogen-call.js - runWorkflow called with:', contentPrompt);
+
+    // Capture hostname from calling page - use provided hostname, or fallback to window.location
+    // This ensures we use the actual calling page's hostname, not localhost
+    const hostname = options.hostname || window.location.hostname;
+    const protocol = options.protocol || window.location.protocol;
 
     const endpointPath = '/v1/proxy/autogen';
 
@@ -8,14 +13,14 @@ window.runWorkflow = async function(contentPrompt) {
     const sameOriginUrl = endpointPath;
     const configuredProxyUrl = window.PROXY_BASE_URL
         ? `${window.PROXY_BASE_URL}${endpointPath}`
-        : `${window.location.protocol}//${window.location.hostname}:8002${endpointPath}`;
+        : `${protocol}//${hostname}:8002${endpointPath}`;
 
     const candidateUrls = Array.from(new Set([sameOriginUrl, configuredProxyUrl]));
 
-    if (window.location.protocol === 'https:') {
+    if (protocol === 'https:') {
         // Last-resort fallback when proxy is only exposed over HTTP.
         // This may still be blocked by mixed-content rules depending on deployment.
-        const httpFallback = `http://${window.location.hostname}:8002${endpointPath}`;
+        const httpFallback = `http://${hostname}:8002${endpointPath}`;
         candidateUrls.push(httpFallback);
     }
 

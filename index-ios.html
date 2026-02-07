@@ -6674,7 +6674,12 @@ function saveWAVFile(wavBlob) {
                         result = await handleCalculation(args, context);
                         break;
                     case "runWorkflow":
-                        result = await handleWorkflow(args);
+                        // Ensure hostname and protocol are included to avoid localhost default
+                        result = await handleWorkflow({
+                            ...args,
+                            hostname: args.hostname || window.location.hostname,
+                            protocol: args.protocol || window.location.protocol
+                        });
                         break;
                     case "llmQuery":
                         result = await handleLLMQuery(args, context);
@@ -7153,9 +7158,14 @@ function saveWAVFile(wavBlob) {
             }
         }
 
-        async function handleWorkflow({ contentPrompt }) {
+        async function handleWorkflow({ contentPrompt, hostname, protocol }) {
             try {
-                const result = await window.runWorkflow(contentPrompt);
+                // Pass the calling page's hostname and protocol to runWorkflow
+                // Use provided values or fallback to window.location to avoid localhost default
+                const result = await window.runWorkflow(contentPrompt, {
+                    hostname: hostname || window.location.hostname,
+                    protocol: protocol || window.location.protocol
+                });
                 const now = new Date();
                 const pad2 = (value) => value.toString().padStart(2, '0');
                 const timestamp = [
