@@ -115,7 +115,7 @@
               "model": "openai/gpt-oss-20b",
               "model_info": {
                 "vision": false,
-                "function_calling": true,
+                "function_calling": false,
                 "json_output": false,
                 "family": "unknown",
                 "structured_output": false
@@ -160,7 +160,7 @@
             }
           },
           "description": "an agent that critiques and improves the assistant's output",
-          "system_message": "You are a scrutinizing critic. Your goal is to critique the assistant's output and request improvements. Only when you agree no further improvements are needed then the assistant's task is complete and you are able to request the Assistant to TERMINATE.",
+          "system_message": "You are a scrutinizing critic. Your goal is to critique the assistant's output and request improvements using only text responses. Do not attempt to use any tools or function calls - provide your feedback as plain text. Only when you agree no further improvements are needed then the assistant's task is complete and you are able to request the Assistant to TERMINATE.",
           "model_client_stream": false,
           "reflect_on_tool_use": false,
           "tool_call_summary_format": "{result}",

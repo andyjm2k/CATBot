@@ -5,22 +5,30 @@ window.runWorkflow = async function(contentPrompt, options = {}) {
     // This ensures we use the actual calling page's hostname, not localhost
     const hostname = options.hostname || window.location.hostname;
     const protocol = options.protocol || window.location.protocol;
+    const currentPort = window.location.port ? parseInt(window.location.port) : (protocol === 'https:' ? 443 : 80);
+    const proxyPort = 8002; // Proxy server runs on port 8002
 
     const endpointPath = '/v1/proxy/autogen';
 
-    // Prefer same-origin endpoint first (works behind HTTPS/reverse proxies).
-    // Fallback to explicit proxy host/port for direct deployments.
-    const sameOriginUrl = endpointPath;
+    // Build candidate URLs - only use same-origin if we're already on the proxy port
+    // Otherwise skip it to avoid 501 errors from the static file server
+    const candidateUrls = [];
+    
+    // Only add same-origin URL if we're already on the proxy server's port
+    if (currentPort === proxyPort) {
+        candidateUrls.push(endpointPath);
+    }
+    
+    // Add the explicit proxy URL (always needed for direct deployments)
     const configuredProxyUrl = window.PROXY_BASE_URL
         ? `${window.PROXY_BASE_URL}${endpointPath}`
-        : `${protocol}//${hostname}:8002${endpointPath}`;
-
-    const candidateUrls = Array.from(new Set([sameOriginUrl, configuredProxyUrl]));
+        : `${protocol}//${hostname}:${proxyPort}${endpointPath}`;
+    candidateUrls.push(configuredProxyUrl);
 
     if (protocol === 'https:') {
         // Last-resort fallback when proxy is only exposed over HTTP.
         // This may still be blocked by mixed-content rules depending on deployment.
-        const httpFallback = `http://${hostname}:8002${endpointPath}`;
+        const httpFallback = `http://${hostname}:${proxyPort}${endpointPath}`;
         candidateUrls.push(httpFallback);
     }
 
