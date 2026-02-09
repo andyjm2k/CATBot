@@ -1861,7 +1861,25 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
         // Send button mobile - show/hide based on input
         const sendBtnMobile = document.getElementById('send-btn-mobile');
         if (userInput && sendBtnMobile) {
+            // Handle input event - show send button when text is entered
             userInput.addEventListener('input', function() {
+                if (this.value.trim().length > 0) {
+                    sendBtnMobile.style.display = 'flex';
+                    if (startRecordBtn) startRecordBtn.style.display = 'none';
+                } else {
+                    sendBtnMobile.style.display = 'none';
+                    if (startRecordBtn) startRecordBtn.style.display = 'flex';
+                }
+            });
+
+            // Handle blur event - switch back to microphone button when input loses focus
+            userInput.addEventListener('blur', function() {
+                sendBtnMobile.style.display = 'none';
+                if (startRecordBtn) startRecordBtn.style.display = 'flex';
+            });
+
+            // Handle focus event - show send button if there's text when input regains focus
+            userInput.addEventListener('focus', function() {
                 if (this.value.trim().length > 0) {
                     sendBtnMobile.style.display = 'flex';
                     if (startRecordBtn) startRecordBtn.style.display = 'none';
@@ -2093,11 +2111,19 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
             
             console.log('Message object created:', { role: message.role, sender: message.sender, content: message.content }); // Debug log
             
-            // Add to array and limit to 25 messages
+            // Add to displayedMessages array and limit to 25 messages
             displayedMessages.push(message);
             if (displayedMessages.length > 25) {
                 displayedMessages.shift(); // Remove oldest message
             }
+            
+            // Also add to chatHistory for API calls and persistence
+            // Create a simplified message object for chatHistory (without sender/timestamp for API compatibility)
+            const chatMessage = {
+                role: role,
+                content: content
+            };
+            chatHistory.push(chatMessage);
             
             // Update the display
             renderMessageHistory();
@@ -5710,6 +5736,11 @@ function saveWAVFile(wavBlob) {
             try {
                 storage.setItem(CONVERSATIONS_STORAGE_KEY, JSON.stringify(conversations));
                 storage.setItem(ACTIVE_CONVERSATION_STORAGE_KEY, activeConversationId);
+                console.log('Conversations saved to localStorage:', {
+                    conversationCount: conversations.length,
+                    activeConversationId: activeConversationId,
+                    activeConversationMessageCount: getActiveConversation()?.messages?.length || 0
+                });
             } catch (error) {
                 console.warn('Error saving conversations:', error);
             }
@@ -5920,11 +5951,32 @@ function saveWAVFile(wavBlob) {
 
         // Function to update active conversation when messages change
         function updateActiveConversationMessages() {
-            const activeConv = getActiveConversation();
+            // Ensure we have an active conversation - create one if it doesn't exist
+            let activeConv = getActiveConversation();
+            if (!activeConv) {
+                console.log('No active conversation found, creating new one');
+                // If no active conversation exists, create a new one
+                if (activeConversationId === null || conversations.length === 0) {
+                    activeConv = createNewConversation('New Conversation');
+                    activeConversationId = activeConv.id;
+                } else {
+                    // Try to use the first conversation if activeConversationId is invalid
+                    activeConversationId = conversations[0].id;
+                    activeConv = getActiveConversation();
+                }
+            }
+            
             if (activeConv) {
+                // Update the conversation with current message state
                 activeConv.messages = [...chatHistory];
                 activeConv.displayedMessages = [...displayedMessages];
                 activeConv.updatedAt = new Date().toISOString();
+                
+                console.log('Updating active conversation:', {
+                    conversationId: activeConv.id,
+                    messageCount: chatHistory.length,
+                    displayedMessageCount: displayedMessages.length
+                });
                 
                 // Auto-generate title from first user message if still "New Conversation"
                 if (activeConv.title === 'New Conversation' && chatHistory.length > 0) {
@@ -5935,8 +5987,11 @@ function saveWAVFile(wavBlob) {
                     }
                 }
                 
+                // Save to localStorage
                 saveConversations();
                 renderConversationList();
+            } else {
+                console.warn('Could not create or find active conversation for message persistence');
             }
         }
 
@@ -8368,9 +8423,8 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                             const finalMsg = followupData?.choices?.[0]?.message?.content || '';
                             const finalContent = stripThinkTags(finalMsg);
                             if (finalContent) {
-                                chatHistory.push({ role: 'assistant', content: finalContent });
                                 responseOutput.value = finalContent;
-                                addMessageToHistory('assistant', finalContent); // Add to message history
+                                addMessageToHistory('assistant', finalContent); // Add to message history (also updates chatHistory)
                                 
                                 // Automatically extract memories from conversation (async, non-blocking)
                                 extractMemoriesFromConversation().catch(err => {
@@ -8629,9 +8683,8 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                                     confirmText = typeof lastToolMsg === 'string' ? lastToolMsg : '';
                                 }
                                 if (confirmText) {
-                                    chatHistory.push({ role: 'assistant', content: confirmText });
                                     responseOutput.value = confirmText;
-                                    addMessageToHistory('assistant', confirmText); // Add to message history
+                                    addMessageToHistory('assistant', confirmText); // Add to message history (also updates chatHistory)
                                     
                                     // Automatically extract memories from conversation (async, non-blocking)
                                     extractMemoriesFromConversation().catch(err => {
@@ -8746,9 +8799,8 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                             }
                         } else {
                             // Handle regular message response
-                        chatHistory.push({ role: 'assistant', content: cleanContent });
                         responseOutput.value = cleanContent;
-                        addMessageToHistory('assistant', cleanContent); // Add to message history
+                        addMessageToHistory('assistant', cleanContent); // Add to message history (also updates chatHistory)
                             
                             // Automatically extract memories from conversation (async, non-blocking)
                             extractMemoriesFromConversation().catch(err => {
@@ -9013,9 +9065,8 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                             fallbackText = typeof lastToolMsg === 'string' ? lastToolMsg : '';
                         }
                         if (fallbackText) {
-                            chatHistory.push({ role: 'assistant', content: fallbackText });
                             responseOutput.value = fallbackText;
-                            addMessageToHistory('assistant', fallbackText); // Add to message history
+                            addMessageToHistory('assistant', fallbackText); // Add to message history (also updates chatHistory)
                             
                             // Automatically extract memories from conversation (async, non-blocking)
                             extractMemoriesFromConversation().catch(err => {
