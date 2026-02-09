@@ -8278,6 +8278,14 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
             // Preserve existing system prompt by default; user input overrides it
             let effectiveSystemPrompt = systemPromptInput.value.trim() || systemPrompt;
             
+            // Get user name from tool settings and add to system prompt
+            // This works whether using custom prompt or default prompt
+            const userName = userNameInput.value.trim() || 'User';
+            if (userName && userName !== 'User') {
+                // Prepend user name info to the system prompt (works with both custom and default)
+                effectiveSystemPrompt = `The user you are talking to is named ${userName}.\n\n${effectiveSystemPrompt}`;
+            }
+            
             // Automatically search memories for opinion/knowledge questions (when not in philosopher mode)
             let memoryContext = null;
             if (!philosopherModeActive) {
