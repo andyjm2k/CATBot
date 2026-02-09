@@ -703,10 +703,21 @@ python test_server.py
 
 ## License
 
-See individual project licenses:
-- MCP Browser-Use: MIT (see `mcp-browser-use/LICENSE`)
-- AutoGen: MIT (see Microsoft AutoGen repository)
-- Browser-Use: MIT (see browser-use repository)
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+### Third-Party Licenses
+
+This project includes third-party software components. For complete attribution
+and license information, please see the [NOTICE](NOTICE) file.
+
+**Summary of third-party licenses:**
+- **MCP Browser-Use**: MIT License (see `mcp-browser-use/LICENSE`)
+- **AutoGen**: MIT License (see [Microsoft AutoGen repository](https://github.com/microsoft/autogen))
+- **Browser-Use**: MIT License (see [browser-use repository](https://github.com/browser-use/browser-use))
+- **ogg-opus-decoder**: MIT License (see `libs/ogg-opus-decoder/LICENSE`)
+
+All third-party components use permissive open source licenses (MIT) that are
+compatible with each other and allow for commercial use.
 
 ## Contributing
 

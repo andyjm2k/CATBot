@@ -1,0 +1,120 @@
+CATBot - Third-Party Software Notices and Licenses
+====================================================
+
+This project includes third-party software components that are licensed under
+various open source licenses. This file contains the required attributions
+and license information for these components.
+
+---
+
+## Embedded Libraries
+
+### ogg-opus-decoder
+**Version:** 1.7.3  
+**License:** MIT  
+**Repository:** https://github.com/eshaz/wasm-audio-decoders  
+**Copyright:** Copyright (c) 2024 Ethan Halsall
+
+This library is embedded in `libs/ogg-opus-decoder/` for audio decoding
+functionality. The full license text is available in `libs/ogg-opus-decoder/LICENSE`.
+
+---
+
+## Python Dependencies
+
+### browser-use
+**Version:** 0.1.41  
+**License:** MIT  
+**Repository:** https://github.com/browser-use/browser-use  
+**Copyright:** Copyright (c) 2024 Gregor Zunic
+
+Used for autonomous browser automation capabilities.
+
+### mcp-browser-use
+**Version:** 0.1.8 (submodule)  
+**License:** MIT  
+**Repository:** https://github.com/Saik0s/mcp-browser-use  
+**Copyright:** Copyright (c) 2025 Igor Tarasenko
+
+MCP server implementation for browser-use. This is included as a git submodule
+in `mcp-browser-use/`. The full license text is available in `mcp-browser-use/LICENSE`.
+
+### AutoGen (Microsoft)
+**License:** MIT  
+**Repository:** https://github.com/microsoft/autogen  
+**Copyright:** Copyright (c) Microsoft Corporation
+
+Multi-agent collaboration framework used for team-based AI interactions.
+
+### MCP (Model Context Protocol)
+**Version:** >=1.6.0  
+**License:** MIT  
+**Repository:** https://github.com/modelcontextprotocol/python-sdk  
+**Copyright:** Copyright (c) Anthropic PBC
+
+Model Context Protocol SDK for Python.
+
+---
+
+## Node.js Dependencies
+
+### @langchain/mcp-adapters
+**Version:** ^0.6.0  
+**License:** MIT  
+**Repository:** https://github.com/langchain-ai/langchain
+
+### @modelcontextprotocol/sdk
+**Version:** ^1.0.0  
+**License:** MIT  
+**Repository:** https://github.com/modelcontextprotocol/typescript-sdk
+
+### axios
+**Version:** ^1.12.0  
+**License:** MIT  
+**Repository:** https://github.com/axios/axios
+
+### cors
+**Version:** ^2.8.5  
+**License:** MIT  
+**Repository:** https://github.com/expressjs/cors
+
+### express
+**Version:** ^4.18.2  
+**License:** MIT  
+**Repository:** https://github.com/expressjs/express
+
+### ogg-opus-decoder
+**Version:** ^1.7.3  
+**License:** MIT  
+**Repository:** https://github.com/eshaz/wasm-audio-decoders
+
+**Note:** This package has a transitive dependency on `codec-parser` (LGPL-3.0-or-later),
+which is used as a library dependency and is compatible with this project's MIT license.
+
+---
+
+## License Compatibility
+
+All third-party components used in this project are licensed under permissive
+open source licenses (MIT and BSD-3-Clause), which are compatible with each
+other and allow for commercial use, modification, and distribution.
+
+**Note on LGPL Dependency:** The `codec-parser` package (LGPL-3.0-or-later) is
+included as a transitive dependency of `ogg-opus-decoder`. LGPL is compatible
+with MIT when used as a library dependency (not embedded code), which is the case here.
+
+---
+
+## Full License Texts
+
+For the complete license text of each component, please refer to:
+- `LICENSE` - This project's license (MIT)
+- `mcp-browser-use/LICENSE` - MCP Browser-Use license (MIT)
+- `libs/ogg-opus-decoder/LICENSE` - ogg-opus-decoder license (MIT)
+
+For other dependencies, please refer to their respective repositories or
+package distributions.
+
+---
+
+**Last Updated:** 2024
