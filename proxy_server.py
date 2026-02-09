@@ -2825,10 +2825,10 @@ async def proxy_browser_agent(request: Request):
         # Create a timeout configuration - longer for browser automation tasks
         # Use a timeout that allows for long-running browser tasks
         # connect: time to establish connection (10s)
-        # read: time to read response (10 minutes for browser automation)
+        # read: time to read response (3 hours for browser automation)
         # write: time to write request (10s)
         # pool: time to get connection from pool (10s)
-        timeout = httpx.Timeout(connect=10.0, read=600.0, write=10.0, pool=10.0)
+        timeout = httpx.Timeout(connect=10.0, read=10800.0, write=10.0, pool=10.0)
         
         # Forward the request to the MCP browser server
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
@@ -2926,7 +2926,7 @@ async def proxy_deep_research(request: Request):
         print(f"   Request body keys: {list(body.keys()) if isinstance(body, dict) else 'N/A'}")
         
         # Create a timeout configuration - even longer for deep research tasks
-        timeout = httpx.Timeout(connect=10.0, read=1200.0, write=10.0, pool=10.0)  # 20 minutes for deep research
+        timeout = httpx.Timeout(connect=10.0, read=10800.0, write=10.0, pool=10.0)  # 3 hours for deep research
         
         # Forward the request to the MCP browser server
         async with httpx.AsyncClient(timeout=timeout) as client:

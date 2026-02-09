@@ -10,10 +10,18 @@
     <!-- Add this in the <head> section -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     
-    <!-- Favicon: inline SVG to avoid 404 requests to /favicon.ico and provide a visible tab icon -->
-    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23007BFF'/%3E%3Ctext x='50%25' y='54%25' font-size='34' text-anchor='middle' fill='white' font-family='Segoe UI, Roboto, sans-serif'%3EE%3C/text%3E%3C/svg%3E">
+    <!-- Favicon: Generated from CATBot_logo.png -->
+    <link rel="icon" type="image/x-icon" href="/favicon.ico">
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="48x48" href="/favicon-48x48.png">
+    <!-- Apple Touch Icon for iOS devices -->
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+    <!-- Android Chrome icons -->
+    <link rel="icon" type="image/png" sizes="192x192" href="/android-chrome-192x192.png">
+    <link rel="icon" type="image/png" sizes="512x512" href="/android-chrome-512x512.png">
     <!-- Legacy shortcut icon for broader compatibility -->
-    <link rel="shortcut icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23007BFF'/%3E%3Ctext x='50%25' y='54%25' font-size='34' text-anchor='middle' fill='white' font-family='Segoe UI, Roboto, sans-serif'%3EE%3C/text%3E%3C/svg%3E">
+    <link rel="shortcut icon" href="/favicon.ico">
     <style>
         /* iOS Safari Fixes */
         * {
@@ -70,21 +78,26 @@
 
         .auth-card {
             width: min(420px, 95vw);
-            background: #fff;
+            background: #1a1a1a;
+            border: 1px solid #2a2a2a;
             border-radius: 12px;
             padding: 20px;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
         }
 
         .auth-card h2 {
             margin-top: 0;
             margin-bottom: 10px;
-            color: #007BFF;
+            color: #ffffff;
+        }
+
+        .auth-card label {
+            color: #ffffff;
         }
 
         .auth-help {
             margin: 0 0 10px 0;
-            color: #666;
+            color: #999;
             font-size: 0.92rem;
         }
 
@@ -150,6 +163,13 @@
             justify-content: center;
             min-width: 44px;
             min-height: 44px;
+        }
+
+        .header-logo {
+            height: 28px;
+            width: auto;
+            object-fit: contain;
+            display: block;
         }
 
         .beta-badge {
@@ -920,7 +940,7 @@
 
         /* Message content */
         .message-content {
-            color: #333;
+            color: #ffffff; /* Changed from gray (#333) to white for better readability */
             white-space: pre-wrap;
         }
 
@@ -1403,6 +1423,7 @@
             </button>
         </div>
         <div class="header-center">
+            <img src="/CATBot_logo.png" alt="CATBot Logo" class="header-logo">
             <h1>CATBot</h1>
             <span class="beta-badge">beta</span>
         </div>
