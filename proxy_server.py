@@ -8,6 +8,7 @@ import asyncio
 import json
 import os
 import re
+import sys
 import time
 import base64
 import hmac
@@ -27,7 +28,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.middleware.base import BaseHTTPMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 import uvicorn
 
 # Import dotenv to load .env file
@@ -137,10 +138,13 @@ else:
     print("⚠️  python-dotenv not available. Using system environment variables only.")
 
 # Pydantic models for request/response validation
+# Note: 'command' is intentionally not accepted from clients; only server-side presets are used.
 class ServerConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")  # Reject any extra fields (e.g. 'command') in request body
+
     id: Optional[str] = None
     name: Optional[str] = None
-    command: Optional[str] = None
+    preset_id: Optional[str] = None  # Required for add/update; must be in MCP_PRESETS
     apiKey: Optional[str] = None
     model: Optional[str] = None
     url: Optional[str] = None
@@ -255,6 +259,13 @@ class PhilosopherResponse(BaseModel):
 mcp_clients = {}
 mcp_servers = {}
 SERVERS_FILE = Path(__file__).parent / "mcp_servers.json"
+
+# Server-side allowlist: only these presets may be used for MCP server execution.
+# Never execute user-supplied command strings; resolve command/args only from here.
+MCP_PRESETS = {
+    "browser-use": {"type": "inprocess"},  # No subprocess; handled in-process in call_tool/list_tools
+    # Future: "stdio": {"type": "stdio", "command": sys.executable, "allowed_args": [["-m", "mcp_server_browser_use"], ...]},
+}
 TEAM_CONFIG_FILE = Path(__file__).parent / "team-config.json"
 SCRATCH_DIR = Path(__file__).parent / "scratch"
 
@@ -425,6 +436,13 @@ def get_current_user(
     return get_current_user_from_headers(authorization, x_auth_token)
 
 
+def security_log(action: str, user: str, server_id: Optional[str], detail: str) -> None:
+    """Log MCP config/connect actions for audit; do not log secrets."""
+    ts = datetime.now(timezone.utc).isoformat()
+    sid = server_id or ""
+    print(f"[SEC] {ts} action={action} user={user} server_id={sid} detail={detail}", flush=True)
+
+
 # Helper utilities for Telegram integration
 def build_openai_url(path: str) -> str:
     """Return absolute URL for OpenAI-compatible endpoints."""
@@ -484,61 +502,64 @@ class MCPClientManager:
         self.write = None
 
     async def connect(self):
-        """Connect to MCP server and initialize client."""
+        """Connect to MCP server using server-side allowlisted preset only; never execute user-supplied command."""
         if not MCP_AVAILABLE:
             raise Exception("MCP SDK not available")
 
+        preset_id = self.server_config.get("preset_id")
+        if not preset_id or preset_id not in MCP_PRESETS:
+            raise ValueError(
+                "Server has no valid preset_id. Reconfigure the server with a preset (e.g. preset_id: 'browser-use')."
+            )
+        preset = MCP_PRESETS[preset_id]
+        if preset.get("type") == "inprocess":
+            # browser-use: connect is handled in connect_server without calling this code path
+            raise ValueError(
+                f"Preset '{preset_id}' is inprocess; connect is handled separately. Do not call MCPClientManager.connect for this preset."
+            )
+        if preset.get("type") != "stdio":
+            raise ValueError(
+                f"Preset '{preset_id}' has no executable command. Reconfigure the server with a valid stdio preset."
+            )
+
+        # Resolve command and args only from allowlist; never use server_config['command']
+        command = preset.get("command")
+        allowed_args = preset.get("allowed_args", [])
+        if not command or not allowed_args:
+            raise ValueError(f"Preset '{preset_id}' has no command/args defined in MCP_PRESETS.")
+        # Use first allowed_args entry for this preset (e.g. ["-m", "mcp_server_browser_use"])
+        args = list(allowed_args[0]) if isinstance(allowed_args[0], (list, tuple)) else []
+
         try:
-            command_parts = self.server_config['command'].strip().split()
-            if not command_parts:
-                raise ValueError('Invalid command format')
+            print(f"🔧 Creating MCP client with command: {command} and args: {args}")
 
-            print(f"🔧 Creating MCP client with command: {command_parts[0]} and args: {command_parts[1:]}")
-
-            # Prepare environment variables
+            # Prepare environment variables from server config (apiKey, model only)
             env = os.environ.copy()
-
-            # Add API keys from server config if available
-            if self.server_config.get('apiKey'):
-                # Determine which API key to use based on the model
-                model = self.server_config.get('model', '').lower()
-                if 'gemini' in model:
-                    env['GOOGLE_API_KEY'] = self.server_config['apiKey']
-                    env['MCP_MODEL_PROVIDER'] = 'google'
-                elif 'claude' in model:
-                    env['ANTHROPIC_API_KEY'] = self.server_config['apiKey']
-                    env['MCP_MODEL_PROVIDER'] = 'anthropic'
+            if self.server_config.get("apiKey"):
+                model = self.server_config.get("model", "").lower()
+                if "gemini" in model:
+                    env["GOOGLE_API_KEY"] = self.server_config["apiKey"]
+                    env["MCP_MODEL_PROVIDER"] = "google"
+                elif "claude" in model:
+                    env["ANTHROPIC_API_KEY"] = self.server_config["apiKey"]
+                    env["MCP_MODEL_PROVIDER"] = "anthropic"
                 else:
-                    env['OPENAI_API_KEY'] = self.server_config['apiKey']
-                    env['MCP_MODEL_PROVIDER'] = 'openai'
-
-            # Add model configuration
-            if self.server_config.get('model'):
-                env['MCP_MODEL_NAME'] = self.server_config['model']
-
-            # Set browser configuration for MCP server
-            env.setdefault('BROWSER_USE_HEADLESS', 'true')
-            env.setdefault('BROWSER_USE_DISABLE_SECURITY', 'false')
+                    env["OPENAI_API_KEY"] = self.server_config["apiKey"]
+                    env["MCP_MODEL_PROVIDER"] = "openai"
+            if self.server_config.get("model"):
+                env["MCP_MODEL_NAME"] = self.server_config["model"]
+            env.setdefault("BROWSER_USE_HEADLESS", "true")
+            env.setdefault("BROWSER_USE_DISABLE_SECURITY", "false")
 
             print(f"🔐 Environment variables for MCP server: {list(env.keys())}")
 
-            # Create server parameters
-            server_params = StdioServerParameters(
-                command=command_parts[0],
-                args=command_parts[1:],
-                env=env
-            )
+            server_params = StdioServerParameters(command=command, args=args, env=env)
 
-            # Create stdio client transport using async context manager
             try:
                 transport_cm = stdio_client(server_params)
                 async with transport_cm as (self.read, self.write):
-                    # Create client session
                     self.client = ClientSession(self.read, self.write)
-
-                    # Initialize the client
                     await self.client.initialize()
-
                     print("✅ MCP client setup complete")
                     return self.client
             except Exception as e:
@@ -869,26 +890,43 @@ def parse_date(date_str: Optional[str]) -> Optional[float]:
     except (ValueError, AttributeError):
         return None
 
-# Load servers from disk
+# Load servers from disk; migrate legacy 'command' to preset_id and never retain command
 def load_servers():
-    """Load MCP servers from JSON file."""
+    """Load MCP servers from JSON file. Migrate legacy config: set preset_id from name, drop command."""
     global mcp_servers
     try:
         if SERVERS_FILE.exists():
-            with open(SERVERS_FILE, 'r', encoding='utf-8') as f:
+            with open(SERVERS_FILE, "r", encoding="utf-8") as f:
                 servers = json.load(f)
-                mcp_servers = {server['id']: server for server in servers}
-                print(f"Loaded {len(servers)} MCP servers from disk")
+            result = {}
+            for server in servers:
+                sid = server.get("id")
+                if not sid:
+                    continue
+                # Migrate: if has command but no preset_id, infer preset_id from name
+                if server.get("command") and not server.get("preset_id"):
+                    if "mcp-browser-use" in (server.get("name") or "").lower():
+                        server["preset_id"] = "browser-use"
+                    else:
+                        server["preset_id"] = None  # Legacy non-browser; not connectable until reconfigured
+                # Never retain command in memory
+                server.pop("command", None)
+                result[sid] = server
+            mcp_servers = result
+            print(f"Loaded {len(mcp_servers)} MCP servers from disk")
     except Exception as e:
         print(f"No existing servers file found, starting with empty state: {e}")
 
-# Save servers to disk
+# Save servers to disk; never persist 'command'
 def save_servers():
-    """Save MCP servers to JSON file."""
+    """Save MCP servers to disk. Only persist safe keys; never write command."""
     global mcp_servers
     try:
-        servers = list(mcp_servers.values())
-        with open(SERVERS_FILE, 'w', encoding='utf-8') as f:
+        servers = []
+        for s in mcp_servers.values():
+            safe = {k: s[k] for k in MCP_SERVER_SAFE_KEYS if k in s}
+            servers.append(safe)
+        with open(SERVERS_FILE, "w", encoding="utf-8") as f:
             json.dump(servers, f, indent=2, ensure_ascii=False)
         print(f"Saved {len(servers)} MCP servers to disk")
     except Exception as e:
@@ -1343,60 +1381,77 @@ async def autogen_chat(request: Request):
             detail=f"Failed to process AutoGen request: {str(e)}"
         )
 
-# MCP server management endpoints
+# Allowed keys when persisting MCP server config (never persist 'command')
+MCP_SERVER_SAFE_KEYS = {"id", "name", "preset_id", "apiKey", "model", "url", "wsUrl", "status", "enabled"}
+
+
+# MCP server management endpoints (all require authentication)
 @app.post("/v1/mcp/servers")
-async def manage_servers(server_config: ServerConfig):
-    """Manage MCP servers (create, update, clear)."""
-    print(f"Received server config: {server_config.dict()}")
+async def manage_servers(
+    server_config: ServerConfig,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Manage MCP servers (create, update, clear). Never persist or execute client-supplied command."""
+    # Log without secrets
+    safe_dict = {k: v for k, v in server_config.model_dump().items() if k != "apiKey"}
+    print(f"Received server config: {safe_dict}")
 
     global mcp_clients, mcp_servers
 
     try:
         # Handle clear action
-        if server_config.action == 'clear':
-            # Disconnect all connected servers
-            for server_id, client in mcp_clients.items():
+        if server_config.action == "clear":
+            for server_id, client in list(mcp_clients.items()):
                 try:
                     await client.close()
                 except Exception as e:
                     print(f"Error closing client {server_id}: {e}")
-
-            # Clear all servers and clients
             mcp_servers.clear()
             mcp_clients.clear()
-
             print("Cleared all MCP servers and clients")
-
-            # Save to disk
             save_servers()
-
+            security_log("mcp_clear", current_user.get("username", ""), None, "all servers cleared")
             return {"message": "All MCP servers cleared successfully"}
 
         # Validate required fields
         if not server_config.id or not server_config.name:
             raise HTTPException(status_code=400, detail="Missing required fields: id, name")
 
-        # Update existing server or add new one
+        # Resolve preset_id: require or infer from name (browser-use)
+        preset_id = server_config.preset_id
+        if not preset_id and server_config.name and "mcp-browser-use" in server_config.name.lower():
+            preset_id = "browser-use"
+        if not preset_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Missing preset_id. Provide preset_id (e.g. 'browser-use') or use a name that implies it.",
+            )
+        if preset_id not in MCP_PRESETS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid preset_id '{preset_id}'. Allowed: {list(MCP_PRESETS.keys())}",
+            )
+
+        # Build stored server dict from allowed fields only; never store 'command'
+        raw = server_config.model_dump()
+        stored = {k: raw[k] for k in MCP_SERVER_SAFE_KEYS if k in raw and raw[k] is not None}
+        stored["status"] = "disconnected"
+        # Preserve connection status when updating
         existing_server = mcp_servers.get(server_config.id)
         if existing_server:
-            # Update existing server
-            mcp_servers[server_config.id] = {
-                **existing_server,
-                **server_config.dict(),
-                'status': existing_server.get('status', 'disconnected')  # Preserve connection status
-            }
+            stored["status"] = existing_server.get("status", "disconnected")
+        stored["preset_id"] = preset_id
+
+        if existing_server:
+            mcp_servers[server_config.id] = {**existing_server, **stored}
             print(f"Updated MCP server: {server_config.name} ({server_config.id})")
+            security_log("mcp_update", current_user.get("username", ""), server_config.id, f"preset_id={preset_id}")
         else:
-            # Add new server
-            mcp_servers[server_config.id] = {
-                **server_config.dict(),
-                'status': 'disconnected'
-            }
+            mcp_servers[server_config.id] = stored
             print(f"Added MCP server: {server_config.name} ({server_config.id})")
+            security_log("mcp_add", current_user.get("username", ""), server_config.id, f"preset_id={preset_id}")
 
-        # Save to disk
         save_servers()
-
         return {"message": "Server saved successfully"}
 
     except HTTPException:
@@ -1406,7 +1461,9 @@ async def manage_servers(server_config: ServerConfig):
         raise HTTPException(status_code=500, detail=f"Failed to save MCP server: {str(e)}")
 
 @app.get("/v1/mcp/servers")
-async def get_servers():
+async def get_servers(
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
     """Get all MCP servers."""
     try:
         servers = list(mcp_servers.values())
@@ -1458,51 +1515,76 @@ async def create_mcp_client(server_config: Dict[str, Any]):
     return client
 
 @app.post("/v1/mcp/servers/{server_id}/connect")
-async def connect_server(server_id: str):
-    """Connect to an MCP server."""
+async def connect_server(
+    server_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Connect to an MCP server. Uses only server-side presets; never executes user-supplied command."""
     try:
         print(f"Attempting to connect to server: {server_id}")
 
-        # Check if server exists
         server = mcp_servers.get(server_id)
         if not server:
             print(f"Server not found: {server_id}")
             raise HTTPException(status_code=404, detail="Server not found")
 
-        print(f"Found server: {server['name']} ({server_id})")
+        print(f"Found server: {server.get('name')} ({server_id})")
 
-        # For MCP Browser Use server, just mark as connected since we handle it directly
-        if "mcp-browser-use" in server.get("name", "").lower():
-            server['status'] = 'connected'
+        # Inprocess preset (e.g. browser-use): no subprocess, mark connected
+        preset_id = server.get("preset_id") or (
+            "browser-use" if "mcp-browser-use" in (server.get("name") or "").lower() else None
+        )
+        if preset_id == "browser-use" or "mcp-browser-use" in (server.get("name") or "").lower():
+            server["preset_id"] = preset_id or "browser-use"
+            server["status"] = "connected"
             mcp_servers[server_id] = server
-            print(f"Successfully connected to MCP Browser Use server: {server['name']}")
+            print(f"Successfully connected to MCP Browser Use server: {server.get('name')}")
+            security_log("mcp_connect", current_user.get("username", ""), server_id, "preset_id=browser-use")
             return {"message": "Server connected successfully"}
 
         if server_id in mcp_clients:
             print(f"Server already connected: {server_id}")
             raise HTTPException(status_code=409, detail="Server is already connected")
 
+        if not preset_id or preset_id not in MCP_PRESETS:
+            raise HTTPException(
+                status_code=400,
+                detail="Server has no valid preset_id. Reconfigure the server with a preset (e.g. preset_id: 'browser-use').",
+            )
+        if MCP_PRESETS[preset_id].get("type") != "stdio":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Preset '{preset_id}' does not support stdio connect. Use a stdio preset or browser-use.",
+            )
+
         if not MCP_AVAILABLE:
             raise HTTPException(status_code=503, detail="MCP SDK not available")
 
-        print(f"Creating MCP client for server: {server['name']}")
+        print(f"Creating MCP client for server: {server.get('name')}")
         client = await create_mcp_client(server)
         mcp_clients[server_id] = client
 
-        server['status'] = 'connected'
+        server["status"] = "connected"
         mcp_servers[server_id] = server
 
-        print(f"Successfully connected to MCP server: {server['name']}")
+        print(f"Successfully connected to MCP server: {server.get('name')}")
+        security_log("mcp_connect", current_user.get("username", ""), server_id, f"preset_id={preset_id}")
         return {"message": "Server connected successfully"}
 
     except HTTPException:
         raise
+    except ValueError as e:
+        print(f"Error connecting to MCP server: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         print(f"Error connecting to MCP server: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to connect to MCP server: {str(e)}")
 
 @app.post("/v1/mcp/servers/{server_id}/disconnect")
-async def disconnect_server(server_id: str):
+async def disconnect_server(
+    server_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
     """Disconnect from an MCP server."""
     try:
         global mcp_clients, mcp_servers
@@ -1511,8 +1593,9 @@ async def disconnect_server(server_id: str):
         server = mcp_servers.get(server_id)
         if server and "mcp-browser-use" in server.get("name", "").lower():
             # Just mark as disconnected since we don't have a real connection
-            server['status'] = 'disconnected'
+            server["status"] = "disconnected"
             mcp_servers[server_id] = server
+            security_log("mcp_disconnect", current_user.get("username", ""), server_id, "browser-use")
             return {"message": "Server disconnected successfully"}
 
         if not MCP_AVAILABLE:
@@ -1531,9 +1614,10 @@ async def disconnect_server(server_id: str):
 
         server = mcp_servers.get(server_id)
         if server:
-            server['status'] = 'disconnected'
+            server["status"] = "disconnected"
             mcp_servers[server_id] = server
 
+        security_log("mcp_disconnect", current_user.get("username", ""), server_id, "stdio")
         return {"message": "Server disconnected successfully"}
 
     except HTTPException:
@@ -1587,14 +1671,23 @@ async def call_tool(server_id: str, request: ToolCallRequest):
                 # Set up LLM based on environment configuration
                 llm = setup_browser_llm()
 
-                # Create and run the agent
-                agent = Agent(
-                    task=instruction,
-                    llm=llm,
-                    browser=browser,
-                    max_steps=max_steps,
-                    use_vision=use_vision
-                )
+                # Build Agent kwargs and pass only params the installed Agent.__init__ accepts
+                # (avoids "unexpected keyword argument 'llm_timeout'" with older browser_use versions)
+                import inspect
+                agent_kwargs = {
+                    "task": instruction,
+                    "llm": llm,
+                    "browser": browser,
+                    "max_steps": max_steps,
+                    "use_vision": use_vision,
+                }
+                try:
+                    sig = inspect.signature(Agent.__init__)
+                    allowed = set(sig.parameters) - {"self"}
+                    agent_kwargs = {k: v for k, v in agent_kwargs.items() if k in allowed}
+                except Exception:
+                    pass
+                agent = Agent(**agent_kwargs)
 
                 # Run the agent
                 result = await agent.run()
