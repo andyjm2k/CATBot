@@ -6198,21 +6198,17 @@ function saveWAVFile(wavBlob) {
                 type: "function",
                 function: {
                     name: "pdfToPowerPoint",
-                    description: "Converts a PDF into an informative and presentable PowerPoint presentation (.pptx)",
+                    description: "Use this tool whenever the user wants to convert a PDF to PowerPoint, turn a PDF into a presentation, or create slides from a PDF. Call it with title and filename; if the user did not provide a PDF URL, omit pdfUrl and the user will be prompted to upload a PDF file. Do not reply in text—always invoke this tool for PDF-to-PowerPoint requests.",
                     parameters: {
                         type: "object",
                         properties: {
                             pdfUrl: {
                                 type: "string",
-                                description: "Optional: URL of the PDF to convert (http/https). If omitted, set promptUpload to true."
-                            },
-                            promptUpload: {
-                                type: "boolean",
-                                description: "If true, prompt the user to upload a local PDF file instead of using a URL"
+                                description: "Optional. URL of the PDF (http/https). Omit when the user has not provided a URL—they will be prompted to upload a file."
                             },
                             title: {
                                 type: "string",
-                                description: "Presentation title to place on the title slide"
+                                description: "Presentation title for the title slide (e.g. 'Quarterly Report')"
                             },
                             author: {
                                 type: "string",
@@ -6220,11 +6216,11 @@ function saveWAVFile(wavBlob) {
                             },
                             maxSlides: {
                                 type: "number",
-                                description: "Optional maximum number of content slides to generate (default: 15)"
+                                description: "Optional maximum number of content slides (default: 15)"
                             },
                             filename: {
                                 type: "string",
-                                description: "Output .pptx filename (e.g., 'presentation.pptx')"
+                                description: "Output .pptx filename (e.g. 'presentation.pptx')"
                             }
                         },
                         required: ["title", "filename"]
@@ -8101,15 +8097,14 @@ Parameters:
 }
 
 10. pdfToPowerPoint
-Description: Intelligently converts a PDF into a structured PowerPoint presentation using AI. Extracts all text and images, uses OpenAI to analyze content and intelligently place images where they make sense, creating slides with intro, key points with details, and conclusion.
+Description: Use this tool whenever the user wants to convert a PDF to PowerPoint, turn a PDF into a presentation, or create slides from a PDF. Always call the tool—do not reply in text. If the user provides a PDF URL, include pdfUrl; if they do not, omit pdfUrl and the user will be prompted to upload a file. Required: title, filename.
 Parameters:
 {
-    "pdfUrl": "string (optional URL to the PDF)",
-    "promptUpload": "boolean (if true, prompt the user to upload a local PDF)",
-    "title": "string (title for the presentation)",
-    "author": "string (optional author)",
-    "maxSlides": "number (optional maximum number of content slides; default 15)",
-    "filename": "string (output .pptx filename)"
+    "pdfUrl": "string (optional; include only when user provides a URL; if omitted, user is prompted to upload)",
+    "title": "string (required; presentation title)",
+    "author": "string (optional)",
+    "maxSlides": "number (optional; default 15)",
+    "filename": "string (required; e.g. 'presentation.pptx')"
 }
 
 11. uploadToGoogleDrive
@@ -8231,9 +8226,18 @@ User: "Turn this PDF into a PowerPoint: https://example.com/report.pdf. Title it
 Assistant: <tool>pdfToPowerPoint</tool>
 <parameters>
 {
-    "promptUpload": true,
+    "pdfUrl": "https://example.com/report.pdf",
     "title": "Quarterly Report",
     "filename": "report.pptx"
+}
+</parameters>
+
+User: "Convert my PDF to a PowerPoint and save it as my_preso.pptx"
+Assistant: <tool>pdfToPowerPoint</tool>
+<parameters>
+{
+    "title": "My Presentation",
+    "filename": "my_preso.pptx"
 }
 </parameters>
 
@@ -8809,7 +8813,10 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                             // Handle regular message response
                         responseOutput.value = cleanContent;
                         addMessageToHistory('assistant', cleanContent); // Add to message history (also updates chatHistory)
-                            
+                            // If user asked to convert PDF to PowerPoint but the LLM replied in text, show upload widget in chat
+                            if (isPdfToPowerPointRequest(promptText)) {
+                                appendPdfUploadWidgetToChat(promptText);
+                            }
                             // Automatically extract memories from conversation (async, non-blocking)
                             extractMemoriesFromConversation().catch(err => {
                                 console.warn('Memory extraction failed:', err);
@@ -11734,17 +11741,14 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                     window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
                 }
 
-                // If requested, prompt the user to upload a PDF
-                if (!pdfUrl && promptUpload) {
+                // When no PDF URL is supplied, always prompt the user to upload a PDF
+                if (!pdfUrl) {
                     const file = await promptForLocalPdf();
                     if (!file) {
                         return { success: false, message: 'No PDF selected.' };
                     }
                     // Use data URL for local files to avoid CORS issues
                     pdfUrl = await readFileAsDataUrl(file);
-                }
-                if (!pdfUrl) {
-                    throw new Error('No PDF source provided. Provide pdfUrl or set promptUpload=true.');
                 }
 
                 const loadingTask = window.pdfjsLib.getDocument({ url: pdfUrl, withCredentials: false });
@@ -12047,49 +12051,183 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
             }
         }
 
-        // Shows a visible file picker UI to let the user select a local PDF file
+        // Detects if the user message is asking to convert a PDF to PowerPoint (so we can show upload UI when the LLM replies in text instead of calling the tool).
+        function isPdfToPowerPointRequest(text) {
+            if (!text || typeof text !== 'string') return false;
+            const lower = text.toLowerCase();
+            const hasPdf = /\bpdf\b/i.test(text);
+            const hasPowerPoint = /\bpowerpoint\b|\bpptx\b|\bpresentation\b|\.pptx\b/i.test(text) || lower.includes('power point');
+            const hasConvert = /\bconvert\b|\bturn\b|\btransform\b|\bcreate\b|\bmake\b|\bupload\b/i.test(text);
+            return hasPdf && (hasPowerPoint || hasConvert);
+        }
+
+        // Parses optional filename (e.g. my_preso.pptx) and title from the user message for PDF-to-PowerPoint.
+        function parsePdfToPowerPointParams(userMessage) {
+            const filenameMatch = userMessage.match(/(\w[\w.-]*\.pptx)/i) || userMessage.match(/\b(?:call it|named?|save as|as)\s+['"]?(\w[\w.-]*\.pptx)['"]?/i);
+            const filename = filenameMatch ? filenameMatch[1] : 'presentation.pptx';
+            const titleMatch = userMessage.match(/(?:call the presentation|title it|named?)\s+['"]?([^'"]+)['"]?/i);
+            const title = titleMatch ? titleMatch[1].trim().replace(/\.pptx$/i, '') : 'Presentation';
+            return { title, filename };
+        }
+
+        // When the LLM replied in text instead of calling the tool, show the upload widget in chat and run conversion when the user selects a file.
+        function appendPdfUploadWidgetToChat(userMessage) {
+            const messageHistory = document.getElementById('message-history');
+            if (!messageHistory) return;
+            const { title, filename } = parsePdfToPowerPointParams(userMessage);
+
+            const wrapper = document.createElement('div');
+            wrapper.id = 'pdf-upload-prompt';
+            wrapper.setAttribute('aria-label', 'PDF upload');
+            wrapper.style.margin = '16px 0';
+            wrapper.style.padding = '16px';
+            wrapper.style.background = 'rgba(42, 42, 42, 0.95)';
+            wrapper.style.border = '1px solid #3a3a3a';
+            wrapper.style.borderRadius = '12px';
+            wrapper.style.fontFamily = 'Segoe UI, Roboto, sans-serif';
+            wrapper.style.color = '#ffffff';
+
+            const text = document.createElement('div');
+            text.textContent = 'Select a PDF to convert to PowerPoint';
+            text.style.marginBottom = '12px';
+            text.style.fontSize = '15px';
+            text.style.fontWeight = '600';
+
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.accept = 'application/pdf';
+            input.style.position = 'absolute';
+            input.style.width = '1px';
+            input.style.height = '1px';
+            input.style.opacity = '0';
+            input.style.pointerEvents = 'none';
+
+            const selectBtn = document.createElement('button');
+            selectBtn.textContent = 'Select PDF file';
+            selectBtn.type = 'button';
+            selectBtn.style.padding = '12px 20px';
+            selectBtn.style.marginRight = '10px';
+            selectBtn.style.fontSize = '14px';
+            selectBtn.style.cursor = 'pointer';
+            selectBtn.style.background = '#2563eb';
+            selectBtn.style.color = '#fff';
+            selectBtn.style.border = 'none';
+            selectBtn.style.borderRadius = '8px';
+            selectBtn.onclick = () => { input.click(); };
+
+            const cancel = document.createElement('button');
+            cancel.textContent = 'Cancel';
+            cancel.type = 'button';
+            cancel.style.padding = '12px 20px';
+            cancel.style.cursor = 'pointer';
+            cancel.style.background = '#3a3a3a';
+            cancel.style.color = '#ffffff';
+            cancel.style.border = '1px solid #4a4a4a';
+            cancel.style.borderRadius = '8px';
+            cancel.onclick = () => { if (wrapper.parentNode) wrapper.parentNode.removeChild(wrapper); };
+
+            input.onchange = async () => {
+                const file = input.files && input.files[0] ? input.files[0] : null;
+                if (!file || !wrapper.parentNode) return;
+                selectBtn.disabled = true;
+                text.textContent = 'Converting…';
+                try {
+                    const pdfUrl = await readFileAsDataUrl(file);
+                    const result = await handlePdfToPowerPoint({ pdfUrl, title, filename });
+                    if (wrapper.parentNode) wrapper.parentNode.removeChild(wrapper);
+                    addMessageToHistory('assistant', result.message);
+                    responseOutput.value = result.message;
+                    if (typeof textToSpeech === 'function') textToSpeech(result.message);
+                } catch (err) {
+                    text.textContent = `Error: ${err.message}`;
+                    selectBtn.disabled = false;
+                }
+            };
+
+            wrapper.appendChild(text);
+            wrapper.appendChild(input);
+            wrapper.appendChild(selectBtn);
+            wrapper.appendChild(cancel);
+            messageHistory.appendChild(wrapper);
+            messageHistory.scrollTop = messageHistory.scrollHeight;
+        }
+
+        // Shows PDF upload UI inline in the message history so it is always visible
+        // (no popup/modal—avoids issues with iframes, z-index, and security blocking dialogs).
+        // Button triggers file input so the OS file dialog opens on user gesture.
         function promptForLocalPdf() {
             return new Promise(resolve => {
+                const messageHistory = document.getElementById('message-history');
                 const wrapper = document.createElement('div');
                 wrapper.id = 'pdf-upload-prompt';
-                wrapper.style.position = 'fixed';
-                wrapper.style.top = '20px';
-                wrapper.style.right = '20px';
-                wrapper.style.zIndex = '99999';
-                wrapper.style.background = '#ffffff';
-                wrapper.style.border = '1px solid #ddd';
-                wrapper.style.borderRadius = '8px';
-                wrapper.style.boxShadow = '0 4px 12px rgba(0,0,0,0.1)';
-                wrapper.style.padding = '12px';
+                wrapper.setAttribute('aria-label', 'PDF upload');
+                wrapper.style.margin = '16px 0';
+                wrapper.style.padding = '16px';
+                wrapper.style.background = 'rgba(42, 42, 42, 0.95)';
+                wrapper.style.border = '1px solid #3a3a3a';
+                wrapper.style.borderRadius = '12px';
                 wrapper.style.fontFamily = 'Segoe UI, Roboto, sans-serif';
+                wrapper.style.color = '#ffffff';
 
                 const text = document.createElement('div');
                 text.textContent = 'Select a PDF to convert to PowerPoint';
-                text.style.marginBottom = '8px';
+                text.style.marginBottom = '12px';
+                text.style.fontSize = '15px';
+                text.style.fontWeight = '600';
 
                 const input = document.createElement('input');
                 input.type = 'file';
                 input.accept = 'application/pdf';
+                input.style.position = 'absolute';
+                input.style.width = '1px';
+                input.style.height = '1px';
+                input.style.opacity = '0';
+                input.style.pointerEvents = 'none';
+
+                const selectBtn = document.createElement('button');
+                selectBtn.textContent = 'Select PDF file';
+                selectBtn.type = 'button';
+                selectBtn.style.padding = '12px 20px';
+                selectBtn.style.marginRight = '10px';
+                selectBtn.style.fontSize = '14px';
+                selectBtn.style.cursor = 'pointer';
+                selectBtn.style.background = '#2563eb';
+                selectBtn.style.color = '#fff';
+                selectBtn.style.border = 'none';
+                selectBtn.style.borderRadius = '8px';
+                selectBtn.onclick = () => { input.click(); };
 
                 const cancel = document.createElement('button');
                 cancel.textContent = 'Cancel';
-                cancel.style.marginLeft = '8px';
+                cancel.type = 'button';
+                cancel.style.padding = '12px 20px';
+                cancel.style.cursor = 'pointer';
+                cancel.style.background = '#3a3a3a';
+                cancel.style.color = '#ffffff';
+                cancel.style.border = '1px solid #4a4a4a';
+                cancel.style.borderRadius = '8px';
                 cancel.onclick = () => {
-                    document.body.removeChild(wrapper);
+                    if (wrapper.parentNode) wrapper.parentNode.removeChild(wrapper);
                     resolve(null);
                 };
 
                 input.onchange = () => {
                     const file = input.files && input.files[0] ? input.files[0] : null;
-                    document.body.removeChild(wrapper);
+                    if (wrapper.parentNode) wrapper.parentNode.removeChild(wrapper);
                     resolve(file);
                 };
 
                 wrapper.appendChild(text);
                 wrapper.appendChild(input);
+                wrapper.appendChild(selectBtn);
                 wrapper.appendChild(cancel);
-                document.body.appendChild(wrapper);
-                input.focus();
+
+                if (messageHistory) {
+                    messageHistory.appendChild(wrapper);
+                    messageHistory.scrollTop = messageHistory.scrollHeight;
+                } else {
+                    document.body.appendChild(wrapper);
+                }
             });
         }
 
@@ -12106,7 +12244,9 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
         // Process images in batches to avoid overwhelming local models
         async function processImagesInBatches(images, modelToUse, batchSize = 3) {
             const imageAnalysis = [];
-            const endpoint = endpointInput.value;
+            // Route through proxy to avoid mixed content (HTTPS page calling HTTP LLM)
+            const originalEndpoint = endpointInput.value;
+            const endpoint = `${PROXY_BASE_URL}/v1/proxy/chat/completions?endpoint=${encodeURIComponent(originalEndpoint)}`;
             const apiKey = apiKeyInput.value.trim();
             
             // Only process with vision models
@@ -12227,7 +12367,9 @@ IMPORTANT: Respond with ONLY the JSON object.`
         // Generate structured presentation content using OpenAI LLM
         async function generateStructuredPresentation(fullText, title, maxSlides = 15, availableImages = [], imageAnalysis = []) {
             try {
-                const endpoint = endpointInput.value;
+                // Route through proxy to avoid mixed content (HTTPS page calling HTTP LLM)
+                const originalEndpoint = endpointInput.value;
+                const endpoint = `${PROXY_BASE_URL}/v1/proxy/chat/completions?endpoint=${encodeURIComponent(originalEndpoint)}`;
                 const apiKey = apiKeyInput.value.trim();
 
                 if (!apiKey) {

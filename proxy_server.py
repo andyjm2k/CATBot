@@ -16,7 +16,7 @@ import hashlib
 import secrets
 import glob
 import socket
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Set, Tuple
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
@@ -268,6 +268,12 @@ MCP_PRESETS = {
 }
 TEAM_CONFIG_FILE = Path(__file__).parent / "team-config.json"
 SCRATCH_DIR = Path(__file__).parent / "scratch"
+
+# Allowed file extensions for scratch file operations (path traversal mitigation)
+READ_ALLOWED_EXTENSIONS = {".txt", ".docx", ".xlsx", ".xls", ".pdf", ".png", ".jpg", ".jpeg"}
+WRITE_ALLOWED_EXTENSIONS = {".txt", ".docx", ".xlsx", ".xls", ".pdf"}
+# Max file size for read/write in bytes (10MB default), configurable via env
+FILE_OPS_MAX_SIZE_BYTES = int(os.getenv("FILE_OPS_MAX_SIZE", "10485760"))
 
 # Telegram chat session storage (simple in-memory cache)
 telegram_conversations: Dict[str, List[Dict[str, str]]] = {}
@@ -3571,6 +3577,42 @@ async def proxy_tts_speech(request: Request, endpoint: Optional[str] = None):
 # FILE OPERATIONS ENDPOINTS
 # ============================================================================
 
+def resolve_scratch_path(filename: str, allowed_extensions: Optional[Set[str]] = None) -> Path:
+    """
+    Resolve a user-supplied filename to a path under SCRATCH_DIR.
+    Rejects absolute paths, traversal (..), and disallowed extensions.
+    Returns the canonical path for safe I/O. Raises HTTPException 400 on invalid input.
+    """
+    # Reject empty or whitespace-only filename
+    if not filename or not filename.strip():
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    # Reject absolute paths (Unix / or Windows drive/root)
+    if os.path.isabs(filename) or filename.startswith("/") or filename.startswith("\\"):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    # Reject path traversal components
+    parts = Path(filename).parts
+    if ".." in parts:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    # Build candidate path and resolve to canonical form
+    candidate = SCRATCH_DIR / filename
+    try:
+        resolved = candidate.resolve()
+    except (OSError, RuntimeError) as e:
+        raise HTTPException(status_code=400, detail="Invalid filename") from e
+    # Enforce containment under SCRATCH_DIR (Python 3.9+ relative_to)
+    root = SCRATCH_DIR.resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    # Optional: enforce extension allowlist
+    if allowed_extensions is not None:
+        suffix = resolved.suffix.lower()
+        if suffix not in allowed_extensions:
+            raise HTTPException(status_code=400, detail="Invalid filename")
+    return resolved
+
+
 def read_text_file(filepath: Path) -> str:
     """Read a plain text file and return its content"""
     try:
@@ -3769,7 +3811,10 @@ def write_pdf_file(filepath: Path, content: str) -> None:
         )
 
 @app.post("/v1/files/read", response_model=FileResponse)
-async def read_file(request: ReadFileRequest):
+async def read_file(
+    request: ReadFileRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
     """
     Read a file from the scratch directory
     Supports: txt, docx, xlsx, pdf, png
@@ -3779,21 +3824,23 @@ async def read_file(request: ReadFileRequest):
             status_code=503,
             detail="File operations not available. Install: pip install python-docx openpyxl PyPDF2 reportlab Pillow"
         )
-    
+    # Resolve path with containment and extension checks (blocks path traversal)
+    filepath = resolve_scratch_path(request.filename, READ_ALLOWED_EXTENSIONS)
     try:
-        # Construct the full file path
-        filepath = SCRATCH_DIR / request.filename
-        
         # Check if file exists
         if not filepath.exists():
             return FileResponse(
                 success=False,
                 message=f"File not found: {request.filename}"
             )
-        
+        # Enforce max file size before reading
+        if filepath.stat().st_size > FILE_OPS_MAX_SIZE_BYTES:
+            return FileResponse(
+                success=False,
+                message="File too large"
+            )
         # Determine file extension
         file_ext = filepath.suffix.lower()
-        
         # Read file based on extension
         if file_ext == '.txt':
             content = read_text_file(filepath)
@@ -3850,7 +3897,10 @@ async def read_file(request: ReadFileRequest):
         )
 
 @app.post("/v1/files/write", response_model=FileResponse)
-async def write_file(request: WriteFileRequest):
+async def write_file(
+    request: WriteFileRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
     """
     Write content to a file in the scratch directory
     Supports: txt, docx, xlsx, pdf
@@ -3860,18 +3910,18 @@ async def write_file(request: WriteFileRequest):
             status_code=503,
             detail="File operations not available. Install: pip install python-docx openpyxl PyPDF2 reportlab Pillow"
         )
-    
+    # Enforce max content size before processing
+    content_bytes = request.content.encode("utf-8")
+    if len(content_bytes) > FILE_OPS_MAX_SIZE_BYTES:
+        return FileResponse(success=False, message="Content too large")
+    # Build logical filename with extension from format if missing
+    logical_name = request.filename.strip()
+    if not Path(logical_name).suffix:
+        logical_name = f"{logical_name}.{request.format.lower()}"
+    # Resolve path with containment and extension checks (blocks path traversal)
+    filepath = resolve_scratch_path(logical_name, WRITE_ALLOWED_EXTENSIONS)
+    file_ext = filepath.suffix.lower()
     try:
-        # Construct the full file path
-        filepath = SCRATCH_DIR / request.filename
-        
-        # Determine file extension from filename or format parameter
-        file_ext = filepath.suffix.lower()
-        if not file_ext:
-            # If no extension in filename, use format parameter
-            file_ext = f".{request.format.lower()}"
-            filepath = SCRATCH_DIR / f"{request.filename}{file_ext}"
-        
         # Write file based on extension
         if file_ext == '.txt':
             write_text_file(filepath, request.content)
@@ -3907,7 +3957,9 @@ async def write_file(request: WriteFileRequest):
         )
 
 @app.get("/v1/files/list")
-async def list_files():
+async def list_files(
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
     """List all files in the scratch directory"""
     try:
         # Get all files in scratch directory
@@ -3939,12 +3991,14 @@ async def list_files():
         }
 
 @app.delete("/v1/files/delete/{filename}")
-async def delete_file(filename: str):
+async def delete_file(
+    filename: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
     """Delete a file from the scratch directory"""
+    # Resolve path with containment and extension checks (blocks path traversal)
+    filepath = resolve_scratch_path(filename, READ_ALLOWED_EXTENSIONS)
     try:
-        # Construct the full file path
-        filepath = SCRATCH_DIR / filename
-        
         # Check if file exists
         if not filepath.exists():
             return FileResponse(
