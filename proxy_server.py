@@ -255,6 +255,12 @@ class PhilosopherResponse(BaseModel):
     message: str
     data: Optional[Dict[str, Any]] = None
 
+
+class ProxyFetchRequest(BaseModel):
+    """Request body for POST /v1/proxy/fetch (avoids URL length limits on iOS Safari)."""
+    url: str
+
+
 # Global state (similar to the Node.js version)
 mcp_clients = {}
 mcp_servers = {}
@@ -272,6 +278,8 @@ SCRATCH_DIR = Path(__file__).parent / "scratch"
 # Allowed file extensions for scratch file operations (path traversal mitigation)
 READ_ALLOWED_EXTENSIONS = {".txt", ".docx", ".xlsx", ".xls", ".pdf", ".png", ".jpg", ".jpeg"}
 WRITE_ALLOWED_EXTENSIONS = {".txt", ".docx", ".xlsx", ".xls", ".pdf"}
+# Allowed extensions for Google Drive upload (scratch workspace only; path exfiltration mitigation)
+DRIVE_UPLOAD_EXTENSIONS = {".txt", ".docx", ".xlsx", ".xls", ".pdf", ".png", ".jpg", ".jpeg"}
 # Max file size for read/write in bytes (10MB default), configurable via env
 FILE_OPS_MAX_SIZE_BYTES = int(os.getenv("FILE_OPS_MAX_SIZE", "10485760"))
 
@@ -992,29 +1000,84 @@ except Exception as e:
     # Continue anyway - server should still work without AutoGen team
     autogen_team = None
 
-# Web proxy endpoint for fetching content
-@app.get("/v1/proxy/fetch")
-async def proxy_fetch(url: str):
-    """Fetch web content through proxy."""
-    if not url:
+# Web proxy endpoint for fetching content (GET for backward compat, POST for iOS Safari / long URLs)
+def _is_dns_or_network_error(exc: BaseException) -> bool:
+    """True if the exception is DNS (getaddrinfo) or network unreachable."""
+    if isinstance(exc, socket.gaierror):
+        return True
+    # Windows: OSError can have winerror 11002 (WSAHOST_NOT_FOUND)
+    if isinstance(exc, OSError) and getattr(exc, "winerror", None) == 11002:
+        return True
+    # Check wrapped cause (e.g. httpx wraps socket errors)
+    cause = getattr(exc, "__cause__", None)
+    if cause and _is_dns_or_network_error(cause):
+        return True
+    errstr = str(exc).lower()
+    if "getaddrinfo failed" in errstr or "name or service not known" in errstr or "nodename nor servname" in errstr or "errno 11002" in errstr:
+        return True
+    return False
+
+
+async def _do_proxy_fetch(url: str) -> Dict[str, str]:
+    """Shared fetch logic: fetch URL and return dict with content or raise."""
+    if not url or not url.strip():
         raise HTTPException(status_code=400, detail="URL parameter is required")
-
+    # Normalize URL (allow without scheme for convenience)
+    url = url.strip()
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    headers = {
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Connection": "keep-alive",
+    }
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1'
-        }
-
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
             response = await client.get(url, headers=headers)
-
+        response.raise_for_status()
         return {"content": response.text}
-
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"Proxy error: {e}")
+        # DNS or network failure on the machine running the proxy (e.g. WSL, VPN, no outbound DNS)
+        if _is_dns_or_network_error(e):
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "The proxy server could not resolve the website's hostname (DNS lookup failed). "
+                    "This usually means the machine running the proxy has no internet or restricted DNS. "
+                    "Ensure the proxy runs on a machine with working internet and DNS (e.g. try pinging the host from that machine)."
+                ),
+            )
+        raise HTTPException(status_code=500, detail=f"Failed to fetch content: {str(e)}")
+
+
+@app.get("/v1/proxy/fetch")
+async def proxy_fetch_get(url: str, request: Request):
+    """Fetch web content via GET (query param). Use POST for long URLs (e.g. iOS Safari)."""
+    try:
+        result = await _do_proxy_fetch(url)
+        cors = build_cors_headers(request)
+        return JSONResponse(content=result, headers=cors)
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Proxy fetch error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch content: {str(e)}")
+
+
+@app.post("/v1/proxy/fetch")
+async def proxy_fetch_post(body: ProxyFetchRequest, request: Request):
+    """Fetch web content via POST body. Avoids URL length limits on iOS Safari."""
+    try:
+        result = await _do_proxy_fetch(body.url)
+        cors = build_cors_headers(request)
+        return JSONResponse(content=result, headers=cors)
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Proxy fetch error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch content: {str(e)}")
 
 # Web search endpoint
@@ -2467,7 +2530,7 @@ async def execute_tool_for_philosopher(tool_name: str, parameters: Dict) -> str:
                 return "Error: 'url' parameter is required for web_scraper"
             
             # Call the proxy fetch endpoint
-            result = await proxy_fetch(url)
+            result = await _do_proxy_fetch(url)
             
             # Return the content (may be HTML)
             if result and "content" in result:
@@ -4030,9 +4093,10 @@ async def delete_file(
 # ============================================================================
 
 @app.post("/v1/proxy/upload-to-drive")
-async def upload_to_drive(request: Request):
+async def upload_to_drive(request: Request, current_user: Dict[str, Any] = Depends(get_current_user)):
     """
-    Upload a file to Google Drive using service account credentials from .env file.
+    Upload a file from the scratch directory to Google Drive using service account credentials from .env file.
+    filePath must be a filename relative to the scratch directory (e.g. report.docx). Path traversal and absolute paths are rejected.
     Credentials are read from environment variables:
     - GOOGLE_DRIVE_PROJECT_ID
     - GOOGLE_DRIVE_PRIVATE_KEY_ID
@@ -4040,16 +4104,21 @@ async def upload_to_drive(request: Request):
     - GOOGLE_DRIVE_CLIENT_EMAIL
     - GOOGLE_DRIVE_FOLDER_ID
     """
+    folder_id = None
+    file_path_obj = None
     try:
         # Get form data from request
         form_data = await request.form()
-        
-        # Get file path from form data
+        # Get file path from form data (must be scratch-relative filename; validated below)
         file_path = form_data.get('filePath')
-        if not file_path:
+        if not file_path or not str(file_path).strip():
             raise HTTPException(status_code=400, detail="filePath is required")
+        # Resolve to path under SCRATCH_DIR only; rejects absolute, traversal, disallowed extensions
+        file_path_obj = resolve_scratch_path(str(file_path).strip(), DRIVE_UPLOAD_EXTENSIONS)
+        if not file_path_obj.exists():
+            raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
         
-        # Get optional file name
+        # Get optional file name for Drive
         file_name = form_data.get('fileName')
         
         # Get folder ID from form data or environment variable
@@ -4105,11 +4174,6 @@ async def upload_to_drive(request: Request):
                 detail="Google Drive API libraries not available. Install with: pip install google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client"
             )
         
-        # Verify file exists
-        file_path_obj = Path(file_path)
-        if not file_path_obj.exists():
-            raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
-        
         # Authenticate with Google Drive using service account credentials
         credentials = service_account.Credentials.from_service_account_info(
             credentials_dict,
@@ -4141,6 +4205,9 @@ async def upload_to_drive(request: Request):
             fields='id, name, webViewLink'
         ).execute()
         
+        # Audit log: user, filename, folder_id, success, file_id
+        user_sub = current_user.get("sub") or "unknown"
+        print(f"[AUDIT] upload-to-drive user={user_sub} filename={file_path_obj.name} folder_id={folder_id} success=true file_id={file.get('id')}")
         # Return success response with file ID
         return {
             'success': True,
@@ -4150,10 +4217,17 @@ async def upload_to_drive(request: Request):
             'message': f"File successfully uploaded to Google Drive with ID: {file.get('id')}"
         }
         
-    except HTTPException:
+    except HTTPException as exc:
+        # Audit log on auth/path/not-found/credential errors
+        user_sub = current_user.get("sub") if current_user else "unknown"
+        filename_log = file_path_obj.name if file_path_obj else "n/a"
+        print(f"[AUDIT] upload-to-drive user={user_sub} filename={filename_log} folder_id={folder_id or 'n/a'} success=false status={exc.status_code} detail={exc.detail}")
         # Re-raise HTTP exceptions
         raise
     except Exception as e:
+        # Audit log on unexpected errors
+        user_sub = current_user.get("sub") if current_user else "unknown"
+        print(f"[AUDIT] upload-to-drive user={user_sub} folder_id={folder_id or 'n/a'} success=false error={str(e)}")
         # Handle any other errors
         print(f"❌ Google Drive upload error: {e}")
         raise HTTPException(

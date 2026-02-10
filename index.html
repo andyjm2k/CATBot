@@ -6139,13 +6139,13 @@ function saveWAVFile(wavBlob) {
                 type: "function",
                 function: {
                     name: "uploadToGoogleDrive",
-                    description: "Uploads a file to Google Drive using service account authentication",
+                    description: "Uploads a file from the scratch directory to Google Drive using service account authentication. The file must be in the scratch directory; use the filename relative to scratch (e.g. report.docx).",
                     parameters: {
                         type: "object",
                         properties: {
                             filePath: {
                                 type: "string",
-                                description: "Path to the local file to be uploaded"
+                                description: "Filename relative to the scratch directory (e.g. report.docx, climate_updates.csv). Do not use absolute paths or paths outside scratch."
                             },
                             fileName: {
                                 type: "string",
@@ -7271,21 +7271,21 @@ function saveWAVFile(wavBlob) {
         async function handleWebScraping({ url }) {
             try {
                 const urlObj = new URL(url);
-                
-                // Use the proxy endpoint for fetching the webpage content
-                const proxyUrl = `${PROXY_BASE_URL}/v1/proxy/fetch?url=${encodeURIComponent(url)}`;
-                
-                // Fetch the webpage content through the proxy
-                // Use authToken for proxy authentication (the global fetch interceptor will also add it, but be explicit)
+                // Use POST for proxy fetch to avoid URL length limits on iOS Safari and improve reliability
+                const proxyUrl = `${PROXY_BASE_URL}/v1/proxy/fetch`;
                 const response = await fetch(proxyUrl, {
-                    method: 'GET',
+                    method: 'POST',
                     headers: {
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/json',
                         'Authorization': `Bearer ${authToken}`
-                    }
+                    },
+                    body: JSON.stringify({ url: url })
                 });
 
                 if (!response.ok) {
-                    throw new Error(`Failed to fetch content: ${response.statusText}`);
+                    const errText = await response.text();
+                    throw new Error(`Failed to fetch content: ${response.status} ${response.statusText}${errText ? ' - ' + errText.slice(0, 100) : ''}`);
                 }
 
                 const data = await response.json();
@@ -7296,15 +7296,17 @@ function saveWAVFile(wavBlob) {
                 // Create a temporary element to parse the HTML
                 const parser = new DOMParser();
                 const doc = parser.parseFromString(data.content, 'text/html');
-                
                 // Remove script and style elements
                 doc.querySelectorAll('script, style').forEach(el => el.remove());
+                // Safely get body text (iOS Safari: doc.body can be null for malformed HTML)
+                const bodyEl = doc.body;
+                const textContent = (bodyEl && bodyEl.textContent ? bodyEl.textContent : doc.documentElement ? doc.documentElement.textContent : '')
+                    .replace(/\s+/g, ' ')
+                    .trim();
                 
-                // Extract text content
-                const textContent = doc.body.textContent.replace(/\s+/g, ' ').trim();
-                
-                // Use the LLM to summarize the content
-                const summaryResponse = await fetch(endpointInput.value, {
+                // Use the LLM to summarize the content via proxy to avoid mixed content (HTTPS page calling HTTP endpoint)
+                const summaryEndpoint = `${PROXY_BASE_URL}/v1/proxy/chat/completions?endpoint=${encodeURIComponent(endpointInput.value)}`;
+                const summaryResponse = await fetch(summaryEndpoint, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
@@ -8108,10 +8110,10 @@ Parameters:
 }
 
 11. uploadToGoogleDrive
-Description: Uploads a file to Google Drive using service account authentication
+Description: Uploads a file from the scratch directory to Google Drive using service account authentication. Use the filename relative to the scratch directory.
 Parameters:
 {
-    "filePath": "string (path to the local file to be uploaded)",
+    "filePath": "string (filename relative to scratch directory, e.g. report.docx or climate_updates.csv)",
     "fileName": "string (optional custom name for the file in Drive)"
 }
 
