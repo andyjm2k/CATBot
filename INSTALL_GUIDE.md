@@ -49,11 +49,11 @@ uv run playwright install
 
 ### Verify MCP server installation
 ```bash
-# Test the server directly
+# Verify CLI is available
 uv run mcp-server-browser-use --help
 ```
 
-You should see the help output for the mcp-server-browser-use command.
+You should see the help output. To start the HTTP server (required for browser automation), run `uv run mcp-server-browser-use server` in this directory. The proxy and Flask bridge connect to it via `MCP_BROWSER_USE_HTTP_URL` (default http://127.0.0.1:8383/mcp).
 
 ## Step 3: Install Integration Dependencies
 
@@ -108,6 +108,8 @@ MCP_BROWSER_HEADLESS=true
 ```bash
 # MCP Browser-Use directory (auto-detected if in default location)
 MCP_BROWSER_USE_DIR=./mcp-browser-use
+# URL of the browser-use HTTP MCP server (proxy and Flask bridge use this). Default: http://127.0.0.1:8383/mcp. Start the server with: uv run mcp-server-browser-use server (in mcp-browser-use directory).
+# MCP_BROWSER_USE_HTTP_URL=http://127.0.0.1:8383/mcp
 
 # HTTP Server settings
 PORT=5001
@@ -163,7 +165,7 @@ cd mcp-browser-use
 uv run mcp-server-browser-use --help
 cd ..
 ```
-Should display help text without errors.
+Should display help text without errors. For browser automation, start the HTTP server with `uv run mcp-server-browser-use server`.
 
 ### Test 3: Python Dependencies
 ```bash
@@ -376,7 +378,7 @@ However, this is **not recommended** as it may have compatibility issues.
 
 ### Next Steps
 
-1. ✅ **Run tests**: `python test_mcp_browser_integration.py -v`
+1. ✅ **Run tests**: `python test_mcp_client.py` (requires MCP HTTP server running)
 2. ✅ **Try browser task**: Ask assistant to navigate a website
 3. ✅ **Try research**: Ask assistant to research a topic
 4. ✅ **Read full docs**: See `MCP_BROWSER_INTEGRATION.md`

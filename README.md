@@ -371,8 +371,8 @@ This will start:
 - Whisper API server (port 8001)
 - Proxy server (port 8002)
 - AutoGen Studio (port 8084)
-- MCP Browser-Use server
-- MCP Browser HTTP server (port 5001)
+- MCP Browser-Use HTTP server (port 8383; run `uv run mcp-server-browser-use server` in mcp-browser-use directory)
+- MCP Browser HTTP server (port 5001; Flask bridge; connects to browser-use via `MCP_BROWSER_USE_HTTP_URL`, default http://127.0.0.1:8383/mcp)
 
 #### Option 1b: Stop All Services (Windows)
 
@@ -392,11 +392,12 @@ python proxy_server.py
 # Start AutoGen Studio
 autogenstudio serve --team team-config.json --port 8084
 
-# Start MCP Browser-Use server
-cd mcp-browser-use
-uv run mcp-server-browser-use
+# Start MCP Browser-Use HTTP server (required; stdio is deprecated).
+# To use the same LLM provider/model as the Flask server, run the wrapper so it loads this project's .env:
+python start_mcp_browser_use_http_server.py
+# Or without wrapper (uses mcp-browser-use config/defaults): cd mcp-browser-use && uv run mcp-server-browser-use server
 
-# Start MCP Browser HTTP server
+# Start MCP Browser HTTP server (Flask bridge for frontend)
 python start_mcp_browser_server.py
 ```
 
@@ -688,14 +689,8 @@ Several test files are available to verify functionality:
 # Test file operations
 python test_file_operations.py
 
-# Test MCP browser integration
-python test_mcp_browser_integration.py
-
-# Test MCP client connection
+# Test MCP client (HTTP; requires mcp-server-browser-use server running)
 python test_mcp_client.py
-
-# Test HTTP client
-python test_http_client.py
 
 # Test server endpoints
 python test_server.py

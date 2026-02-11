@@ -1710,6 +1710,8 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
         const sendBtn = document.getElementById('send-btn');
         const philosopherModeBtn = document.getElementById('philosopher-mode-btn');
         const userInput = document.getElementById('user-input');
+        // Shared send handler (assigned later) - used by mobile send button so iOS Safari doesn't need programmatic click
+        window.submitUserMessage = null;
         const responseOutput = document.getElementById('response-output');
         const messageHistory = document.getElementById('message-history'); // New message history container
 
@@ -1889,13 +1891,19 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
                 }
             });
 
-            // Send on button click
+            // Send on button click - call shared handler directly (iOS Safari ignores programmatic sendBtn.click() on display:none)
             sendBtnMobile.addEventListener('click', function() {
-                if (userInput.value.trim().length > 0 && sendBtn) {
-                    // Trigger the existing send button handler
-                    sendBtn.click();
+                if (userInput.value.trim().length > 0 && window.submitUserMessage) {
+                    window.submitUserMessage();
                 }
             });
+            // iOS Safari: touchend fires reliably; click can be delayed or lost when keyboard is open
+            sendBtnMobile.addEventListener('touchend', function(e) {
+                if (userInput.value.trim().length > 0 && window.submitUserMessage) {
+                    e.preventDefault();
+                    window.submitUserMessage();
+                }
+            }, { passive: false });
         }
         const userNameInput = document.getElementById('user-name'); // User name input
         const assistantNameInput = document.getElementById('assistant-name'); // Assistant name input
@@ -7270,6 +7278,13 @@ function saveWAVFile(wavBlob) {
         // Add this new handler function for web scraping
         async function handleWebScraping({ url }) {
             try {
+                // Reject 'pending' or invalid URLs so chain step fails clearly instead of throwing
+                if (!url || url === 'pending' || !url.startsWith('http')) {
+                    return {
+                        success: false,
+                        message: 'No URL available from previous step. Run a web search first, or specify a URL to scrape.'
+                    };
+                }
                 const urlObj = new URL(url);
                 // Use POST for proxy fetch to avoid URL length limits on iOS Safari and improve reliability
                 const proxyUrl = `${PROXY_BASE_URL}/v1/proxy/fetch`;
@@ -7535,10 +7550,12 @@ function saveWAVFile(wavBlob) {
             },
             webSearch: {
                 patterns: [
+                    // "websearch for X" / "web search for X" so "and then" doesn't end up in query
+                    /(?:web\s*search|websearch)\s+for\s+(.+?)(?:\s+and)?\s*$/i,
                     /(search|look up|find|get information|information about|tell me about) (.*?)(?=\s*(?:then|,|$))/i,
                     /search (?:for )?["'](.+?)["']/i
                 ],
-                extractArgs: (match) => ({ query: (match[2] || match[1]).trim() })
+                extractArgs: (match) => ({ query: (match[2] || match[1] || match[0]).trim() })
             },
             scrapeWebsite: {
                 patterns: [
@@ -7705,10 +7722,17 @@ function saveWAVFile(wavBlob) {
             
             switch (task.function.name) {
                 case 'scrapeWebsite':
-                    if (args.url === 'pending' && context.searchResults.length > 0) {
-                        const urlLine = context.searchResults.find(line => line.includes('URL:'));
-                        if (urlLine) {
-                            const url = urlLine.split('URL: ')[1].trim();
+                    if (args.url === 'pending' && (context.searchResults.length > 0 || (context.urls && context.urls.length > 0))) {
+                        // Prefer URL from parsed urls list, then from search result lines
+                        let url = context.urls && context.urls.length > 0 ? context.urls[0] : null;
+                        if (!url) {
+                            const urlLine = context.searchResults.find(line => line.includes('URL:'));
+                            if (urlLine) {
+                                const idx = urlLine.indexOf('URL:');
+                                url = idx >= 0 ? urlLine.slice(idx + 4).trim() : null;
+                            }
+                        }
+                        if (url) {
                             task.function.arguments = JSON.stringify({ url });
                             responseOutput.value += `→ Found URL to scrape: ${url}\n`;
                         }
@@ -7812,15 +7836,14 @@ function saveWAVFile(wavBlob) {
             };
             console.log('processToolChain - Initialized context:', context);
 
-            // Show initial task detection
-            const detectionMessage = `Detected ${tasks.length} tasks in the chain:\n`;
-            responseOutput.value = detectionMessage;
-            addMessageToHistory('assistant', detectionMessage); // Add to message history
+            // Build task list for display (do not add to history yet; one message at end)
+            let responseContent = `Detected ${tasks.length} tasks in the chain:\n`;
             tasks.forEach((task, index) => {
                 console.log(`processToolChain - Task ${index + 1}:`, task);
-                responseOutput.value += `${index + 1}. ${task.originalText}\n`;
+                responseContent += `${index + 1}. ${task.originalText}\n`;
             });
-            responseOutput.value += '\nExecuting tasks...\n\n';
+            responseContent += '\nExecuting tasks...\n\n';
+            responseOutput.value = responseContent;
 
             for (let i = 0; i < tasks.length; i++) {
                 const task = tasks[i];
@@ -7893,12 +7916,13 @@ function saveWAVFile(wavBlob) {
                 textToSpeech(finalOutput);
             }
 
-            // Update response box with final results
-            responseOutput.value = finalOutput;
-            addMessageToHistory('assistant', finalOutput); // Add to message history
+            // Single combined message: task list + results (avoids repeating Step 1 in history)
+            const combinedOutput = responseContent + finalOutput;
+            responseOutput.value = combinedOutput;
+            // Caller adds to history once with returned value
             console.log('processToolChain - Final output:', finalOutput);
 
-            return finalOutput;
+            return combinedOutput;
         }
 
         // Helper function to postprocess result and update context
@@ -7907,17 +7931,22 @@ function saveWAVFile(wavBlob) {
 
             switch (task.function.name) {
                 case 'webSearch':
-                    if (result.success) {
-                        const searchResults = result.message
-                            .split('\n\n')[1]
+                    if (result.success && result.message) {
+                        // Parse search results defensively so chain can continue to next step
+                        const parts = result.message.split('\n\n');
+                        const resultsBlock = parts.length > 1 ? parts[1] : parts[0];
+                        const searchResults = (resultsBlock || result.message)
                             .split('\n')
                             .filter(line => line.trim());
                         context.searchResults = searchResults;
-                        
-                        // Extract URLs for potential future use
+                        // Extract URLs for next step (e.g. "scrape the first URL")
                         const urls = searchResults
                             .filter(line => line.includes('URL:'))
-                            .map(line => line.split('URL: ')[1].trim());
+                            .map(line => {
+                                const idx = line.indexOf('URL:');
+                                return idx >= 0 ? line.slice(idx + 4).trim() : null;
+                            })
+                            .filter(Boolean);
                         context.urls = urls;
                     }
                     break;
@@ -9104,7 +9133,8 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
             }
         }
 
-        sendBtn.addEventListener('click', async function () { // Handle send button click
+        // Shared send logic so mobile paper-airplane button can call it directly (fixes iOS Safari programmatic click)
+        window.submitUserMessage = async function () {
             // Check for philosopher mode trigger phrase
             const promptText = userInput.value.trim();
             if (promptText && detectPhilosopherModeTrigger(promptText)) {
@@ -9125,16 +9155,19 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
                 alert('Please enter some text or record your voice.'); // Show alert if empty
                 return; // Exit early
             } // End empty check
-            
+
             // Note: fetchOpenAIResponse will add the user message to history, so we don't add it here
             fetchOpenAIResponse(userText); // Send message to OpenAI API (this will add user message to history)
-            
+
             // Add deactivation message after user message if we stopped philosopher mode
             // This appears after the user message since fetchOpenAIResponse adds it synchronously at the start
             if (shouldStopPhilosopher) {
                 addMessageToHistory('assistant', 'Philosopher Mode deactivated.');
             }
             userInput.value = ''; // Clear input field
+        };
+        sendBtn.addEventListener('click', function () { // Handle send button click
+            if (window.submitUserMessage) window.submitUserMessage();
         }); // End send button click handler
 
         // Handle Enter key submission and Shift+Enter for newlines
@@ -12903,7 +12936,7 @@ ${fullText.substring(0, 6000)}...${minimalImageInfo}`;
                 console.error('Browser agent error:', error);
                 return {
                     success: false,
-                    message: `Browser automation failed: ${error.message}\n\nPlease ensure:\n1. The MCP browser server is running (python mcp_browser_server.py)\n2. Environment variables are configured correctly\n3. The browser-use MCP server is accessible`
+                    message: `Browser automation failed: ${error.message}\n\nPlease ensure:\n1. The browser-use HTTP server is running (in mcp-browser-use directory: uv run mcp-server-browser-use server)\n2. The MCP Browser HTTP bridge is running (python start_mcp_browser_server.py) if using the Flask API\n3. Environment variables are configured correctly (MCP_BROWSER_USE_HTTP_URL defaults to http://127.0.0.1:8383/mcp)`
                 };
             }
         }
@@ -12972,7 +13005,7 @@ ${fullText.substring(0, 6000)}...${minimalImageInfo}`;
                 console.error('Deep research error:', error);
                 return {
                     success: false,
-                    message: `Deep research failed: ${error.message}\n\nPlease ensure:\n1. The MCP browser server is running (python mcp_browser_server.py)\n2. MCP_RESEARCH_TOOL_SAVE_DIR is configured in environment\n3. The browser-use MCP server is accessible\n4. You have sufficient system resources for parallel browsers`
+                    message: `Deep research failed: ${error.message}\n\nPlease ensure:\n1. The browser-use HTTP server is running (in mcp-browser-use: uv run mcp-server-browser-use server)\n2. The MCP Browser HTTP bridge is running (python start_mcp_browser_server.py) if using the Flask API\n3. MCP_RESEARCH_TOOL_SAVE_DIR is configured in environment\n4. The browser-use MCP server is accessible (MCP_BROWSER_USE_HTTP_URL)\n5. You have sufficient system resources for parallel browsers`
                 };
             }
         }

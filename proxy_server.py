@@ -76,6 +76,12 @@ except ImportError as e:
     stdio_client = None
     StdioServerParameters = None
 
+# Browser-use HTTP server URL (must run: uv run mcp-server-browser-use server)
+MCP_BROWSER_USE_HTTP_URL = os.environ.get("MCP_BROWSER_USE_HTTP_URL", "http://127.0.0.1:8383/mcp").strip()
+BROWSER_USE_HTTP_UNAVAILABLE_MSG = (
+    "Browser-use HTTP server not available. Start it with: uv run mcp-server-browser-use server (in mcp-browser-use directory)."
+)
+
 # Import memory system (with error handling)
 MEMORY_AVAILABLE = False
 MemoryManager = None
@@ -1695,115 +1701,89 @@ async def disconnect_server(
         print(f"Error disconnecting MCP server: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to disconnect MCP server: {str(e)}")
 
-# Browser automation tool endpoint (integrated directly)
+
+async def _browser_use_http_list_tools() -> Dict[str, Any]:
+    """List tools from the browser-use HTTP MCP server. Raises on connection failure."""
+    from fastmcp import Client
+
+    async with Client(MCP_BROWSER_USE_HTTP_URL) as client:
+        tools = await client.list_tools()
+    # Convert to the shape expected by the proxy API (name, description, inputSchema)
+    tools_list = []
+    for t in tools:
+        entry = {
+            "name": getattr(t, "name", "unknown"),
+            "description": getattr(t, "description", None) or "",
+            "inputSchema": getattr(t, "inputSchema", None) or {"type": "object", "properties": {}},
+        }
+        tools_list.append(entry)
+    return {"tools": tools_list}
+
+
+async def _browser_use_http_call_tool(tool_name: str, parameters: Dict[str, Any]) -> Dict[str, Any]:
+    """Call a tool on the browser-use HTTP MCP server. Returns result with content list; raises on connection failure."""
+    from fastmcp import Client
+
+    # Map proxy parameter names to server names (e.g. instruction -> task for run_browser_agent)
+    args = dict(parameters)
+    if tool_name == "run_browser_agent" and "instruction" in args and "task" not in args:
+        args["task"] = args.pop("instruction")
+
+    async with Client(MCP_BROWSER_USE_HTTP_URL) as client:
+        result = await client.call_tool(tool_name, args)
+
+    # Build content list from result.content (list of items with .text or str)
+    content = []
+    for item in getattr(result, "content", []) or []:
+        text = getattr(item, "text", None) or str(item)
+        content.append({"type": "text", "text": text})
+    if getattr(result, "is_error", False) and not content:
+        content.append({"type": "text", "text": "Tool returned an error."})
+    return {"content": content}
+
+
+# Browser automation tool endpoint (browser-use via HTTP; other servers via MCP client)
 @app.post("/v1/mcp/servers/{server_id}/tools/call")
 async def call_tool(server_id: str, request: ToolCallRequest):
-    """Call a tool on an MCP server - now handles browser automation directly."""
+    """Call a tool on an MCP server. Browser-use preset uses HTTP client; others use connected MCP client."""
     if not MCP_AVAILABLE:
         raise HTTPException(status_code=503, detail="MCP SDK not available")
 
     try:
         print(f"🔧 [TOOLS/CALL] Server: {server_id}")
 
+        server = mcp_servers.get(server_id)
+        tool_name = request.toolName
+        parameters = request.parameters or {}
+        print(f"🔍 [TOOLS/CALL] Tool name: {tool_name}")
+        print(f"🔍 [TOOLS/CALL] Parameters: {parameters}")
+
+        # Browser-use preset: use HTTP client (no mcp_clients entry)
+        if server and "mcp-browser-use" in server.get("name", "").lower():
+            try:
+                result = await _browser_use_http_call_tool(tool_name, parameters)
+                return {"result": result}
+            except Exception as e:
+                print(f"❌ [TOOLS/CALL] Browser-use HTTP error: {e}")
+                raise HTTPException(
+                    status_code=503,
+                    detail=BROWSER_USE_HTTP_UNAVAILABLE_MSG + " " + str(e),
+                )
+
         client = mcp_clients.get(server_id)
         if not client:
             print(f"❌ [TOOLS/CALL] Server {server_id} not found or not connected")
             raise HTTPException(status_code=404, detail="Server is not connected")
 
-        tool_name = request.toolName
-        parameters = request.parameters or {}
+        if not tool_name:
+            print("❌ [TOOLS/CALL] toolName is required but missing")
+            raise HTTPException(status_code=400, detail="toolName is required")
 
-        print(f"🔍 [TOOLS/CALL] Tool name: {tool_name}")
-        print(f"🔍 [TOOLS/CALL] Parameters: {parameters}")
-
-        if tool_name == "run_browser_agent":
-            # Handle browser automation directly
-            instruction = parameters.get("instruction", "")
-            max_steps = parameters.get("max_steps", 10)
-            use_vision = parameters.get("use_vision", True)
-
-            try:
-                # Import browser-use components (lazy imports)
-                Agent = __import__('browser_use', fromlist=['Agent']).Agent
-                BrowserSession = __import__('browser_use', fromlist=['BrowserSession']).BrowserSession
-
-                # Set up browser configuration
-                headless = os.getenv("BROWSER_USE_HEADLESS", "true").lower() == "true"
-                disable_security = os.getenv("BROWSER_USE_DISABLE_SECURITY", "false").lower() == "true"
-
-                # Create browser session
-                browser = BrowserSession(
-                    headless=headless,
-                    disable_security=disable_security
-                )
-
-                # Set up LLM based on environment configuration
-                llm = setup_browser_llm()
-
-                # Build Agent kwargs and pass only params the installed Agent.__init__ accepts
-                # (avoids "unexpected keyword argument 'llm_timeout'" with older browser_use versions)
-                import inspect
-                agent_kwargs = {
-                    "task": instruction,
-                    "llm": llm,
-                    "browser": browser,
-                    "max_steps": max_steps,
-                    "use_vision": use_vision,
-                }
-                try:
-                    sig = inspect.signature(Agent.__init__)
-                    allowed = set(sig.parameters) - {"self"}
-                    agent_kwargs = {k: v for k, v in agent_kwargs.items() if k in allowed}
-                except Exception:
-                    pass
-                agent = Agent(**agent_kwargs)
-
-                # Run the agent
-                result = await agent.run()
-
-                # Close browser
-                await browser.close()
-
-                return {
-                    "result": {
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": f"Browser automation completed successfully.\n\nResult: {result}"
-                            }
-                        ]
-                    }
-                }
-
-            except Exception as e:
-                import traceback
-                error_details = traceback.format_exc()
-                return {
-                    "result": {
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": f"Browser automation failed: {str(e)}\n\nDetails: {error_details}"
-                            }
-                        ]
-                    }
-                }
-        else:
-            # Handle other tools through the MCP client
-            if not tool_name:
-                print("❌ [TOOLS/CALL] toolName is required but missing")
-                raise HTTPException(status_code=400, detail="toolName is required")
-
-            # Make MCP request to call tool
-            result = await client.request(
-                method="tools/call",
-                params={
-                    "name": tool_name,
-                    "arguments": parameters
-                }
-            )
-
-            return {"result": result}
+        result = await client.request(
+            method="tools/call",
+            params={"name": tool_name, "arguments": parameters},
+        )
+        return {"result": result}
 
     except HTTPException:
         raise
@@ -1813,59 +1793,35 @@ async def call_tool(server_id: str, request: ToolCallRequest):
 
 @app.post("/v1/mcp/servers/{server_id}/tools/list")
 async def list_tools(server_id: str):
-    """List tools available on an MCP server."""
+    """List tools available on an MCP server. Browser-use preset uses HTTP client."""
     if not MCP_AVAILABLE:
         raise HTTPException(status_code=503, detail="MCP SDK not available")
 
     try:
         print(f"🔍 [TOOLS/LIST] Server: {server_id}")
 
-        # Check if this is the MCP Browser Use server
         server = mcp_servers.get(server_id)
+        # Browser-use preset: list tools from HTTP server
         if server and "mcp-browser-use" in server.get("name", "").lower():
-            # Return the browser automation tool directly
-            return {
-                "result": {
-                    "tools": [
-                        {
-                            "name": "run_browser_agent",
-                            "description": "Control a web browser using natural language commands. Executes browser automation tasks and returns results.",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "instruction": {
-                                        "type": "string",
-                                        "description": "Natural language instruction for browser automation (e.g., 'Navigate to Google and search for cats')",
-                                    },
-                                    "max_steps": {
-                                        "type": "integer",
-                                        "description": "Maximum number of steps the agent should take",
-                                        "default": 10
-                                    },
-                                    "use_vision": {
-                                        "type": "boolean",
-                                        "description": "Whether to use vision for understanding page content",
-                                        "default": True
-                                    }
-                                },
-                                "required": ["instruction"]
-                            }
-                        }
-                    ]
-                }
-            }
+            try:
+                result = await _browser_use_http_list_tools()
+                return {"result": result}
+            except Exception as e:
+                print(f"❌ [TOOLS/LIST] Browser-use HTTP error: {e}")
+                raise HTTPException(
+                    status_code=503,
+                    detail=BROWSER_USE_HTTP_UNAVAILABLE_MSG + " " + str(e),
+                )
 
         global mcp_clients
-
         client = mcp_clients.get(server_id)
         if not client:
             print(f"❌ [TOOLS/LIST] Server {server_id} not found or not connected")
             raise HTTPException(status_code=404, detail="Server is not connected")
 
-        # Make MCP request to list tools
         result = await client.request(
             method="tools/list",
-            params={}
+            params={},
         )
 
         print(f"📨 [TOOLS/LIST] Raw response from MCP server: {result}")

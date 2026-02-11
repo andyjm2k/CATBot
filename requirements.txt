@@ -36,3 +36,6 @@ cryptography>=41.0.0
 # MCP (Model Context Protocol) client library
 # Note: Package name may be 'mcp' or 'mcp-sdk' - verify with: pip search mcp
 mcp>=0.1.0
+
+# FastMCP HTTP client for mcp-server-browser-use (HTTP transport; same ref as mcp-browser-use)
+fastmcp @ git+https://github.com/jlowin/fastmcp.git@3d6fd4650c4c59465fbd6983693952946259d354

@@ -56,17 +56,18 @@ if research_dir:
     Path(research_dir).mkdir(parents=True, exist_ok=True)
     print(f"Research output directory: {research_dir}")
 
-# Display configuration
+# Display configuration (LLM is used by the background MCP server at MCP_BROWSER_USE_HTTP_URL; start it with start_mcp_browser_use_http_server.py to use this same config)
 print("\n" + "="*50)
 print("MCP Browser HTTP Server Configuration")
 print("="*50)
-print(f"LLM Provider: {os.environ.get('MCP_LLM_PROVIDER', 'ollama')}")
+print(f"LLM Provider: {os.environ.get('MCP_LLM_PROVIDER', 'ollama')} (used by MCP server at MCP_BROWSER_USE_HTTP_URL)")
 print(f"Model: {os.environ.get('MCP_LLM_MODEL_NAME', 'default')}")
 print(f"Browser Headless: {os.environ.get('MCP_BROWSER_HEADLESS', 'false')}")
 print(f"Keep Browser Open: {os.environ.get('MCP_BROWSER_KEEP_OPEN', 'false')}")
 print(f"Max Parallel Browsers: {os.environ.get('MCP_RESEARCH_TOOL_MAX_PARALLEL_BROWSERS', '3')}")
 print(f"Server Port: {os.environ.get('PORT', '5001')}")
 print(f"Server Host: {os.environ.get('HOST', '0.0.0.0')}")
+print("Note: Browser tasks run on the MCP server. Start it with start_mcp_browser_use_http_server.py so it uses this same LLM.")
 print("="*50 + "\n")
 
 # Import and start the server

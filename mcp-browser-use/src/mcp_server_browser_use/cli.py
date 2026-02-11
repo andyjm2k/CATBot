@@ -1,320 +1,771 @@
-import asyncio
+"""mcp-server-browser-use: Unified CLI for Browser Use MCP Server.
+
+Commands:
+- server: Start HTTP MCP server (default: background daemon, -f for foreground)
+- stop: Stop the running server daemon
+- status: Check if server is running
+- logs: View server logs
+- install: Install to Claude Desktop config
+- config: View or modify configuration
+- skill: Manage browser skills (list, get, delete)
+"""
+
 import json
-import logging
 import os
+import signal
 import sys
-import traceback
-import uuid
 from pathlib import Path
-from typing import Any, Dict, Optional
 
 import typer
-from dotenv import load_dotenv
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
 
-from .config import AppSettings, settings as global_settings # Import AppSettings and the global instance
-# Import from _internal
-from ._internal.agent.browser_use.browser_use_agent import BrowserUseAgent, AgentHistoryList
-from ._internal.agent.deep_research.deep_research_agent import DeepResearchAgent
-from ._internal.browser.custom_browser import CustomBrowser
-from ._internal.browser.custom_context import (
-    CustomBrowserContext,
-    CustomBrowserContextConfig,
+from .config import APP_NAME, CONFIG_FILE, get_default_results_dir, load_config_file, save_config_file, settings
+from .skills import SkillStore
+
+
+def get_state_dir() -> Path:
+    """Get the state directory for runtime files (e.g. ~/.local/state/mcp-server-browser-use)."""
+    if os.name == "nt":
+        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / ".local/state")).expanduser()
+    else:
+        base = Path(os.environ.get("XDG_STATE_HOME", "~/.local/state")).expanduser()
+
+    path = base / APP_NAME
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+SERVER_INFO_FILE = get_state_dir() / "server.json"
+LOG_FILE = get_state_dir() / "server.log"
+
+app = typer.Typer(
+    name="mcp-server-browser-use",
+    help="Browser automation MCP server & CLI",
+    no_args_is_help=False,  # Show deprecation message instead of help
 )
-from ._internal.controller.custom_controller import CustomController
-from ._internal.utils import llm_provider as internal_llm_provider
-from browser_use.browser.browser import BrowserConfig
-from browser_use.agent.views import AgentOutput
-from browser_use.browser.views import BrowserState
+console = Console()
 
-app = typer.Typer(name="mcp-browser-cli", help="CLI for mcp-browser-use tools.")
-logger = logging.getLogger("mcp_browser_cli")
 
-class CLIState:
-    settings: Optional[AppSettings] = None
+def _read_server_info() -> dict | None:
+    """Read server info from file, return None if not exists or invalid."""
+    if not SERVER_INFO_FILE.exists():
+        return None
+    try:
+        info = json.loads(SERVER_INFO_FILE.read_text())
+        # Validate required keys
+        required = {"pid", "host", "port", "transport"}
+        if not required.issubset(info.keys()):
+            return None
+        return info
+    except (json.JSONDecodeError, OSError):
+        return None
 
-cli_state = CLIState()
 
-def setup_logging(level_str: str, log_file: Optional[str]):
-    numeric_level = getattr(logging, level_str.upper(), logging.INFO)
-    for handler in logging.root.handlers[:]:
-        logging.root.removeHandler(handler)
-    logging.basicConfig(
-        level=numeric_level,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        filename=log_file if log_file else None,
-        filemode="a" if log_file else None,
-        force=True
-    )
+def _is_process_running(pid: int) -> bool:
+    """Check if a process with given PID is running."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
 
-@app.callback()
-def main_callback(
-    ctx: typer.Context,
-    env_file: Optional[Path] = typer.Option(
-        None, "--env-file", "-e", help="Path to .env file to load.", exists=True, dir_okay=False, resolve_path=True
+
+def _write_server_info(pid: int, host: str, port: int, transport: str) -> None:
+    """Write server info to file."""
+    info = {"pid": pid, "host": host, "port": port, "transport": transport}
+    SERVER_INFO_FILE.write_text(json.dumps(info, indent=2))
+
+
+def _remove_server_info() -> None:
+    """Remove server info file if exists."""
+    if SERVER_INFO_FILE.exists():
+        SERVER_INFO_FILE.unlink()
+
+
+@app.command()
+def server(
+    host: str = typer.Option(None, "--host", "-H", help="Host to bind to"),
+    port: int = typer.Option(None, "--port", "-p", help="Port to bind to"),
+    transport: str = typer.Option(
+        "streamable-http",
+        "--transport",
+        "-t",
+        help="HTTP transport: streamable-http (default) or sse",
+        callback=lambda v: v if v in ("streamable-http", "sse") else typer.BadParameter(f"Invalid transport: {v}"),
     ),
-    log_level: Optional[str] = typer.Option(
-        None, "--log-level", "-l", help="Override logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)."
+    foreground: bool = typer.Option(False, "--foreground", "-f", help="Run in foreground (don't daemonize)"),
+) -> None:
+    """Start the HTTP MCP server as a background daemon."""
+    import subprocess
+
+    h = host or settings.server.host
+    p = port or settings.server.port
+
+    # Check if already running
+    info = _read_server_info()
+    if info and _is_process_running(info["pid"]):
+        console.print(f"[yellow]Server already running (PID {info['pid']})[/yellow]")
+        console.print(f"  URL: http://{info['host']}:{info['port']}/mcp")
+        console.print("[dim]Use 'mcp-server-browser-use stop' to stop it[/dim]")
+        raise typer.Exit(1)
+
+    if foreground:
+        # Run in foreground (useful for debugging)
+        from .server import server_instance
+
+        console.print("[bold green]Starting HTTP MCP server (foreground)[/bold green]")
+        console.print(f"  Provider: {settings.llm.provider}")
+        console.print(f"  Model: {settings.llm.model_name}")
+        console.print(f"  URL: http://{h}:{p}/mcp")
+        _write_server_info(os.getpid(), h, p, transport)
+        try:
+            server_instance.run(transport=transport, host=h, port=p)  # type: ignore[arg-type]
+        finally:
+            _remove_server_info()
+        return
+
+    # Daemonize: spawn subprocess and detach
+    cmd = [
+        sys.executable,
+        "-m",
+        "mcp_server_browser_use.cli",
+        "server",
+        "--host",
+        h,
+        "--port",
+        str(p),
+        "--transport",
+        transport,
+        "--foreground",
+    ]
+
+    # Open log file for output
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    log_fd = open(LOG_FILE, "a")
+
+    proc = subprocess.Popen(
+        cmd,
+        stdout=log_fd,
+        stderr=log_fd,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+        cwd=os.getcwd(),
+        env=os.environ.copy(),
     )
-):
-    """
-    MCP Browser Use CLI. Settings are loaded from environment variables.
-    You can use an .env file for convenience.
-    """
-    if env_file:
-        load_dotenv(env_file, override=True)
-        logger.info(f"Loaded environment variables from: {env_file}")
 
-    # Reload settings after .env might have been loaded and to apply overrides
+    console.print("[bold green]Started HTTP MCP server (background)[/bold green]")
+    console.print(f"  PID: {proc.pid}")
+    console.print(f"  Provider: {settings.llm.provider}")
+    console.print(f"  Model: {settings.llm.model_name}")
+    console.print(f"  URL: http://{h}:{p}/mcp")
+    console.print(f"  Log: {LOG_FILE}")
+    console.print(f"  Info: {SERVER_INFO_FILE}")
+
+
+@app.command()
+def stop() -> None:
+    """Stop the running server daemon."""
+    info = _read_server_info()
+    if info is None:
+        console.print("[yellow]No server info file found[/yellow]")
+        raise typer.Exit(1)
+
+    pid = info["pid"]
+    if not _is_process_running(pid):
+        console.print(f"[yellow]Server process (PID {pid}) not running, cleaning up[/yellow]")
+        _remove_server_info()
+        raise typer.Exit(0)
+
+    console.print(f"[bold]Stopping server (PID {pid})...[/bold]")
     try:
-        cli_state.settings = AppSettings()
+        os.kill(pid, signal.SIGTERM)
+        # Wait briefly for graceful shutdown
+        import time
+
+        for _ in range(10):
+            if not _is_process_running(pid):
+                break
+            time.sleep(0.5)
+        else:
+            # Force kill if still running
+            console.print("[yellow]Forcing shutdown...[/yellow]")
+            os.kill(pid, signal.SIGKILL)
+    except OSError as e:
+        console.print(f"[red]Failed to stop server: {e}[/red]")
+        raise typer.Exit(1)
+
+    _remove_server_info()
+    console.print("[green]Server stopped[/green]")
+
+
+@app.command()
+def status() -> None:
+    """Check if server is running."""
+    info = _read_server_info()
+    if info is None:
+        console.print("[dim]Server not running (no info file)[/dim]")
+        raise typer.Exit(1)
+
+    pid = info["pid"]
+    if _is_process_running(pid):
+        console.print(f"[green]Server running (PID {pid})[/green]")
+        console.print(f"  URL: http://{info['host']}:{info['port']}/mcp")
+        console.print(f"  Transport: {info['transport']}")
+        console.print(f"  Log: {LOG_FILE}")
+    else:
+        console.print(f"[yellow]Server not running (stale PID {pid})[/yellow]")
+        _remove_server_info()
+        raise typer.Exit(1)
+
+
+@app.command()
+def logs(
+    follow: bool = typer.Option(False, "--follow", "-f", help="Follow log output"),
+    lines: int = typer.Option(50, "--lines", "-n", help="Number of lines to show"),
+) -> None:
+    """View server logs."""
+    if not LOG_FILE.exists():
+        console.print("[yellow]No log file found[/yellow]")
+        raise typer.Exit(1)
+
+    if follow:
+        import subprocess
+
+        subprocess.run(["tail", "-f", str(LOG_FILE)], check=False)
+    else:
+        import subprocess
+
+        subprocess.run(["tail", "-n", str(lines), str(LOG_FILE)], check=False)
+
+
+# --- MCP Client Commands ---
+
+
+def _get_server_url() -> str:
+    """Get the URL of the running server."""
+    info = _read_server_info()
+    if not info or not _is_process_running(info["pid"]):
+        console.print("[red]Server is not running[/red]")
+        console.print("[dim]Start it with: mcp-server-browser-use server[/dim]")
+        raise typer.Exit(1)
+    return f"http://{info['host']}:{info['port']}/mcp"
+
+
+async def _async_list_tools() -> list[dict]:
+    """List tools from the MCP server."""
+    from fastmcp import Client
+
+    url = _get_server_url()
+    async with Client(url) as client:
+        tools = await client.list_tools()
+        return [{"name": t.name, "description": t.description or ""} for t in tools]
+
+
+async def _async_call_tool(tool_name: str, arguments: dict) -> tuple[list, bool]:
+    """Call a tool on the MCP server."""
+    from fastmcp import Client
+
+    url = _get_server_url()
+    async with Client(url) as client:
+        result = await client.call_tool(tool_name, arguments)
+        return result.content, result.is_error
+
+
+@app.command()
+def tools() -> None:
+    """List available tools from the running server."""
+    import asyncio
+
+    try:
+        tools_list = asyncio.run(_async_list_tools())
     except Exception as e:
-        # This can happen if mandatory fields (like MCP_RESEARCH_TOOL_SAVE_DIR) are not set
-        sys.stderr.write(f"Error loading application settings: {e}\n")
-        sys.stderr.write("Please ensure all mandatory environment variables are set (e.g., MCP_RESEARCH_TOOL_SAVE_DIR).\n")
-        raise typer.Exit(code=1)
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
 
-    # Setup logging based on final settings (env file, then env vars, then CLI override)
-    final_log_level = log_level if log_level else cli_state.settings.server.logging_level
-    final_log_file = cli_state.settings.server.log_file
-    setup_logging(final_log_level, final_log_file)
+    if not tools_list:
+        console.print("[yellow]No tools available[/yellow]")
+        return
 
-    logger.info(f"CLI initialized. Effective log level: {final_log_level.upper()}")
-    if not cli_state.settings: # Should not happen if AppSettings() worked
-        logger.error("Failed to load application settings.")
-        raise typer.Exit(code=1)
+    table = Table(title="Available MCP Tools")
+    table.add_column("Tool", style="cyan")
+    table.add_column("Description", style="white")
+
+    for tool in tools_list:
+        name = tool.get("name", "")
+        desc = tool.get("description", "")[:80]
+        table.add_row(name, desc)
+
+    console.print(table)
+    console.print("\n[dim]Use 'mcp-server-browser-use call <tool> [args]' to run a tool[/dim]")
 
 
-async def cli_ask_human_callback(query: str, browser_context: Any) -> Dict[str, Any]:
-    """Callback for agent to ask human for input via CLI."""
-    # browser_context is part of the signature from browser-use, might not be needed here
-    print(typer.style(f"\n🤖 AGENT ASKS: {query}", fg=typer.colors.YELLOW))
-    response_text = typer.prompt(typer.style("Your response", fg=typer.colors.CYAN))
-    return {"response": response_text}
+@app.command()
+def call(
+    tool_name: str = typer.Argument(..., help="Name of the tool to call"),
+    args: list[str] = typer.Argument(None, help="Tool arguments as key=value pairs"),
+) -> None:
+    """Call a tool on the running server.
 
-def cli_on_step_callback(browser_state: BrowserState, agent_output: AgentOutput, step_num: int):
-    """CLI callback for BrowserUseAgent steps."""
-    print(typer.style(f"\n--- Step {step_num} ---", fg=typer.colors.BLUE, bold=True))
-    # Print current state if available
-    if hasattr(agent_output, "current_state") and agent_output.current_state:
-        print(typer.style("🧠 Agent State:", fg=typer.colors.MAGENTA))
-        print(agent_output.current_state)
-    # Print actions
-    if hasattr(agent_output, "action") and agent_output.action:
-        print(typer.style("🎬 Actions:", fg=typer.colors.GREEN))
-        for action in agent_output.action:
-            # Try to get action_type and action_input if present, else print the action itself
-            action_type = getattr(action, "action_type", None)
-            action_input = getattr(action, "action_input", None)
-            if action_type is not None or action_input is not None:
-                print(f"  - {action_type or 'Unknown action'}: {action_input or ''}")
+    Examples:
+        mcp-server-browser-use call skill_list
+        mcp-server-browser-use call run_browser_agent task="Go to google.com"
+        mcp-server-browser-use call run_deep_research topic="AI trends 2025"
+    """
+    import asyncio
+
+    # Parse key=value arguments
+    tool_args = {}
+    if args:
+        for arg in args:
+            if "=" in arg:
+                key, value = arg.split("=", 1)
+                # Try to parse as JSON for complex types
+                try:
+                    import json as json_module
+
+                    tool_args[key] = json_module.loads(value)
+                except json.JSONDecodeError:
+                    tool_args[key] = value
             else:
-                print(f"  - {action}")
-    # Optionally print observation if present in browser_state
-    if hasattr(browser_state, "observation") and browser_state.observation:
-        obs = browser_state.observation
-        print(typer.style("👀 Observation:", fg=typer.colors.CYAN))
-        print(str(obs)[:200] + "..." if obs and len(str(obs)) > 200 else obs)
+                # Positional arg - assume it's the first required param
+                # For convenience: `call run_browser_agent "Go to google.com"`
+                tool_args["task"] = arg
 
-
-async def _run_browser_agent_logic_cli(task_str: str, current_settings: AppSettings) -> str:
-    logger.info(f"CLI: Starting run_browser_agent task: {task_str[:100]}...")
-    agent_task_id = str(uuid.uuid4())
-    final_result = "Error: Agent execution failed."
-
-    browser_instance: Optional[CustomBrowser] = None
-    context_instance: Optional[CustomBrowserContext] = None
-    controller_instance: Optional[CustomController] = None
+    console.print(f"[bold blue]Calling {tool_name}...[/bold blue]")
+    if tool_args:
+        console.print(f"[dim]Arguments: {tool_args}[/dim]")
 
     try:
-        # LLM Setup
-        main_llm_config = current_settings.get_llm_config()
-        main_llm = internal_llm_provider.get_llm_model(**main_llm_config)
-        planner_llm = None
-        if current_settings.llm.planner_provider and current_settings.llm.planner_model_name:
-            planner_llm_config = current_settings.get_llm_config(is_planner=True)
-            planner_llm = internal_llm_provider.get_llm_model(**planner_llm_config)
-
-        # Controller Setup
-        controller_instance = CustomController(ask_assistant_callback=cli_ask_human_callback)
-        if current_settings.server.mcp_config:
-            mcp_dict_config = current_settings.server.mcp_config
-            if isinstance(current_settings.server.mcp_config, str):
-                mcp_dict_config = json.loads(current_settings.server.mcp_config)
-            await controller_instance.setup_mcp_client(mcp_dict_config)
-
-        # Browser and Context Setup
-        agent_headless_override = current_settings.agent_tool.headless
-        browser_headless = agent_headless_override if agent_headless_override is not None else current_settings.browser.headless
-        agent_disable_security_override = current_settings.agent_tool.disable_security
-        browser_disable_security = agent_disable_security_override if agent_disable_security_override is not None else current_settings.browser.disable_security
-
-        if current_settings.browser.use_own_browser and current_settings.browser.cdp_url:
-            browser_cfg = BrowserConfig(cdp_url=current_settings.browser.cdp_url, wss_url=current_settings.browser.wss_url, user_data_dir=current_settings.browser.user_data_dir)
-        else:
-            browser_cfg = BrowserConfig(
-                headless=browser_headless,
-                disable_security=browser_disable_security,
-                browser_binary_path=current_settings.browser.binary_path,
-                user_data_dir=current_settings.browser.user_data_dir,
-                window_width=current_settings.browser.window_width,
-                window_height=current_settings.browser.window_height,
-            )
-        browser_instance = CustomBrowser(config=browser_cfg)
-
-        context_cfg = CustomBrowserContextConfig(
-            trace_path=current_settings.browser.trace_path,
-            save_downloads_path=current_settings.paths.downloads,
-            save_recording_path=current_settings.agent_tool.save_recording_path if current_settings.agent_tool.enable_recording else None,
-            force_new_context=True # CLI always gets a new context
-        )
-        context_instance = await browser_instance.new_context(config=context_cfg)
-
-        agent_history_json_file = None
-        task_history_base_path = current_settings.agent_tool.history_path
-
-        if task_history_base_path:
-            task_specific_history_dir = Path(task_history_base_path) / agent_task_id
-            task_specific_history_dir.mkdir(parents=True, exist_ok=True)
-            agent_history_json_file = str(task_specific_history_dir / f"{agent_task_id}.json")
-            logger.info(f"Agent history will be saved to: {agent_history_json_file}")
-
-        # Agent Instantiation
-        agent_instance = BrowserUseAgent(
-            task=task_str, llm=main_llm,
-            browser=browser_instance, browser_context=context_instance, controller=controller_instance,
-            planner_llm=planner_llm,
-            max_actions_per_step=current_settings.agent_tool.max_actions_per_step,
-            use_vision=current_settings.agent_tool.use_vision,
-            register_new_step_callback=cli_on_step_callback,
-        )
-
-        # Run Agent
-        history: AgentHistoryList = await agent_instance.run(max_steps=current_settings.agent_tool.max_steps)
-        agent_instance.save_history(agent_history_json_file)
-        final_result = history.final_result() or "Agent finished without a final result."
-        logger.info(f"CLI Agent task {agent_task_id} completed.")
-
+        content, is_error = asyncio.run(_async_call_tool(tool_name, tool_args))
     except Exception as e:
-        logger.error(f"CLI Error in run_browser_agent: {e}\n{traceback.format_exc()}")
-        final_result = f"Error: {e}"
-    finally:
-        if context_instance: await context_instance.close()
-        if browser_instance and not current_settings.browser.use_own_browser : await browser_instance.close() # Only close if we launched it
-        if controller_instance: await controller_instance.close_mcp_client()
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
 
-    return final_result
+    # Display result content
+    for item in content:
+        if hasattr(item, "text"):
+            text = item.text
+            # Try to pretty-print JSON
+            try:
+                import json as json_module
 
+                parsed = json_module.loads(text)
+                console.print_json(data=parsed)
+            except (json.JSONDecodeError, TypeError):
+                console.print(text)
 
-async def _run_deep_research_logic_cli(research_task_str: str, max_parallel_browsers_override: Optional[int], current_settings: AppSettings) -> str:
-    logger.info(f"CLI: Starting run_deep_research task: {research_task_str[:100]}...")
-    task_id = str(uuid.uuid4())
-    report_content = "Error: Deep research failed."
+    if is_error:
+        console.print("[red]Tool returned an error[/red]")
+        raise typer.Exit(1)
 
-    try:
-        main_llm_config = current_settings.get_llm_config()
-        research_llm = internal_llm_provider.get_llm_model(**main_llm_config)
-
-        dr_browser_cfg = {
-            "headless": current_settings.browser.headless,
-            "disable_security": current_settings.browser.disable_security,
-            "browser_binary_path": current_settings.browser.binary_path,
-            "user_data_dir": current_settings.browser.user_data_dir,
-            "window_width": current_settings.browser.window_width,
-            "window_height": current_settings.browser.window_height,
-            "trace_path": current_settings.browser.trace_path,
-            "save_downloads_path": current_settings.paths.downloads,
-        }
-        if current_settings.browser.use_own_browser and current_settings.browser.cdp_url:
-            dr_browser_cfg["cdp_url"] = current_settings.browser.cdp_url
-            dr_browser_cfg["wss_url"] = current_settings.browser.wss_url
-
-        mcp_server_config_for_agent = None
-        if current_settings.server.mcp_config:
-            mcp_server_config_for_agent = current_settings.server.mcp_config
-            if isinstance(current_settings.server.mcp_config, str):
-                 mcp_server_config_for_agent = json.loads(current_settings.server.mcp_config)
-
-        agent_instance = DeepResearchAgent(
-            llm=research_llm, browser_config=dr_browser_cfg,
-            mcp_server_config=mcp_server_config_for_agent,
-        )
-
-        current_max_parallel_browsers = max_parallel_browsers_override if max_parallel_browsers_override is not None else current_settings.research_tool.max_parallel_browsers
-
-        save_dir_for_task = os.path.join(current_settings.research_tool.save_dir, task_id)
-        os.makedirs(save_dir_for_task, exist_ok=True)
-
-        logger.info(f"CLI Deep research save directory: {save_dir_for_task}")
-        logger.info(f"CLI Using max_parallel_browsers: {current_max_parallel_browsers}")
-
-        result_dict = await agent_instance.run(
-            topic=research_task_str, task_id=task_id,
-            save_dir=save_dir_for_task, max_parallel_browsers=current_max_parallel_browsers
-        )
-
-        report_file_path = result_dict.get("report_file_path")
-        if report_file_path and os.path.exists(report_file_path):
-            with open(report_file_path, "r", encoding="utf-8") as f:
-                markdown_content = f.read()
-            report_content = f"Deep research report generated successfully at {report_file_path}\n\n{markdown_content}"
-            logger.info(f"CLI Deep research task {task_id} completed. Report at {report_file_path}")
-        else:
-            report_content = f"Deep research completed, but report file not found. Result: {result_dict}"
-            logger.warning(f"CLI Deep research task {task_id} result: {result_dict}, report file path missing or invalid.")
-
-    except Exception as e:
-        logger.error(f"CLI Error in run_deep_research: {e}\n{traceback.format_exc()}")
-        report_content = f"Error: {e}"
-
-    return report_content
+    console.print("[green]Done[/green]")
 
 
 @app.command()
-def run_browser_agent(
-    task: str = typer.Argument(..., help="The primary task or objective for the browser agent."),
-):
-    """Runs a browser agent task and prints the result."""
-    if not cli_state.settings:
-        typer.secho("Error: Application settings not loaded. Use --env-file or set environment variables.", fg=typer.colors.RED)
-        raise typer.Exit(code=1)
+def install() -> None:
+    """Install the MCP server to Claude Desktop configuration.
 
-    typer.secho(f"Executing browser agent task: {task}", fg=typer.colors.GREEN)
-    try:
-        result = asyncio.run(_run_browser_agent_logic_cli(task, cli_state.settings))
-        typer.secho("\n--- Agent Final Result ---", fg=typer.colors.BLUE, bold=True)
-        print(result)
-    except Exception as e:
-        typer.secho(f"CLI command failed: {e}", fg=typer.colors.RED)
-        logger.error(f"CLI run_browser_agent command failed: {e}\n{traceback.format_exc()}")
-        raise typer.Exit(code=1)
+    Configures Claude Desktop to run mcp-server-browser-use via stdio transport.
+    """
+    console.print("[bold blue]Installing to Claude Desktop...[/bold blue]")
+
+    # Detect config file location
+    if sys.platform == "darwin":
+        config_path = Path.home() / "Library/Application Support/Claude/claude_desktop_config.json"
+    elif sys.platform == "win32":
+        config_path = Path(os.environ.get("APPDATA", "")) / "Claude/claude_desktop_config.json"
+    else:
+        config_path = Path.home() / ".config/Claude/claude_desktop_config.json"
+
+    if not config_path.exists():
+        console.print(f"[yellow]Config not found at {config_path}[/yellow]")
+        if typer.confirm("Create config file?"):
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text("{}")
+        else:
+            raise typer.Exit(1)
+
+    # Read existing config
+    data = json.loads(config_path.read_text())
+    mcp_servers = data.get("mcpServers", {})
+
+    cwd = Path.cwd()
+
+    server_config = {
+        "command": "uv",
+        "args": ["run", "mcp-server-browser-use"],
+        "cwd": str(cwd),
+    }
+
+    mcp_servers["browser-use"] = server_config
+    data["mcpServers"] = mcp_servers
+
+    config_path.write_text(json.dumps(data, indent=2))
+    console.print(f"[green]Configured 'browser-use' server in {config_path}[/green]")
+    console.print("[yellow]Restart Claude Desktop to apply changes.[/yellow]")
+
+
+@app.command("config")
+def config_cmd(
+    action: str = typer.Argument("view", help="Action: view, set, path, save"),
+    key: str | None = typer.Option(None, "--key", "-k", help="Config key (e.g., llm.provider)"),
+    value: str | None = typer.Option(None, "--value", "-v", help="Value to set"),
+) -> None:
+    """View or modify configuration."""
+    if action == "path":
+        console.print(str(CONFIG_FILE))
+        return
+
+    if action == "view":
+        table = Table(title="Current Configuration")
+        table.add_column("Setting", style="cyan")
+        table.add_column("Value", style="green")
+        table.add_column("JSON Key", style="dim")
+
+        table.add_row("Config File", str(CONFIG_FILE), "-")
+        table.add_row("Results Dir", str(settings.server.results_dir or get_default_results_dir()), "server.results_dir")
+        table.add_row("LLM Provider", settings.llm.provider, "llm.provider")
+        table.add_row("LLM Model", settings.llm.model_name, "llm.model_name")
+        table.add_row("LLM Base URL", settings.llm.base_url or "(default)", "llm.base_url")
+        table.add_row("Browser Headless", str(settings.browser.headless), "browser.headless")
+        table.add_row("Browser Proxy", settings.browser.proxy_server or "(none)", "browser.proxy_server")
+        table.add_row("Max Steps", str(settings.agent.max_steps), "agent.max_steps")
+        table.add_row("Max Searches", str(settings.research.max_searches), "research.max_searches")
+        table.add_row("Server Transport", settings.server.transport, "server.transport")
+        table.add_row("Server Host", settings.server.host, "server.host")
+        table.add_row("Server Port", str(settings.server.port), "server.port")
+
+        console.print(table)
+        return
+
+    if action == "save":
+        path = settings.save()
+        console.print(f"[green]Configuration saved to {path}[/green]")
+        return
+
+    if action == "set":
+        if not key or value is None:
+            console.print("[red]--key and --value required for 'set' action[/red]")
+            raise typer.Exit(1)
+
+        # Load current file config
+        current = load_config_file()
+
+        # Parse key path
+        parts = key.split(".")
+        target = current
+        for part in parts[:-1]:
+            target = target.setdefault(part, {})
+
+        # Parse value type
+        if value.lower() == "true":
+            parsed_value = True
+        elif value.lower() == "false":
+            parsed_value = False
+        elif value.isdigit():
+            parsed_value = int(value)
+        else:
+            parsed_value = value
+
+        target[parts[-1]] = parsed_value
+        save_config_file(current)
+        console.print(f"[green]Set {key} = {parsed_value}[/green]")
+        console.print(f"[dim]Saved to {CONFIG_FILE}[/dim]")
+        return
+
+    console.print(f"[red]Unknown action: {action}. Use: view, set, path, save[/red]")
+
+
+# --- Skill Management Commands ---
+
+skill_app = typer.Typer(help="Manage browser skills")
+app.add_typer(skill_app, name="skill")
+
+
+@skill_app.command("list")
+def skill_list() -> None:
+    """List all available skills."""
+    store = SkillStore(directory=settings.skills.directory)
+    skills = store.list_all()
+
+    if not skills:
+        console.print(f"[yellow]No skills found in {store.directory}[/yellow]")
+        console.print("\n[dim]Create skills manually or copy examples from:[/dim]")
+        console.print("[dim]  examples/skills/[/dim]")
+        return
+
+    table = Table(title=f"Browser Skills ({store.directory})")
+    table.add_column("Name", style="cyan")
+    table.add_column("Description", style="white")
+    table.add_column("Success Rate", style="green")
+    table.add_column("Usage", style="dim")
+    table.add_column("Last Used", style="dim")
+
+    for s in skills:
+        usage = s.success_count + s.failure_count
+        rate = f"{s.success_rate * 100:.0f}%" if usage > 0 else "-"
+        last = s.last_used.strftime("%Y-%m-%d") if s.last_used else "-"
+        table.add_row(s.name, s.description[:40], rate, str(usage), last)
+
+    console.print(table)
+
+
+@skill_app.command("get")
+def skill_get(
+    name: str = typer.Argument(..., help="Skill name"),
+) -> None:
+    """Show full details of a skill."""
+    store = SkillStore(directory=settings.skills.directory)
+    skill = store.load(name)
+
+    if not skill:
+        console.print(f"[red]Skill not found: {name}[/red]")
+        console.print(f"[dim]Skills directory: {store.directory}[/dim]")
+        raise typer.Exit(1)
+
+    console.print(Panel(store.to_yaml(skill), title=f"Skill: {name}", expand=False))
+
+
+@skill_app.command("delete")
+def skill_delete(
+    name: str = typer.Argument(..., help="Skill name to delete"),
+    force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
+) -> None:
+    """Delete a skill."""
+    store = SkillStore(directory=settings.skills.directory)
+
+    if not store.exists(name):
+        console.print(f"[red]Skill not found: {name}[/red]")
+        raise typer.Exit(1)
+
+    if not force:
+        if not typer.confirm(f"Delete skill '{name}'?"):
+            console.print("[dim]Cancelled[/dim]")
+            return
+
+    store.delete(name)
+    console.print(f"[green]Skill '{name}' deleted[/green]")
+
+
+# --- Observability Commands ---
+
 
 @app.command()
-def run_deep_research(
-    research_task: str = typer.Argument(..., help="The topic or question for deep research."),
-    max_parallel_browsers: Optional[int] = typer.Option(None, "--max-parallel-browsers", "-p", help="Override max parallel browsers from settings.")
-):
-    """Performs deep web research and prints the report."""
-    if not cli_state.settings:
-        typer.secho("Error: Application settings not loaded. Use --env-file or set environment variables.", fg=typer.colors.RED)
-        raise typer.Exit(code=1)
+def tasks(
+    limit: int = typer.Option(20, "--limit", "-n", help="Number of tasks to show"),
+    status_filter: str | None = typer.Option(None, "--status", "-s", help="Filter by status: running, completed, failed"),
+    tool_filter: str | None = typer.Option(None, "--tool", "-t", help="Filter by tool name"),
+) -> None:
+    """List recent tasks with status and progress."""
+    import asyncio
 
-    typer.secho(f"Executing deep research task: {research_task}", fg=typer.colors.GREEN)
+    from .observability import TaskStatus
+    from .observability.store import TaskStore
+
+    async def _list_tasks():
+        store = TaskStore()
+        await store.initialize()
+
+        status = None
+        if status_filter:
+            try:
+                status = TaskStatus(status_filter)
+            except ValueError:
+                console.print(f"[red]Invalid status: {status_filter}. Use: running, completed, failed, pending[/red]")
+                raise typer.Exit(1)
+
+        return await store.get_task_history(limit=limit, status=status, tool_name=tool_filter)
+
     try:
-        result = asyncio.run(_run_deep_research_logic_cli(research_task, max_parallel_browsers, cli_state.settings))
-        typer.secho("\n--- Deep Research Final Report ---", fg=typer.colors.BLUE, bold=True)
-        print(result)
+        tasks_list = asyncio.run(_list_tasks())
     except Exception as e:
-        typer.secho(f"CLI command failed: {e}", fg=typer.colors.RED)
-        logger.error(f"CLI run_deep_research command failed: {e}\n{traceback.format_exc()}")
-        raise typer.Exit(code=1)
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+
+    if not tasks_list:
+        console.print("[yellow]No tasks found[/yellow]")
+        return
+
+    table = Table(title=f"Recent Tasks (limit={limit})")
+    table.add_column("ID", style="cyan", width=8)
+    table.add_column("Tool", style="white")
+    table.add_column("Status", style="green")
+    table.add_column("Progress", style="yellow")
+    table.add_column("Message", style="dim", max_width=30)
+    table.add_column("Duration", style="dim")
+    table.add_column("Created", style="dim")
+
+    for t in tasks_list:
+        # Format status with color
+        status_style = {
+            "running": "[blue]running[/blue]",
+            "completed": "[green]completed[/green]",
+            "failed": "[red]failed[/red]",
+            "pending": "[yellow]pending[/yellow]",
+        }.get(t.status.value, t.status.value)
+
+        progress = f"{t.progress_current}/{t.progress_total}" if t.progress_total > 0 else "-"
+        duration = f"{t.duration_seconds:.1f}s" if t.duration_seconds else "-"
+        created = t.created_at.strftime("%H:%M:%S") if t.created_at else "-"
+        message = (t.progress_message[:27] + "...") if t.progress_message and len(t.progress_message) > 30 else (t.progress_message or "-")
+
+        table.add_row(t.task_id[:8], t.tool_name, status_style, progress, message, duration, created)
+
+    console.print(table)
+
+
+@app.command("task")
+def task_detail(
+    task_id: str = typer.Argument(..., help="Task ID (full or prefix)"),
+) -> None:
+    """Show detailed information about a specific task."""
+    import asyncio
+
+    from .observability.store import TaskStore
+
+    async def _get_task():
+        store = TaskStore()
+        await store.initialize()
+
+        # Try exact match first
+        task = await store.get_task(task_id)
+        if task:
+            return task
+
+        # Try prefix match
+        tasks = await store.get_task_history(limit=100)
+        for t in tasks:
+            if t.task_id.startswith(task_id):
+                return t
+        return None
+
+    try:
+        task = asyncio.run(_get_task())
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+
+    if not task:
+        console.print(f"[red]Task not found: {task_id}[/red]")
+        raise typer.Exit(1)
+
+    # Format task details
+    status_style = {
+        "running": "[blue]running[/blue]",
+        "completed": "[green]completed[/green]",
+        "failed": "[red]failed[/red]",
+        "pending": "[yellow]pending[/yellow]",
+    }.get(task.status.value, task.status.value)
+
+    console.print(f"\n[bold]Task:[/bold] {task.task_id}")
+    console.print(f"[bold]Tool:[/bold] {task.tool_name}")
+    console.print(f"[bold]Status:[/bold] {status_style}")
+    if task.stage:
+        console.print(f"[bold]Stage:[/bold] {task.stage.value}")
+    console.print(f"[bold]Progress:[/bold] {task.progress_current}/{task.progress_total} ({task.progress_percent:.1f}%)")
+    if task.progress_message:
+        console.print(f"[bold]Message:[/bold] {task.progress_message}")
+
+    console.print(f"\n[bold]Created:[/bold] {task.created_at.isoformat()}")
+    if task.started_at:
+        console.print(f"[bold]Started:[/bold] {task.started_at.isoformat()}")
+    if task.completed_at:
+        console.print(f"[bold]Completed:[/bold] {task.completed_at.isoformat()}")
+    if task.duration_seconds:
+        console.print(f"[bold]Duration:[/bold] {task.duration_seconds:.1f}s")
+
+    if task.input_params:
+        console.print("\n[bold]Input:[/bold]")
+        for key, value in task.input_params.items():
+            val_str = str(value)[:100] + "..." if len(str(value)) > 100 else str(value)
+            console.print(f"  {key}: {val_str}")
+
+    if task.result:
+        console.print("\n[bold]Result:[/bold]")
+        result_preview = task.result[:500] + "..." if len(task.result) > 500 else task.result
+        console.print(Panel(result_preview, expand=False))
+
+    if task.error:
+        console.print("\n[bold red]Error:[/bold red]")
+        console.print(Panel(task.error, style="red", expand=False))
+
+
+@app.command()
+def health() -> None:
+    """Show server health and running task status."""
+    import asyncio
+
+    import psutil
+
+    from .observability.store import TaskStore
+
+    async def _get_health():
+        store = TaskStore()
+        await store.initialize()
+        running = await store.get_running_tasks()
+        stats = await store.get_stats()
+        return running, stats
+
+    # Check if server is running
+    info = _read_server_info()
+    if not info or not _is_process_running(info["pid"]):
+        console.print("[yellow]Server not running[/yellow]")
+        console.print("[dim]Start with: mcp-server-browser-use server[/dim]")
+    else:
+        console.print(f"[green]Server running[/green] (PID {info['pid']})")
+        console.print(f"  URL: http://{info['host']}:{info['port']}/mcp")
+
+        # Get process memory
+        try:
+            proc = psutil.Process(info["pid"])
+            mem = proc.memory_info().rss / 1024 / 1024
+            console.print(f"  Memory: {mem:.1f} MB")
+        except Exception:
+            pass
+
+    # Get task stats
+    try:
+        running_tasks, stats = asyncio.run(_get_health())
+    except Exception as e:
+        console.print(f"[red]Error reading task store: {e}[/red]")
+        raise typer.Exit(1)
+
+    console.print("\n[bold]Task Statistics:[/bold]")
+    console.print(f"  Total tasks: {stats.get('total_tasks', 0)}")
+    console.print(f"  Running: {stats.get('running_count', 0)}")
+    console.print(f"  Success rate (24h): {stats.get('success_rate_24h', 0):.1f}%")
+
+    if stats.get("by_tool"):
+        console.print("\n[bold]By Tool:[/bold]")
+        for tool, count in stats["by_tool"].items():
+            console.print(f"  {tool}: {count}")
+
+    if running_tasks:
+        console.print(f"\n[bold]Running Tasks ({len(running_tasks)}):[/bold]")
+        for t in running_tasks:
+            progress = f"{t.progress_current}/{t.progress_total}" if t.progress_total > 0 else "-"
+            stage = f" ({t.stage.value})" if t.stage else ""
+            console.print(f"  [{t.task_id[:8]}] {t.tool_name}{stage} - {progress}")
+            if t.progress_message:
+                console.print(f"    → {t.progress_message}")
+
+
+# Default command when no subcommand is given
+@app.callback(invoke_without_command=True)
+def main(ctx: typer.Context) -> None:
+    """Browser Use MCP Server & CLI.
+
+    Run 'server' subcommand to start the HTTP MCP server.
+    """
+    if ctx.invoked_subcommand is None:
+        # stdio is deprecated - show migration guide
+        from .server import STDIO_DEPRECATION_MESSAGE
+
+        console.print(STDIO_DEPRECATION_MESSAGE)
+        raise typer.Exit(1)
+
 
 if __name__ == "__main__":
-    # This allows running `python src/mcp_server_browser_use/cli.py ...`
-    # Set a default log level if run directly for dev purposes, can be overridden by CLI args
-    if not os.getenv("MCP_SERVER_LOGGING_LEVEL"): # Check if already set
-        os.environ["MCP_SERVER_LOGGING_LEVEL"] = "DEBUG"
-    if not os.getenv("MCP_RESEARCH_TOOL_SAVE_DIR"): # Ensure mandatory var is set for local dev
-        print("Warning: MCP_RESEARCH_TOOL_SAVE_DIR not set. Defaulting to './tmp/deep_research_cli_default' for this run.", file=sys.stderr)
-        os.environ["MCP_RESEARCH_TOOL_SAVE_DIR"] = "./tmp/deep_research_cli_default"
-
     app()
