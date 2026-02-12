@@ -56,11 +56,11 @@ uv run playwright install
 cd ..
 
 # Configure environment variables
-cp mcp_config.env.example .env
+cp config/mcp_config.env.example .env
 # Edit .env with your API keys
 
-# Start all services
-python start_all.py
+# Start all services (run from project root)
+python scripts/start_all.py
 ```
 
 Full setup guide: [Installation Guide](#installation-guide)
@@ -198,9 +198,9 @@ Create a `.env` file in the project root:
 
 ```bash
 # Copy example configuration
-cp mcp_config.env.example .env
+cp config/mcp_config.env.example .env
 # Windows:
-copy mcp_config.env.example .env
+copy config\mcp_config.env.example .env
 ```
 
 Edit `.env` with your configuration:
@@ -236,7 +236,7 @@ MCP_BROWSER_HEADLESS=true
 MCP_RESEARCH_TOOL_SAVE_DIR=./research_output
 
 # AutoGen Configuration
-AUTOGEN_CONFIG_PATH=./team-config.json
+AUTOGEN_CONFIG_PATH=./config/team-config.json
 ```
 
 ### Step 5: Set Up Avatar Models
@@ -308,7 +308,7 @@ cd ..
 
 ### Environment Variables
 
-Key environment variables (see `mcp_config.env.example` for complete list):
+Key environment variables (see `config/mcp_config.env.example` for complete list):
 
 #### LLM Configuration
 - `OPENAI_API_KEY`: OpenAI API key
@@ -336,7 +336,7 @@ Key environment variables (see `mcp_config.env.example` for complete list):
 
 ### Team Configuration (AutoGen)
 
-Edit `team-config.json` to configure your AutoGen team:
+Edit `config/team-config.json` to configure your AutoGen team:
 
 ```json
 {
@@ -377,7 +377,7 @@ This will start:
 #### Option 1b: Stop All Services (Windows)
 
 ```bash
-python stop_all.py
+python scripts/stop_all.py
 ```
 
 #### Option 2: Start Services Individually
@@ -387,18 +387,18 @@ python stop_all.py
 python -m http.server 8000
 
 # Start proxy server
-python proxy_server.py
+python -m src.servers.proxy_server
 
 # Start AutoGen Studio
-autogenstudio serve --team team-config.json --port 8084
+autogenstudio serve --team config/team-config.json --port 8084
 
 # Start MCP Browser-Use HTTP server (required; stdio is deprecated).
 # To use the same LLM provider/model as the Flask server, run the wrapper so it loads this project's .env:
-python start_mcp_browser_use_http_server.py
+python scripts/start_mcp_browser_use_http_server.py
 # Or without wrapper (uses mcp-browser-use config/defaults): cd mcp-browser-use && uv run mcp-server-browser-use server
 
 # Start MCP Browser HTTP server (Flask bridge for frontend)
-python start_mcp_browser_server.py
+python scripts/start_mcp_browser_server.py
 ```
 
 ### Accessing the Application
@@ -523,7 +523,7 @@ Supported file formats:
 1. Create a bot with [@BotFather](https://core.telegram.org/bots#botfather)
 2. Set `TELEGRAM_BOT_TOKEN` in your `.env` file
 3. Configure `TELEGRAM_ADMIN_IDS` or set `TELEGRAM_ALLOW_ALL=true`
-4. Start the bot: `python telegram_bot.py`
+4. Start the bot: `python -m src.integrations.telegram_bot`
 
 **Bot Commands:**
 - `/start` - Greet the user and register the conversation
@@ -535,28 +535,32 @@ Supported file formats:
 
 ```
 AI_assistant/
-├── model_avatar/          # VRM/Live2D avatar models
-│   ├── Eva/              # Eva VRM model and animations
-│   ├── Alicia/           # Alicia VRM model
+├── src/                   # Application source code
+│   ├── servers/          # HTTP/API servers (proxy, https, mcp_browser)
+│   ├── mcp/               # MCP client (mcp_browser_client)
+│   ├── integrations/      # Telegram bot
+│   ├── features/          # Philosopher mode
+│   └── memory/            # Memory system (embeddings, vector store)
+├── scripts/               # Entry points and run scripts
+│   ├── start_all.py       # Start all services (Windows)
+│   ├── stop_all.py        # Stop all services (Windows)
 │   └── ...
-├── mcp-browser-use/      # MCP Browser-Use submodule
-│   ├── pyproject.toml    # UV project configuration
-│   └── src/             # Source code
-├── libs/                 # Third-party libraries
-│   └── ogg-opus-decoder/ # Audio decoder
-├── memory/               # Memory system (embeddings, vector store)
-├── scratch/              # File operations workspace
-├── research_output/      # Research tool outputs
-├── proxy_server.py       # FastAPI proxy server (port 8002)
-├── telegram_bot.py       # Telegram bot integration
-├── start_all.py         # Start all services script (Windows)
-├── stop_all.py           # Stop all services script (Windows)
-├── team-config.json      # AutoGen team configuration
-├── mcp_servers.json      # MCP server configurations
-├── mcp_config.env.example # Environment variables template
-├── package.json          # Node.js dependencies
-├── index-dev.html        # Web interface (development)
-└── README.md             # This file
+├── tests/                 # Test files
+├── config/                # Configuration files
+│   ├── team-config.json   # AutoGen team configuration
+│   ├── mcp_servers.json   # MCP server configurations
+│   └── mcp_config.env.example
+├── docs/                  # Documentation
+├── assets/                # Static assets (favicons, images)
+├── certs/                 # TLS certificates
+├── libs/                  # Third-party libraries (ogg-opus-decoder)
+├── mcp-browser-use/       # MCP Browser-Use submodule
+├── memory_data/           # Runtime memory data
+├── scratch/               # File operations workspace
+├── research_output/       # Research tool outputs
+├── package.json           # Node.js dependencies
+├── index.html             # Web interface
+└── README.md              # This file
 ```
 
 ## Dependencies
@@ -644,12 +648,12 @@ See [Installation Guide](#step-3-install-python-dependencies) for complete list 
 4. **Missing API Keys**
    - Ensure all required API keys are set in `.env` file
    - Verify environment variables are loaded correctly
-   - Check `mcp_config.env.example` for all available configuration options
+   - Check `config/mcp_config.env.example` for all available configuration options
 
 5. **Port Already in Use**
    - Change port numbers in configuration files
    - Or stop the process using the port
-   - Use `python stop_all.py` to stop all services on Windows
+   - Use `python scripts/stop_all.py` to stop all services on Windows
 
 6. **File Operations Not Working**
    - Ensure file operation libraries are installed: `pip install python-docx openpyxl PyPDF2 reportlab Pillow`
@@ -679,21 +683,24 @@ See [Installation Guide](#step-3-install-python-dependencies) for complete list 
 - Review MCP Browser-Use README: `mcp-browser-use/README.md`
 - Enable debug logging: Set `MCP_SERVER_LOGGING_LEVEL=DEBUG` in `.env`
 - Check proxy server logs for API endpoint errors
-- Review test files (`test_*.py`) for usage examples
+- Review test files in `tests/` for usage examples
 
 ### Testing the Installation
 
-Several test files are available to verify functionality:
+Run tests from project root:
 
 ```bash
+# Run all tests
+python -m pytest tests/ -v
+
 # Test file operations
-python test_file_operations.py
+python -m pytest tests/test_file_operations.py -v
 
 # Test MCP client (HTTP; requires mcp-server-browser-use server running)
-python test_mcp_client.py
+python -m pytest tests/test_mcp_client.py -v
 
 # Test server endpoints
-python test_server.py
+python -m pytest tests/test_server.py -v
 ```
 
 ## License

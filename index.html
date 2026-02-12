@@ -8313,6 +8313,14 @@ ${memoryCache.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
             // Preserve existing system prompt by default; user input overrides it
             let effectiveSystemPrompt = systemPromptInput.value.trim() || systemPrompt;
             
+            // Prepend context: timezone and knowledge-gap awareness (always applies)
+            const userTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+            const contextBlock = `Context: You are running in timezone ${userTimezone}. Use this when interpreting dates/times unless the user specifies otherwise.
+Knowledge awareness: Your training has a cutoff. Acknowledge your knowledge gap; do not assume the current year or recent events. When the user provides current facts, corrections, or information that differs from your training (e.g., "it's 2025 now", "that API changed"), accept them as authoritative and do not contradict them.
+
+`;
+            effectiveSystemPrompt = contextBlock + effectiveSystemPrompt;
+            
             // Get user name from tool settings and add to system prompt
             // This works whether using custom prompt or default prompt
             const userName = userNameInput.value.trim() || 'User';

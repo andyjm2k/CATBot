@@ -1,7 +1,0 @@
-{
-  "toolName": "retry_with_browser_use_agent",
-  "parameters": {
-    "task": "Navigate to google.com and search for 'hello world'",
-    "max_steps": 5
-  }
-}
