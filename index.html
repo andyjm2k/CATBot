@@ -1974,6 +1974,8 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
         const authLoginBtn = document.getElementById('auth-login-btn');
         const authSignupBtn = document.getElementById('auth-signup-btn');
         const authLogoutBtn = document.getElementById('auth-logout-btn');
+        // Guard so post-auth initialization runs only once (e.g. from DOMContentLoaded or after login)
+        let appInitialized = false;
 
         function showAuthOverlay(message = '') {
             if (authOverlay) authOverlay.style.display = 'flex';
@@ -2034,6 +2036,7 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
 
             setAuthToken(data.access_token);
             hideAuthOverlay();
+            await runAppInitialization();
             return true;
         }
 
@@ -2056,6 +2059,120 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
             hideAuthOverlay();
             return true;
         }
+
+        // Post-auth app initialization: VRM, mic, avatar, webcam, conversations, etc. Run once from DOMContentLoaded (when already authenticated) or after performAuth() (when user just logged in). On failure we set appInitialized = false so retry (e.g. login again) can run init again.
+        async function runAppInitialization() {
+            if (appInitialized) return;
+            appInitialized = true;
+            try {
+                // Initialize variables from localStorage if available
+                try {
+                    todoList = JSON.parse(localStorage.getItem('todoList')) || [];
+                    memoryCache = JSON.parse(localStorage.getItem('memoryCache')) || [];
+                } catch (storageError) {
+                    console.warn('Could not access localStorage:', storageError);
+                    todoList = [];
+                    memoryCache = [];
+                }
+
+                // Load persisted tool settings (User Name, Assistant Name, etc.)
+                loadToolSettings();
+                // Ensure VRM version is initialized (default to 1.0 if not set)
+                const vrmVersionDropdown = document.getElementById('vrm-version-dropdown');
+                if (vrmVersionDropdown && !vrmVersion) {
+                    vrmVersion = vrmVersionDropdown.value || '1.0';
+                }
+
+                // Initialize core features
+                loadVoices();
+                if (typeof speechSynthesis !== 'undefined' && speechSynthesis.onvoiceschanged !== undefined) {
+                    speechSynthesis.onvoiceschanged = loadVoices;
+                }
+
+                // Fetch available models based on current tool settings (also sets VRM list and currentVRMModelPath)
+                await fetchAvailableModels();
+                await initAudioRecording();
+                // Initialize avatar based on mode preference (default to Live2D)
+                const avatarMode = localStorage.getItem('avatarMode') || 'live2d';
+                if (avatarMode === 'vrm') {
+                    document.getElementById('vrm-mode').checked = true;
+                    await switchToVRM();
+                } else {
+                    document.getElementById('live2d-mode').checked = true;
+                    await switchToLive2D();
+                }
+                await initWebcam();
+
+                // Initialize collapsible sections
+                const collapsibleBtn = document.querySelector('.collapsible-btn');
+                const collapsibleContent = document.querySelector('.collapsible-content');
+                if (collapsibleBtn && collapsibleContent) {
+                    collapsibleBtn.addEventListener('click', function() {
+                        this.classList.toggle('active');
+                        collapsibleContent.classList.toggle('active');
+                        const isExpanded = this.classList.contains('active');
+                        this.setAttribute('aria-expanded', isExpanded);
+                    });
+                }
+
+                // Add event listeners to save tool settings when they change
+                setupToolSettingsPersistence();
+
+                // Initialize conversation management system
+                loadConversations();
+
+                // Load sidebar state
+                loadSidebarState();
+
+                // Ensure conversation overlay is hidden on page load - trigger close action
+                setTimeout(function() {
+                    const conversationOverlay = document.getElementById('conversation-overlay');
+                    const conversationPanel = document.getElementById('conversation-history-panel');
+                    if (conversationOverlay && conversationPanel) {
+                        conversationOverlay.classList.remove('active');
+                        conversationPanel.classList.remove('active');
+                    }
+                }, 0);
+
+                // Initialize clipboard monitoring if Clipboard Vision Mode is already enabled
+                if (clipboardToggle && clipboardToggle.checked) {
+                    clipboardVisionEnabled = true;
+                    startClipboardMonitoring();
+                }
+
+                // New conversation button handler
+                const newConversationBtn = document.getElementById('new-conversation-btn');
+                if (newConversationBtn) {
+                    newConversationBtn.addEventListener('click', () => {
+                        const newConv = createNewConversation('New Conversation');
+                        switchToConversation(newConv.id);
+                    });
+                }
+
+                // Sidebar toggle button handler
+                const sidebarToggleBtn = document.getElementById('sidebar-toggle-btn');
+                if (sidebarToggleBtn) {
+                    sidebarToggleBtn.addEventListener('click', () => {
+                        toggleSidebar();
+                    });
+                }
+
+                // Right panel toggle button handler
+                const rightPanelToggleBtn = document.getElementById('right-panel-toggle-btn');
+                if (rightPanelToggleBtn) {
+                    rightPanelToggleBtn.addEventListener('click', () => {
+                        toggleRightPanel();
+                    });
+                }
+
+                // Load right panel state
+                loadRightPanelState();
+            } catch (error) {
+                console.error('Error during initialization:', error);
+                appInitialized = false; // Allow retry (e.g. after login again or refresh)
+            }
+        }
+
         let voices = [];
         let audioContextResumed = false; // Flag to track if audio context has been resumed after first user action
         
@@ -5011,110 +5128,7 @@ Get VRM files from VRoid Studio or other 3D avatar creators">./model_avatar/Eva/
                     return;
                 }
 
-                // Initialize variables from localStorage if available
-                try {
-                    todoList = JSON.parse(localStorage.getItem('todoList')) || [];
-                    memoryCache = JSON.parse(localStorage.getItem('memoryCache')) || [];
-                } catch (storageError) {
-                    console.warn('Could not access localStorage:', storageError);
-                    todoList = [];
-                    memoryCache = [];
-                }
-
-                // Load persisted tool settings (User Name, Assistant Name, etc.)
-                loadToolSettings();
-                // Ensure VRM version is initialized (default to 1.0 if not set)
-                const vrmVersionDropdown = document.getElementById('vrm-version-dropdown');
-                if (vrmVersionDropdown && !vrmVersion) {
-                    vrmVersion = vrmVersionDropdown.value || '1.0';
-                }
-
-                // Initialize core features
-            loadVoices();
-            if (typeof speechSynthesis !== 'undefined' && speechSynthesis.onvoiceschanged !== undefined) {
-                speechSynthesis.onvoiceschanged = loadVoices;
-            }
-
-            // Fetch available models based on current tool settings
-            await fetchAvailableModels();
-                await initAudioRecording();
-                // Initialize avatar based on mode preference (default to Live2D)
-                const avatarMode = localStorage.getItem('avatarMode') || 'live2d';
-                if (avatarMode === 'vrm') {
-                    document.getElementById('vrm-mode').checked = true;
-                    await switchToVRM();
-                } else {
-                    document.getElementById('live2d-mode').checked = true;
-                    await switchToLive2D();
-                }
-                await initWebcam();
-
-                // Initialize collapsible sections
-                const collapsibleBtn = document.querySelector('.collapsible-btn');
-                const collapsibleContent = document.querySelector('.collapsible-content');
-                
-                if (collapsibleBtn && collapsibleContent) {
-                    collapsibleBtn.addEventListener('click', function() {
-                        this.classList.toggle('active');
-                        collapsibleContent.classList.toggle('active');
-                        const isExpanded = this.classList.contains('active');
-                        this.setAttribute('aria-expanded', isExpanded);
-                    });
-                }
-
-                // Add event listeners to save tool settings when they change
-                setupToolSettingsPersistence();
-                
-                // Initialize conversation management system
-                loadConversations();
-                
-                // Load sidebar state
-                loadSidebarState();
-                
-                // Ensure conversation overlay is hidden on page load - trigger close action
-                setTimeout(function() {
-                    const conversationOverlay = document.getElementById('conversation-overlay');
-                    const conversationPanel = document.getElementById('conversation-history-panel');
-                    if (conversationOverlay && conversationPanel) {
-                        // Trigger the same action as clicking the close button
-                        conversationOverlay.classList.remove('active');
-                        conversationPanel.classList.remove('active');
-                    }
-                }, 0);
-                
-                // Initialize clipboard monitoring if Clipboard Vision Mode is already enabled
-                if (clipboardToggle && clipboardToggle.checked) {
-                    clipboardVisionEnabled = true;
-                    startClipboardMonitoring();
-                }
-                
-                // New conversation button handler
-                const newConversationBtn = document.getElementById('new-conversation-btn');
-                if (newConversationBtn) {
-                    newConversationBtn.addEventListener('click', () => {
-                        const newConv = createNewConversation('New Conversation');
-                        switchToConversation(newConv.id);
-                    });
-                }
-                
-                // Sidebar toggle button handler
-                const sidebarToggleBtn = document.getElementById('sidebar-toggle-btn');
-                if (sidebarToggleBtn) {
-                    sidebarToggleBtn.addEventListener('click', () => {
-                        toggleSidebar();
-                    });
-                }
-
-                // Right panel toggle button handler
-                const rightPanelToggleBtn = document.getElementById('right-panel-toggle-btn');
-                if (rightPanelToggleBtn) {
-                    rightPanelToggleBtn.addEventListener('click', () => {
-                        toggleRightPanel();
-                    });
-                }
-                
-                // Load right panel state
-                loadRightPanelState();
+                await runAppInitialization();
             } catch (error) {
                 console.error('Error during initialization:', error);
             }
