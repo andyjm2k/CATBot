@@ -2,6 +2,8 @@
 """
 Start the mcp-server-browser-use HTTP server with this project's .env so that
 the background MCP server uses the same LLM provider/model as the Flask HTTP bridge.
+Sets PYTHONUTF8=1 and PYTHONIOENCODING=utf-8 to avoid Windows charmap errors during
+deep research (e.g. extract action failing on Unicode in page content).
 Run from project root. Press Ctrl+C to stop the server.
 """
 import os
@@ -34,12 +36,18 @@ if not MCP_BROWSER_USE_DIR.is_dir():
     print(f"Error: mcp-browser-use directory not found: {MCP_BROWSER_USE_DIR}")
     sys.exit(1)
 
+# Force UTF-8 so browser-use "extract" and other code don't hit Windows charmap (cp1252) on Unicode
+env = os.environ.copy()
+env["PYTHONUTF8"] = "1"
+env["PYTHONIOENCODING"] = "utf-8"
+print("Using UTF-8 encoding (PYTHONUTF8=1) to avoid charmap errors on Unicode content.")
+
 # Run the HTTP MCP server; it will read MCP_LLM_* from env (inherited from our .env)
 try:
     subprocess.run(
         ["uv", "run", "mcp-server-browser-use", "server"],
         cwd=str(MCP_BROWSER_USE_DIR),
-        env=os.environ.copy(),
+        env=env,
     )
 except KeyboardInterrupt:
     print("\nStopped.")

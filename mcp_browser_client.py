@@ -133,16 +133,16 @@ class MCPBrowserClient:
 
         Args:
             research_task: Description of the research topic.
-            max_parallel_browsers: Optional override for max parallel browser instances.
+            max_parallel_browsers: Optional override (reserved; upstream MCP uses 'topic' only).
 
         Returns:
             Research report content as a string.
         """
         from fastmcp import Client
 
-        args: Dict[str, Any] = {"research_task": research_task}
-        if max_parallel_browsers is not None:
-            args["max_parallel_browsers_override"] = max_parallel_browsers
+        # Upstream MCP server (mcp-server-browser-use) expects 'topic', not 'research_task'
+        args: Dict[str, Any] = {"topic": research_task}
+        # Do not send max_parallel_browsers_override; upstream tool schema does not include it
 
         try:
             logger.info("Calling run_deep_research with task: %s...", research_task[:100])
