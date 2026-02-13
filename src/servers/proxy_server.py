@@ -124,6 +124,15 @@ except Exception as e:
     PHILOSOPHER_MODE_AVAILABLE = False
     PhilosopherMode = None
 
+# Telegram tool parsing and execution (for Telegram tools parity with web client)
+try:
+    from src.servers import telegram_tools as _telegram_tools
+    TELEGRAM_TOOLS_MODULE_AVAILABLE = True
+except ImportError as e:
+    print(f"[WARN] Telegram tools module not available: {e}")
+    _telegram_tools = None
+    TELEGRAM_TOOLS_MODULE_AVAILABLE = False
+
 # Load environment variables from .env file in project root
 if DOTENV_AVAILABLE:
     # Load from project root (two levels up from src/servers/)
@@ -290,17 +299,28 @@ FILE_OPS_MAX_SIZE_BYTES = int(os.getenv("FILE_OPS_MAX_SIZE", "10485760"))
 
 # Telegram chat session storage (simple in-memory cache)
 telegram_conversations: Dict[str, List[Dict[str, str]]] = {}
+# Per-conversation todo list and memory cache for Telegram tools (same semantics as web client)
+telegram_todo: Dict[str, List[str]] = {}
+telegram_memory_cache: Dict[str, List[str]] = {}
+
+# Optional: tool-capable system prompt for Telegram when TELEGRAM_TOOLS_ENABLED=true
+CATBOT_SYSTEM_PROMPT_WITH_TOOLS_FILE = _PROJECT_ROOT / "config" / "catbot_system_prompt_with_tools.txt"
+TELEGRAM_TOOLS_ENABLED = os.getenv("TELEGRAM_TOOLS_ENABLED", "false").lower() == "true"
+TELEGRAM_TOOLS_MAX_ITERATIONS = max(1, min(10, int(os.getenv("TELEGRAM_TOOLS_MAX_ITERATIONS", "5"))))
 
 # Philosopher mode state storage (per conversation)
 philosopher_mode_active: Dict[str, bool] = {}
 philosopher_mode_instances: Dict[str, Any] = {}
 
-# Assistant context: timezone and knowledge-gap awareness (prepended to all chat system prompts)
+# Assistant context: current date, timezone, and knowledge-gap awareness (prepended to all chat system prompts)
 def _get_assistant_context_block() -> str:
-    """Returns context block with server timezone and knowledge-awareness instructions."""
-    tz_str = datetime.now().astimezone().strftime("%Z (UTC%z)")
+    """Returns context block with server date, timezone, and knowledge-awareness instructions."""
+    now = datetime.now().astimezone()
+    date_str = now.strftime("%A, %d %B %Y")  # e.g. Thursday, 13 February 2025
+    tz_str = now.strftime("%Z (UTC%z)")
     return (
-        f"Context: You are running in timezone {tz_str}. Use this when interpreting dates/times unless the user specifies otherwise.\n"
+        f"Context: Today's date is {date_str}. You are running in timezone {tz_str}. "
+        "Use this when interpreting dates, times, and relative references (e.g. 'today', 'this week') unless the user specifies otherwise.\n"
         "Knowledge awareness: Your training has a cutoff. Acknowledge your knowledge gap; do not assume the current year or recent events. "
         "When the user provides current facts, corrections, or information that differs from your training "
         '(e.g., "it\'s 2025 now", "that API changed"), accept them as authoritative and do not contradict them.\n\n'
@@ -341,6 +361,26 @@ def _get_telegram_system_prompt_base() -> str:
         except Exception as e:
             print(f"Warning: Could not read {CATBOT_SYSTEM_PROMPT_FILE}: {e}")
     return TELEGRAM_SYSTEM_PROMPT_ENV
+
+
+def _get_telegram_system_prompt_with_tools(conversation_id: str) -> str:
+    """Return the tool-capable system prompt for Telegram, with current todo and memory cache for this conversation."""
+    content = ""
+    if CATBOT_SYSTEM_PROMPT_WITH_TOOLS_FILE.exists():
+        try:
+            content = CATBOT_SYSTEM_PROMPT_WITH_TOOLS_FILE.read_text(encoding="utf-8").strip()
+        except Exception as e:
+            print(f"Warning: Could not read {CATBOT_SYSTEM_PROMPT_WITH_TOOLS_FILE}: {e}")
+    if not content:
+        content = _get_telegram_system_prompt_base()
+    todo_list = telegram_todo.get(conversation_id, [])
+    mem_cache = telegram_memory_cache.get(conversation_id, [])
+    todo_block = "\n".join([f"{i + 1}. {t}" for i, t in enumerate(todo_list)]) if todo_list else "(empty)"
+    mem_block = "\n".join([f"{i + 1}. {m}" for i, m in enumerate(mem_cache)]) if mem_cache else "(empty)"
+    content = content.replace("{{MEMORY_CACHE}}", mem_block).replace("{{TODO_LIST}}", todo_block)
+    return content
+
+
 TELEGRAM_HISTORY_LIMIT = _parse_telegram_history_limit()
 TELEGRAM_CHAT_TIMEOUT = _parse_telegram_chat_timeout()
 TELEGRAM_OPENAI_BASE_URL = (
@@ -1150,14 +1190,11 @@ async def proxy_fetch_post(body: ProxyFetchRequest, request: Request):
         print(f"Proxy fetch error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch content: {str(e)}")
 
-# Web search endpoint
-@app.get("/v1/proxy/search")
-async def proxy_search(query: str):
-    """Search the web using Brave Search API or DuckDuckGo fallback."""
+# Shared search logic for route and Telegram tool runner
+async def _do_proxy_search(query: str) -> Dict[str, Any]:
+    """Search the web using Brave Search API or DuckDuckGo fallback. Raises HTTPException on failure."""
     if not query:
         raise HTTPException(status_code=400, detail="Search query is required")
-
-    # Try Brave Search first
     brave_api_key = os.getenv('BRAVE_API_KEY')
     if not brave_api_key:
         print("⚠️  BRAVE_API_KEY not configured. Falling back to DuckDuckGo.")
@@ -1186,23 +1223,18 @@ async def proxy_search(query: str):
                 if data.get('web', {}).get('results'):
                     results = []
                     for result in data['web']['results']:
-                        # Parse date information
                         date_str = result.get('age') or result.get('published')
                         parsed_date = parse_date(date_str) if date_str else None
-
                         results.append({
                             'url': result['url'],
                             'title': clean_text(result.get('title', '')),
                             'snippet': clean_text(result.get('description', '')),
                             'date': parsed_date
                         })
-
-                    # Sort by date (newest first) and filter valid results
                     results = [r for r in results if r['title'] and r['snippet']]
                     results.sort(key=lambda x: parse_date(x.get('date')) or 0, reverse=True)
-
                     print(f"✅ Brave Search returned {len(results)} results")
-                    return {"results": results[:5], "source": "brave"}  # Return top 5 results
+                    return {"results": results[:5], "source": "brave"}
                 else:
                     print(f"⚠️  Brave Search returned no results in response")
             elif response.status_code == 401:
@@ -1218,7 +1250,7 @@ async def proxy_search(query: str):
                 try:
                     error_data = response.json()
                     print(f"   Error details: {error_data}")
-                except:
+                except Exception:
                     print(f"   Error text: {response.text[:200]}")
 
         except httpx.RequestError as e:
@@ -1229,7 +1261,6 @@ async def proxy_search(query: str):
             print(f"❌ Brave Search HTTP error: {e.response.status_code if e.response else 'Unknown'}")
             print("   Falling back to DuckDuckGo...")
         except HTTPException:
-            # Re-raise HTTPExceptions (like auth errors) - don't fall back
             raise
         except Exception as e:
             error_msg = str(e) if str(e) else f"Unknown error: {type(e).__name__}"
@@ -1238,11 +1269,9 @@ async def proxy_search(query: str):
             import traceback
             print(traceback.format_exc())
 
-    # Fallback to DuckDuckGo (only if Brave Search is not available or failed)
     print("🦆 Falling back to DuckDuckGo search...")
     try:
         search_url = f"https://html.duckduckgo.com/html/?q={query}"
-
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.get(
                 search_url,
@@ -1254,69 +1283,41 @@ async def proxy_search(query: str):
                 },
                 follow_redirects=True
             )
-            
-            # Check response status
             if response.status_code != 200:
                 raise HTTPException(
                     status_code=500,
                     detail=f"DuckDuckGo search returned HTTP {response.status_code}. The search service may be temporarily unavailable."
                 )
-
         results = []
         html = response.text
-
-        # Extract results using multiple regex patterns (DuckDuckGo HTML structure can vary)
         patterns = [
-            # Pattern 1: Modern DuckDuckGo structure
             r'<div class="links_main links_deep result__body">.*?<a class="result__a" href="([^"]+)".*?>(.*?)</a>.*?<a class="result__snippet".*?>(.*?)</a>',
-            # Pattern 2: Alternative structure
             r'<div class="result__body">.*?<a class="result__url" href="([^"]+)".*?>(.*?)</a>.*?<div class="result__snippet">(.*?)</div>',
-            # Pattern 3: Another variant
             r'<div class="result__body">.*?<a class="result__a" href="([^"]+)".*?>(.*?)</a>.*?<div class="result__snippet">(.*?)</div>',
-            # Pattern 4: Try to find any links with result classes
             r'<a[^>]*class="[^"]*result[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?<div[^>]*class="[^"]*snippet[^"]*"[^>]*>(.*?)</div>',
-            # Pattern 5: More generic pattern
             r'<a[^>]*href="([^"]+)"[^>]*class="[^"]*result__a[^"]*"[^>]*>(.*?)</a>.*?<span[^>]*class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</span>'
         ]
-
         for pattern in patterns:
             matches = re.finditer(pattern, html, re.DOTALL)
             for match in matches:
-                if len(results) >= 5:  # Limit to 5 results
+                if len(results) >= 5:
                     break
-
                 try:
                     url, title, snippet = match.groups()
                     url = url.replace('&amp;', '&')
-                    
-                    # Clean up the extracted text
                     title = clean_text(title)
                     snippet = clean_text(snippet)
-
-                    # Skip if URL is invalid or is a DuckDuckGo internal link
                     if url and 'duckduckgo.com' not in url and title and snippet:
-                        results.append({
-                            'url': url,
-                            'title': title,
-                            'snippet': snippet
-                        })
-                except (ValueError, IndexError) as e:
-                    # Skip malformed matches
+                        results.append({'url': url, 'title': title, 'snippet': snippet})
+                except (ValueError, IndexError):
                     continue
-
             if len(results) >= 5:
                 break
-
-        # If no results found with regex, try a simpler approach
         if len(results) == 0:
-            # Log the HTML snippet for debugging (first 1000 chars)
             print(f"⚠️  DuckDuckGo search: No results found with regex patterns. HTML preview: {html[:1000]}")
-            # Return empty results rather than failing
             return {"results": [], "source": "duckduckgo", "message": "No results found. DuckDuckGo HTML structure may have changed."}
-
         print(f"✅ DuckDuckGo returned {len(results)} results")
         return {"results": results, "source": "duckduckgo"}
-
     except httpx.RequestError as e:
         error_msg = str(e) if str(e) else f"Network error: {type(e).__name__}"
         print(f"Search error (network): {error_msg}")
@@ -1332,49 +1333,42 @@ async def proxy_search(query: str):
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Failed to perform search: {error_msg}")
 
-# News API search endpoint
-@app.get("/v1/proxy/news")
-async def proxy_news_search(query: str):
-    """Search news articles using News API."""
+
+@app.get("/v1/proxy/search")
+async def proxy_search(query: str):
+    """Search the web using Brave Search API or DuckDuckGo fallback."""
+    return await _do_proxy_search(query)
+
+
+# Shared news logic for route and Telegram tool runner
+async def _do_proxy_news(query: str) -> Dict[str, Any]:
+    """Fetch news articles for query. Raises HTTPException on failure."""
     if not query:
         raise HTTPException(status_code=400, detail="Search query is required")
-
-    # Get News API key from environment variable
     news_api_key = os.getenv('NEWS_API_KEY')
     if not news_api_key:
         raise HTTPException(
             status_code=503,
             detail="NEWS_API_KEY is not configured. Please set it in your .env file."
         )
-
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
                 'https://newsapi.org/v2/everything',
-                headers={
-                    'Accept': 'application/json',
-                },
+                headers={'Accept': 'application/json'},
                 params={
                     'q': query,
                     'apiKey': news_api_key,
                     'sortBy': 'publishedAt',
                     'language': 'en',
-                    'pageSize': 100  # Maximum allowed by News API
+                    'pageSize': 100
                 }
             )
-
         if response.status_code == 200:
             data = response.json()
             articles = data.get('articles', [])
-            
             if not articles:
-                return {
-                    "success": False,
-                    "message": f"No articles found for search term \"{query}\"",
-                    "articles": []
-                }
-
-            # Format articles for response
+                return {"success": False, "message": f"No articles found for \"{query}\"", "articles": []}
             formatted_articles = []
             for article in articles:
                 formatted_articles.append({
@@ -1384,141 +1378,111 @@ async def proxy_news_search(query: str):
                     'publishedAt': article.get('publishedAt', ''),
                     'source': article.get('source', {}).get('name', 'Unknown')
                 })
-
             return {
                 "success": True,
                 "message": f"Found {len(formatted_articles)} articles",
                 "articles": formatted_articles,
                 "totalResults": data.get('totalResults', len(formatted_articles))
             }
-        else:
-            error_data = response.json() if response.headers.get('content-type', '').startswith('application/json') else {}
-            error_message = error_data.get('message', f"News API returned status {response.status_code}")
-            print(f"News API error: {error_message}")
-            raise HTTPException(
-                status_code=response.status_code,
-                detail=f"News API error: {error_message}"
-            )
-
+        error_data = response.json() if response.headers.get('content-type', '').startswith('application/json') else {}
+        error_message = error_data.get('message', f"News API returned status {response.status_code}")
+        print(f"News API error: {error_message}")
+        raise HTTPException(status_code=response.status_code, detail=f"News API error: {error_message}")
     except httpx.HTTPStatusError as e:
         print(f"News API HTTP error: {e}")
-        raise HTTPException(
-            status_code=e.response.status_code,
-            detail=f"News API request failed: {str(e)}"
-        )
+        raise HTTPException(status_code=e.response.status_code, detail=f"News API request failed: {str(e)}")
     except Exception as e:
         print(f"News API error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch news: {str(e)}")
+
+
+@app.get("/v1/proxy/news")
+async def proxy_news_search(query: str):
+    """Search news articles using News API."""
+    return await _do_proxy_news(query)
+
+
+# Shared AutoGen logic for route and Telegram tool runner
+async def _do_autogen(input_text: str) -> Dict[str, Any]:
+    """Run AutoGen team with input_text. Returns dict with output/response/messages. Raises HTTPException on failure."""
+    global autogen_team
+    if not input_text:
+        raise HTTPException(status_code=400, detail="Input parameter is required")
+    if not AUTOGEN_AVAILABLE:
         raise HTTPException(
-            status_code=500,
-            detail=f"Failed to fetch news: {str(e)}"
+            status_code=503,
+            detail="AutoGen not available. Please install: pip install autogen-agentchat autogen-ext"
         )
+    if autogen_team is None:
+        print("🔄 Loading AutoGen team for the first time...")
+        autogen_team = load_autogen_team()
+        if autogen_team is None:
+            raise HTTPException(
+                status_code=503,
+                detail="AutoGen team not loaded. Check team-config.json exists and is valid."
+            )
+    try:
+        config_mtime = TEAM_CONFIG_FILE.stat().st_mtime
+        if not hasattr(autogen_team, '_config_mtime') or autogen_team._config_mtime != config_mtime:
+            print("🔄 Team config file changed, reloading AutoGen team...")
+            new_team = load_autogen_team()
+            if new_team is not None:
+                autogen_team = new_team
+                autogen_team._config_mtime = config_mtime
+    except Exception as e:
+        print(f"⚠️  Error checking team config modification time: {e}")
+    try:
+        print(f"🚀 Running AutoGen team with input: {input_text[:100]}...")
+        result = await autogen_team.run(task=input_text)
+        messages = []
+        if hasattr(result, 'messages'):
+            messages = [
+                {
+                    "source": msg.source if hasattr(msg, 'source') else 'unknown',
+                    "content": msg.content if hasattr(msg, 'content') else str(msg)
+                }
+                for msg in result.messages
+            ]
+        conversation_summary = "=== AutoGen Team Workflow ===\n\n"
+        if messages:
+            for i, msg in enumerate(messages, 1):
+                conversation_summary += f"[{i}] {msg.get('source', 'unknown')}:\n{msg.get('content', '')}\n\n"
+            conversation_summary += "=== End of Workflow ===\n\n"
+            conversation_summary += "Please review the above conversation and provide a concise summary of the final result."
+        else:
+            conversation_summary += "No messages returned from AutoGen team."
+        print(f"✅ AutoGen team completed with {len(messages)} messages")
+        return {
+            "output": conversation_summary,
+            "response": conversation_summary,
+            "messages": messages,
+            "message_count": len(messages)
+        }
+    except Exception as e:
+        import traceback
+        print(f"❌ AutoGen team execution error: {e}")
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"AutoGen team execution failed: {str(e)}")
+
 
 # AutoGen team chat endpoint (integrated directly)
 @app.post("/v1/proxy/autogen")
 async def autogen_chat(request: Request):
     """Run AutoGen team conversation directly (no separate service needed)."""
-    global autogen_team
-    
     try:
         body = await request.json()
         input_text = body.get('input')
-        
         if not input_text:
             raise HTTPException(status_code=400, detail="Input parameter is required")
-
         print(f"🤖 AutoGen team request: {input_text[:100]}...")
-
-        # Check if AutoGen is available and team is loaded
-        if not AUTOGEN_AVAILABLE:
-            raise HTTPException(
-                status_code=503,
-                detail="AutoGen not available. Please install: pip install autogen-agentchat autogen-ext"
-            )
-        
-        if autogen_team is None:
-            # Try to load the team
-            print("🔄 Loading AutoGen team for the first time...")
-            autogen_team = load_autogen_team()
-            if autogen_team is None:
-                raise HTTPException(
-                    status_code=503,
-                    detail="AutoGen team not loaded. Check team-config.json exists and is valid."
-                )
-        else:
-            # Check if the team config file has been modified and reload if needed
-            try:
-                config_mtime = TEAM_CONFIG_FILE.stat().st_mtime
-                if not hasattr(autogen_team, '_config_mtime') or autogen_team._config_mtime != config_mtime:
-                    print("🔄 Team config file changed, reloading AutoGen team...")
-                    new_team = load_autogen_team()
-                    if new_team is not None:
-                        autogen_team = new_team
-                        autogen_team._config_mtime = config_mtime
-                    else:
-                        print("⚠️  Failed to reload team, using existing team")
-            except Exception as e:
-                print(f"⚠️  Error checking team config modification time: {e}")
-
-        try:
-            # Run the team conversation
-            print(f"🚀 Running AutoGen team with input: {input_text[:100]}...")
-            result = await autogen_team.run(task=input_text)
-            
-            # Extract messages and final answer from result
-            messages = []
-            if hasattr(result, 'messages'):
-                messages = [
-                    {
-                        "source": msg.source if hasattr(msg, 'source') else 'unknown',
-                        "content": msg.content if hasattr(msg, 'content') else str(msg)
-                    }
-                    for msg in result.messages
-                ]
-            
-            # Format all messages into a readable conversation summary
-            conversation_summary = "=== AutoGen Team Workflow ===\n\n"
-            
-            if messages:
-                for i, msg in enumerate(messages, 1):
-                    source = msg.get('source', 'unknown')
-                    content = msg.get('content', '')
-                    conversation_summary += f"[{i}] {source}:\n{content}\n\n"
-                
-                conversation_summary += "=== End of Workflow ===\n\n"
-                conversation_summary += "Please review the above conversation and provide a concise summary of the final result."
-            else:
-                conversation_summary = "No messages returned from AutoGen team."
-            
-            print(f"✅ AutoGen team completed with {len(messages)} messages")
-            
-            return {
-                "output": conversation_summary,
-                "response": conversation_summary,  # Alternative field name for compatibility
-                "messages": messages,
-                "message_count": len(messages)
-            }
-            
-        except Exception as e:
-            import traceback
-            error_trace = traceback.format_exc()
-            print(f"❌ AutoGen team execution error: {e}")
-            print(f"   Traceback: {error_trace}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"AutoGen team execution failed: {str(e)}"
-            )
-
+        return await _do_autogen(input_text)
     except HTTPException:
         raise
     except Exception as e:
         import traceback
-        error_trace = traceback.format_exc()
         print(f"❌ AutoGen endpoint error: {e}")
-        print(f"   Traceback: {error_trace}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to process AutoGen request: {str(e)}"
-        )
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to process AutoGen request: {str(e)}")
 
 # Allowed keys when persisting MCP server config (never persist 'command')
 MCP_SERVER_SAFE_KEYS = {"id", "name", "preset_id", "apiKey", "model", "url", "wsUrl", "status", "enabled"}
@@ -2019,7 +1983,10 @@ async def telegram_chat_endpoint(raw_request: Request, request: TelegramChatRequ
 
     system_prompt = request.system_prompt
     if system_prompt is None:
-        system_prompt = _get_telegram_system_prompt_base()
+        if TELEGRAM_TOOLS_ENABLED:
+            system_prompt = _get_telegram_system_prompt_with_tools(conversation_id)
+        else:
+            system_prompt = _get_telegram_system_prompt_base()
 
     # Prepend assistant context (timezone + knowledge awareness)
     system_prompt = _get_assistant_context_block() + system_prompt
@@ -2122,6 +2089,70 @@ async def telegram_chat_endpoint(raw_request: Request, request: TelegramChatRequ
 
     if not reply:
         reply = "I couldn't generate a response right now. Please try again shortly."
+
+    # Tool loop: when tools enabled, parse for tool calls and execute up to TELEGRAM_TOOLS_MAX_ITERATIONS
+    if TELEGRAM_TOOLS_ENABLED and _telegram_tools is not None:
+        working_messages: List[Dict[str, str]] = []
+        if system_prompt:
+            working_messages.append({"role": "system", "content": system_prompt})
+        working_messages.extend(history)
+        iterations = 0
+        while iterations < TELEGRAM_TOOLS_MAX_ITERATIONS:
+            parsed = _telegram_tools.parse_telegram_tool_response(reply)
+            if not parsed:
+                break
+            tool_name = parsed.get("name")
+            args_str = parsed.get("arguments", "{}")
+            try:
+                tool_args = json.loads(args_str) if isinstance(args_str, str) else args_str
+            except (TypeError, json.JSONDecodeError):
+                tool_args = {}
+            if not isinstance(tool_args, dict):
+                tool_args = {}
+            # Build context for tool execution
+            tool_ctx = {
+                "conversation_id": conversation_id,
+                "user_id": request.user_id,
+                "todo_store": telegram_todo,
+                "memory_cache_store": telegram_memory_cache,
+                "do_search": _do_proxy_search,
+                "do_fetch": _do_proxy_fetch,
+                "do_news": _do_proxy_news,
+                "do_autogen": _do_autogen,
+                "do_browser_agent": _do_browser_agent,
+                "do_deep_research": _do_deep_research,
+                "read_file_internal": _read_file_internal,
+                "write_file_internal": _write_file_internal,
+                "list_files_internal": _list_files_internal,
+                "upload_drive_internal": _upload_drive_internal,
+                "memory_manager": memory_manager if MEMORY_AVAILABLE else None,
+            }
+            try:
+                tool_result = await _telegram_tools.execute_telegram_tool(tool_name, tool_args, tool_ctx)
+            except Exception as e:
+                tool_result = {"success": False, "message": str(e)}
+            result_message = tool_result.get("message", str(tool_result))
+            working_messages.append({"role": "assistant", "content": reply})
+            working_messages.append({"role": "user", "content": f"Tool result: {result_message}"})
+            payload_tool = {"model": model_name, "messages": working_messages}
+            if request.temperature is not None:
+                payload_tool["temperature"] = request.temperature
+            if request.max_output_tokens is not None:
+                payload_tool["max_tokens"] = request.max_output_tokens
+            try:
+                async with httpx.AsyncClient(timeout=TELEGRAM_CHAT_TIMEOUT) as client:
+                    response_tool = await client.post(url, headers=headers, json=payload_tool)
+            except httpx.RequestError as exc:
+                print(f"Telegram tool-loop request error: {exc}")
+                break
+            if response_tool.status_code != 200:
+                break
+            data_tool = response_tool.json()
+            choices_tool = data_tool.get("choices") or []
+            if not choices_tool:
+                break
+            reply = (choices_tool[0].get("message") or {}).get("content") or reply
+            iterations += 1
 
     history.append({"role": "assistant", "content": reply})
     trim_telegram_history(history)
@@ -2945,219 +2976,132 @@ async def proxy_models(request: Request, endpoint: Optional[str] = None):
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Failed to proxy models list request: {str(e)}")
 
-# Browser automation proxy endpoints to handle CORS and mixed content
+# Shared browser-agent logic for route and Telegram tool runner
+async def _do_browser_agent(body: Dict[str, Any]) -> Dict[str, Any]:
+    """Forward browser-agent request to MCP browser server. Returns response dict or raises HTTPException."""
+    mcp_browser_url = os.getenv('MCP_BROWSER_SERVER_URL', None)
+    if not mcp_browser_url:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+            mcp_browser_url = f"http://{local_ip}:5001"
+            print(f"   Detected local IP: {local_ip}, using {mcp_browser_url}")
+        except Exception:
+            mcp_browser_url = "http://127.0.0.1:5001"
+            print(f"   Using default: {mcp_browser_url}")
+    else:
+        print(f"   Using configured MCP_BROWSER_SERVER_URL: {mcp_browser_url}")
+    endpoint = f"{mcp_browser_url.rstrip('/')}/api/browser-agent"
+    print(f"🌐 Proxying browser-agent request to: {endpoint}")
+    health_endpoint = f"{mcp_browser_url.rstrip('/')}/api/health"
+    health_check_passed = False
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as health_client:
+            health_response = await health_client.get(health_endpoint)
+            if health_response.status_code == 200:
+                health_check_passed = True
+    except Exception as health_err:
+        print(f"   ⚠️  MCP browser server health check failed: {health_err}")
+        if not mcp_browser_url.startswith("http://127.0.0.1"):
+            mcp_browser_url = "http://127.0.0.1:5001"
+            endpoint = f"{mcp_browser_url.rstrip('/')}/api/browser-agent"
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as hc:
+                    hr = await hc.get(f"{mcp_browser_url.rstrip('/')}/api/health")
+                    if hr.status_code == 200:
+                        health_check_passed = True
+            except Exception:
+                pass
+    if not health_check_passed:
+        print(f"   ⚠️  Warning: Health check failed, but continuing with request")
+    timeout = httpx.Timeout(connect=10.0, read=10800.0, write=10.0, pool=10.0)
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        try:
+            response = await client.post(endpoint, json=body, headers={'Content-Type': 'application/json'})
+        except httpx.ConnectError as conn_err:
+            print(f"❌ Connection error to MCP browser server: {conn_err}")
+            raise HTTPException(
+                status_code=503,
+                detail="Could not connect to MCP browser server. Please ensure it's running on port 5001."
+            )
+        except httpx.ReadTimeout:
+            raise HTTPException(
+                status_code=504,
+                detail="Browser automation task timed out. Please try again or check the MCP browser server logs."
+            )
+        except httpx.TimeoutException:
+            raise HTTPException(
+                status_code=504,
+                detail="Browser automation task timed out. Please try again or check the MCP browser server logs."
+            )
+    print(f"✅ Browser-agent response status: {response.status_code}")
+    if response.status_code != 200:
+        error_content = response.json() if response.headers.get('content-type', '').startswith('application/json') else {"error": response.text}
+        print(f"   Error response: {error_content}")
+        raise HTTPException(status_code=response.status_code, detail=error_content.get("error", str(error_content)))
+    return response.json()
+
+
 @app.post("/v1/proxy/browser-agent")
 async def proxy_browser_agent(request: Request):
-    """
-    Proxy browser automation requests to the MCP browser server.
-    Routes requests to avoid mixed content issues with HTTPS.
-    """
-    try:
-        # Get the request body
-        body = await request.json()
-        
-        # Get MCP browser server URL from environment or use default
-        # Try multiple connection methods for better reliability
-        mcp_browser_url = os.getenv('MCP_BROWSER_SERVER_URL', None)
-        
-        # If not set, try to determine the best URL to use
-        if not mcp_browser_url:
-            # Try to get local IP address
-            try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                s.connect(("8.8.8.8", 80))
-                local_ip = s.getsockname()[0]
-                s.close()
-                # Try using the local IP first, then fall back to 127.0.0.1
-                mcp_browser_url = f"http://{local_ip}:5001"
-                print(f"   Detected local IP: {local_ip}, using {mcp_browser_url}")
-            except Exception:
-                # Fall back to 127.0.0.1
-                mcp_browser_url = "http://127.0.0.1:5001"
-                print(f"   Using default: {mcp_browser_url}")
-        else:
-            print(f"   Using configured MCP_BROWSER_SERVER_URL: {mcp_browser_url}")
-        
-        endpoint = f"{mcp_browser_url.rstrip('/')}/api/browser-agent"
-        
-        print(f"🌐 Proxying browser-agent request to: {endpoint}")
-        print(f"   Request body keys: {list(body.keys()) if isinstance(body, dict) else 'N/A'}")
-        
-        # First, try a quick health check to see if the server is responsive
-        health_endpoint = f"{mcp_browser_url.rstrip('/')}/api/health"
-        health_check_passed = False
+    """Proxy browser automation requests to the MCP browser server."""
+    body = await request.json()
+    result = await _do_browser_agent(body)
+    return JSONResponse(content=result, status_code=200)
+
+
+# Shared deep-research logic for route and Telegram tool runner
+async def _do_deep_research(body: Dict[str, Any]) -> Dict[str, Any]:
+    """Forward deep-research request to MCP browser server. Returns response dict or raises HTTPException."""
+    mcp_browser_url = os.getenv('MCP_BROWSER_SERVER_URL', None)
+    if not mcp_browser_url:
         try:
-            async with httpx.AsyncClient(timeout=5.0) as health_client:
-                health_response = await health_client.get(health_endpoint)
-                if health_response.status_code == 200:
-                    print(f"   ✅ MCP browser server health check passed")
-                    health_check_passed = True
-                else:
-                    print(f"   ⚠️  MCP browser server health check returned: {health_response.status_code}")
-        except Exception as health_err:
-            print(f"   ⚠️  MCP browser server health check failed: {health_err}")
-            # If health check fails with IP, try 127.0.0.1 as fallback
-            if not mcp_browser_url.startswith("http://127.0.0.1"):
-                print(f"   Trying fallback to 127.0.0.1...")
-                mcp_browser_url = "http://127.0.0.1:5001"
-                endpoint = f"{mcp_browser_url.rstrip('/')}/api/browser-agent"
-                try:
-                    async with httpx.AsyncClient(timeout=5.0) as health_client:
-                        health_response = await health_client.get(f"{mcp_browser_url.rstrip('/')}/api/health")
-                        if health_response.status_code == 200:
-                            print(f"   ✅ MCP browser server health check passed with 127.0.0.1")
-                            health_check_passed = True
-                except Exception:
-                    print(f"   ⚠️  Health check also failed with 127.0.0.1")
-        
-        if not health_check_passed:
-            print(f"   ⚠️  Warning: Health check failed, but continuing with request")
-        
-        # Create a timeout configuration - longer for browser automation tasks
-        # Use a timeout that allows for long-running browser tasks
-        # connect: time to establish connection (10s)
-        # read: time to read response (3 hours for browser automation)
-        # write: time to write request (10s)
-        # pool: time to get connection from pool (10s)
-        timeout = httpx.Timeout(connect=10.0, read=10800.0, write=10.0, pool=10.0)
-        
-        # Forward the request to the MCP browser server
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-            try:
-                print(f"   Sending POST request to MCP browser server...")
-                response = await client.post(
-                    endpoint,
-                    json=body,
-                    headers={'Content-Type': 'application/json'}
-                )
-                print(f"   Received response from MCP browser server")
-            except httpx.ConnectError as conn_err:
-                print(f"❌ Connection error to MCP browser server: {conn_err}")
-                print(f"   Attempted endpoint: {endpoint}")
-                print(f"   Please ensure the MCP browser server is running: python start_mcp_browser_server.py")
-                raise HTTPException(
-                    status_code=503,
-                    detail="Could not connect to MCP browser server. Please ensure it's running on port 5001."
-                )
-            except httpx.ReadTimeout as timeout_err:
-                print(f"❌ Read timeout from MCP browser server: {timeout_err}")
-                print(f"   The browser automation task may be taking longer than expected.")
-                print(f"   This could indicate:")
-                print(f"   1. The MCP browser server is processing a long-running task")
-                print(f"   2. The MCP browser server is not responding")
-                print(f"   3. Network connectivity issues")
-                raise HTTPException(
-                    status_code=504,
-                    detail="Browser automation task timed out after 10 minutes. The task may be taking longer than expected. Please try again or check the MCP browser server logs."
-                )
-            except httpx.TimeoutException as timeout_err:
-                print(f"❌ General timeout from MCP browser server: {timeout_err}")
-                raise HTTPException(
-                    status_code=504,
-                    detail="Browser automation task timed out. Please try again or check the MCP browser server logs."
-                )
-        
-        print(f"✅ Browser-agent response status: {response.status_code}")
-        
-        # Return the response
-        if response.status_code != 200:
-            error_content = response.json() if response.headers.get('content-type', '').startswith('application/json') else {"error": response.text}
-            print(f"   Error response: {error_content}")
-            return JSONResponse(
-                content=error_content,
-                status_code=response.status_code
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+            mcp_browser_url = f"http://{local_ip}:5001"
+            print(f"   Detected local IP: {local_ip}, using {mcp_browser_url}")
+        except Exception:
+            mcp_browser_url = "http://127.0.0.1:5001"
+            print(f"   Using default: {mcp_browser_url}")
+    else:
+        print(f"   Using configured MCP_BROWSER_SERVER_URL: {mcp_browser_url}")
+    endpoint = f"{mcp_browser_url.rstrip('/')}/api/deep-research"
+    print(f"🔬 Proxying deep-research request to: {endpoint}")
+    timeout = httpx.Timeout(connect=10.0, read=10800.0, write=10.0, pool=10.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        try:
+            response = await client.post(endpoint, json=body, headers={'Content-Type': 'application/json'})
+        except httpx.ConnectError as conn_err:
+            print(f"❌ Connection error to MCP browser server: {conn_err}")
+            raise HTTPException(
+                status_code=503,
+                detail="Could not connect to MCP browser server. Please ensure it's running on port 5001."
             )
-        
-        return JSONResponse(content=response.json(), status_code=200)
-    
-    except HTTPException:
-        # Re-raise HTTP exceptions as-is
-        raise
-    except Exception as e:
-        print(f"❌ Browser-agent proxy error: {e}")
-        import traceback
-        print(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Failed to proxy browser-agent request: {str(e)}")
+        except httpx.ReadTimeout as timeout_err:
+            print(f"❌ Read timeout from MCP browser server: {timeout_err}")
+            raise HTTPException(
+                status_code=504,
+                detail="Deep research task timed out. Please try again or check the MCP browser server logs."
+            )
+    print(f"✅ Deep-research response status: {response.status_code}")
+    if response.status_code != 200:
+        error_content = response.json() if response.headers.get('content-type', '').startswith('application/json') else {"error": response.text}
+        raise HTTPException(status_code=response.status_code, detail=error_content.get("error", str(error_content)))
+    return response.json()
+
 
 @app.post("/v1/proxy/deep-research")
 async def proxy_deep_research(request: Request):
-    """
-    Proxy deep research requests to the MCP browser server.
-    Routes requests to avoid mixed content issues with HTTPS.
-    """
+    """Proxy deep research requests to the MCP browser server."""
     try:
-        # Get the request body
         body = await request.json()
-        
-        # Get MCP browser server URL from environment or use default
-        # Try multiple connection methods for better reliability
-        mcp_browser_url = os.getenv('MCP_BROWSER_SERVER_URL', None)
-        
-        # If not set, try to determine the best URL to use
-        if not mcp_browser_url:
-            # Try to get local IP address
-            try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                s.connect(("8.8.8.8", 80))
-                local_ip = s.getsockname()[0]
-                s.close()
-                # Try using the local IP first, then fall back to 127.0.0.1
-                mcp_browser_url = f"http://{local_ip}:5001"
-                print(f"   Detected local IP: {local_ip}, using {mcp_browser_url}")
-            except Exception:
-                # Fall back to 127.0.0.1
-                mcp_browser_url = "http://127.0.0.1:5001"
-                print(f"   Using default: {mcp_browser_url}")
-        else:
-            print(f"   Using configured MCP_BROWSER_SERVER_URL: {mcp_browser_url}")
-        
-        endpoint = f"{mcp_browser_url.rstrip('/')}/api/deep-research"
-        
-        print(f"🔬 Proxying deep-research request to: {endpoint}")
-        print(f"   Request body keys: {list(body.keys()) if isinstance(body, dict) else 'N/A'}")
-        
-        # Create a timeout configuration - even longer for deep research tasks
-        timeout = httpx.Timeout(connect=10.0, read=10800.0, write=10.0, pool=10.0)  # 3 hours for deep research
-        
-        # Forward the request to the MCP browser server
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            try:
-                response = await client.post(
-                    endpoint,
-                    json=body,
-                    headers={'Content-Type': 'application/json'}
-                )
-            except httpx.ConnectError as conn_err:
-                print(f"❌ Connection error to MCP browser server: {conn_err}")
-                print(f"   Attempted endpoint: {endpoint}")
-                print(f"   Please ensure the MCP browser server is running: python start_mcp_browser_server.py")
-                raise HTTPException(
-                    status_code=503,
-                    detail="Could not connect to MCP browser server. Please ensure it's running on port 5001."
-                )
-            except httpx.ReadTimeout as timeout_err:
-                print(f"❌ Read timeout from MCP browser server: {timeout_err}")
-                print(f"   The deep research task may be taking longer than expected.")
-                raise HTTPException(
-                    status_code=504,
-                    detail="Deep research task timed out. The task may be taking longer than expected. Please try again or check the MCP browser server logs."
-                )
-        
-        print(f"✅ Deep-research response status: {response.status_code}")
-        
-        # Return the response
-        if response.status_code != 200:
-            error_content = response.json() if response.headers.get('content-type', '').startswith('application/json') else {"error": response.text}
-            print(f"   Error response: {error_content}")
-            return JSONResponse(
-                content=error_content,
-                status_code=response.status_code
-            )
-        
-        return JSONResponse(content=response.json(), status_code=200)
-    
+        result = await _do_deep_research(body)
+        return JSONResponse(content=result, status_code=200)
     except HTTPException:
-        # Re-raise HTTP exceptions as-is
         raise
     except Exception as e:
         print(f"❌ Deep-research proxy error: {e}")
@@ -3902,6 +3846,89 @@ def write_pdf_file(filepath: Path, content: str) -> None:
             detail="PDF writing requires reportlab library. Install with: pip install reportlab"
         )
 
+
+# Internal file ops for Telegram tool runner (no auth; same security as routes)
+async def _read_file_internal(filename: str) -> Dict[str, Any]:
+    """Read file from scratch dir. Returns dict with success, message, data (content/type). Used by Telegram tools only."""
+    if not FILE_OPS_AVAILABLE:
+        return {"success": False, "message": "File operations not available."}
+    try:
+        filepath = resolve_scratch_path(filename, READ_ALLOWED_EXTENSIONS)
+        if not filepath.exists():
+            return {"success": False, "message": f"File not found: {filename}"}
+        if filepath.stat().st_size > FILE_OPS_MAX_SIZE_BYTES:
+            return {"success": False, "message": "File too large"}
+        ext = filepath.suffix.lower()
+        if ext == '.txt':
+            content = read_text_file(filepath)
+            return {"success": True, "message": f"Read {filename}", "data": {"content": content, "type": "text"}}
+        if ext == '.docx':
+            content = read_docx_file(filepath)
+            return {"success": True, "message": f"Read {filename}", "data": {"content": content, "type": "text"}}
+        if ext in ['.xlsx', '.xls']:
+            content = read_xlsx_file(filepath)
+            return {"success": True, "message": f"Read {filename}", "data": {"content": content, "type": "text"}}
+        if ext == '.pdf':
+            content = read_pdf_file(filepath)
+            return {"success": True, "message": f"Read {filename}", "data": {"content": content, "type": "text"}}
+        if ext in ['.png', '.jpg', '.jpeg']:
+            image_data = read_png_file(filepath)
+            return {"success": True, "message": f"Read {filename}", "data": {"content": image_data.get("description", ""), "type": "image", "image_data": image_data}}
+        return {"success": False, "message": f"Unsupported file type: {ext}"}
+    except HTTPException as e:
+        return {"success": False, "message": e.detail or "Invalid filename"}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+
+async def _write_file_internal(filename: str, content: str, format: str = "txt") -> Dict[str, Any]:
+    """Write file to scratch dir. Returns dict with success, message. Used by Telegram tools only."""
+    if not FILE_OPS_AVAILABLE:
+        return {"success": False, "message": "File operations not available."}
+    try:
+        content_bytes = content.encode("utf-8")
+        if len(content_bytes) > FILE_OPS_MAX_SIZE_BYTES:
+            return {"success": False, "message": "Content too large"}
+        logical_name = filename.strip()
+        if not Path(logical_name).suffix:
+            logical_name = f"{logical_name}.{format.lower()}"
+        filepath = resolve_scratch_path(logical_name, WRITE_ALLOWED_EXTENSIONS)
+        ext = filepath.suffix.lower()
+        if ext == '.txt':
+            write_text_file(filepath, content)
+        elif ext == '.docx':
+            write_docx_file(filepath, content)
+        elif ext in ['.xlsx', '.xls']:
+            write_xlsx_file(filepath, content)
+        elif ext == '.pdf':
+            write_pdf_file(filepath, content)
+        else:
+            return {"success": False, "message": f"Unsupported file type for writing: {ext}"}
+        return {"success": True, "message": f"Wrote {filepath.name}", "data": {"filepath": str(filepath), "size": filepath.stat().st_size}}
+    except HTTPException as e:
+        return {"success": False, "message": e.detail or "Invalid filename"}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+
+async def _list_files_internal() -> Dict[str, Any]:
+    """List files in scratch dir. Returns dict with success, files. Used by Telegram tools only."""
+    try:
+        files = []
+        for file in SCRATCH_DIR.iterdir():
+            if file.is_file():
+                files.append({
+                    'name': file.name,
+                    'size': file.stat().st_size,
+                    'modified': file.stat().st_mtime,
+                    'extension': file.suffix
+                })
+        files.sort(key=lambda x: x['modified'], reverse=True)
+        return {"success": True, "files": files, "count": len(files), "scratch_dir": str(SCRATCH_DIR)}
+    except Exception as e:
+        return {"success": False, "message": str(e), "files": []}
+
+
 @app.post("/v1/files/read", response_model=FileResponse)
 async def read_file(
     request: ReadFileRequest,
@@ -4121,36 +4148,91 @@ async def delete_file(
 # GOOGLE DRIVE UPLOAD ENDPOINT
 # ============================================================================
 
+# Internal drive upload for Telegram tool runner (no auth; same path/credential checks)
+async def _upload_drive_internal(file_path: str, file_name: Optional[str] = None) -> Dict[str, Any]:
+    """Upload a file from scratch dir to Google Drive. Returns dict with success, message, fileId, etc. Used by Telegram tools only."""
+    try:
+        if not file_path or not str(file_path).strip():
+            return {"success": False, "message": "filePath is required"}
+        file_path_obj = resolve_scratch_path(str(file_path).strip(), DRIVE_UPLOAD_EXTENSIONS)
+        if not file_path_obj.exists():
+            return {"success": False, "message": f"File not found: {file_path}"}
+        folder_id = os.getenv('GOOGLE_DRIVE_FOLDER_ID')
+        if not folder_id:
+            return {"success": False, "message": "GOOGLE_DRIVE_FOLDER_ID is not set"}
+        project_id = os.getenv('GOOGLE_DRIVE_PROJECT_ID')
+        private_key_id = os.getenv('GOOGLE_DRIVE_PRIVATE_KEY_ID')
+        private_key = os.getenv('GOOGLE_DRIVE_PRIVATE_KEY')
+        client_email = os.getenv('GOOGLE_DRIVE_CLIENT_EMAIL')
+        if not all([project_id, private_key_id, private_key, client_email]):
+            missing = [k for k, v in {
+                'GOOGLE_DRIVE_PROJECT_ID': project_id,
+                'GOOGLE_DRIVE_PRIVATE_KEY_ID': private_key_id,
+                'GOOGLE_DRIVE_PRIVATE_KEY': private_key,
+                'GOOGLE_DRIVE_CLIENT_EMAIL': client_email
+            }.items() if not v]
+            return {"success": False, "message": f"Missing Google Drive credentials: {', '.join(missing)}"}
+        private_key_formatted = private_key.replace('\\n', '\n')
+        credentials_dict = {
+            "type": "service_account",
+            "project_id": project_id,
+            "private_key_id": private_key_id,
+            "private_key": private_key_formatted,
+            "client_email": client_email,
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+            "client_x509_cert_url": f"https://www.googleapis.com/robot/v1/metadata/x509/{client_email}"
+        }
+        try:
+            from google.oauth2 import service_account
+            from googleapiclient.discovery import build
+            from googleapiclient.http import MediaFileUpload
+        except ImportError:
+            return {"success": False, "message": "Google Drive API libraries not available. Install: pip install google-auth google-api-python-client"}
+        credentials = service_account.Credentials.from_service_account_info(
+            credentials_dict,
+            scopes=['https://www.googleapis.com/auth/drive.file']
+        )
+        drive_service = build('drive', 'v3', credentials=credentials)
+        upload_file_name = file_name if file_name else file_path_obj.name
+        file_metadata = {'name': upload_file_name, 'parents': [folder_id]}
+        media = MediaFileUpload(str(file_path_obj), resumable=True)
+        file = drive_service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields='id, name, webViewLink'
+        ).execute()
+        return {
+            'success': True,
+            'fileId': file.get('id'),
+            'fileName': file.get('name'),
+            'webViewLink': file.get('webViewLink'),
+            'message': f"File successfully uploaded to Google Drive with ID: {file.get('id')}"
+        }
+    except HTTPException as e:
+        return {"success": False, "message": e.detail or "Upload failed"}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+
 @app.post("/v1/proxy/upload-to-drive")
 async def upload_to_drive(request: Request, current_user: Dict[str, Any] = Depends(get_current_user)):
     """
     Upload a file from the scratch directory to Google Drive using service account credentials from .env file.
     filePath must be a filename relative to the scratch directory (e.g. report.docx). Path traversal and absolute paths are rejected.
-    Credentials are read from environment variables:
-    - GOOGLE_DRIVE_PROJECT_ID
-    - GOOGLE_DRIVE_PRIVATE_KEY_ID
-    - GOOGLE_DRIVE_PRIVATE_KEY
-    - GOOGLE_DRIVE_CLIENT_EMAIL
-    - GOOGLE_DRIVE_FOLDER_ID
     """
     folder_id = None
     file_path_obj = None
     try:
-        # Get form data from request
         form_data = await request.form()
-        # Get file path from form data (must be scratch-relative filename; validated below)
         file_path = form_data.get('filePath')
         if not file_path or not str(file_path).strip():
             raise HTTPException(status_code=400, detail="filePath is required")
-        # Resolve to path under SCRATCH_DIR only; rejects absolute, traversal, disallowed extensions
         file_path_obj = resolve_scratch_path(str(file_path).strip(), DRIVE_UPLOAD_EXTENSIONS)
         if not file_path_obj.exists():
             raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
-        
-        # Get optional file name for Drive
         file_name = form_data.get('fileName')
-        
-        # Get folder ID from form data or environment variable
         folder_id = form_data.get('folderId') or os.getenv('GOOGLE_DRIVE_FOLDER_ID')
         if not folder_id:
             raise HTTPException(status_code=400, detail="folderId is required (provide in request or set GOOGLE_DRIVE_FOLDER_ID in .env)")

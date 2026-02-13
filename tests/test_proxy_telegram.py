@@ -162,3 +162,61 @@ class TestTelegramSecret:
         with patch("src.servers.proxy_server.TELEGRAM_SECRET", "my-secret"):
             resp = client.delete("/v1/telegram/chat/some-id")
         assert resp.status_code == 401
+
+
+class TestTelegramToolsLoop:
+    """Tests for Telegram tool loop when TELEGRAM_TOOLS_ENABLED is True."""
+
+    def test_tool_loop_executes_tool_and_returns_final_reply(self):
+        """When LLM returns a tool call, proxy executes tool and sends result back; second LLM reply is returned."""
+        client = _get_client()
+        # First LLM response: tool call
+        tool_response = '<tool>webSearch</tool>\n<parameters>{"query": "test query"}</parameters>'
+        # Second LLM response: natural language after seeing tool result
+        final_response = "Here are the search results: [summary]."
+        mock_first = MagicMock()
+        mock_first.status_code = 200
+        mock_first.json.return_value = {
+            "choices": [{"message": {"content": tool_response}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 20},
+        }
+        mock_second = MagicMock()
+        mock_second.status_code = 200
+        mock_second.json.return_value = {
+            "choices": [{"message": {"content": final_response}}],
+            "usage": {"prompt_tokens": 30, "completion_tokens": 10},
+        }
+        post_calls = [mock_first, mock_second]
+
+        def next_response(*args, **kwargs):
+            return post_calls.pop(0) if post_calls else mock_second
+
+        with patch("src.servers.proxy_server.TELEGRAM_TOOLS_ENABLED", True):
+            try:
+                from src.servers import proxy_server as ps
+                if getattr(ps, "_telegram_tools", None) is None:
+                    pytest.skip("telegram_tools module not available")
+            except ImportError:
+                pytest.skip("telegram_tools not importable")
+            with patch("src.servers.proxy_server._do_proxy_search", new_callable=AsyncMock) as mock_search:
+                mock_search.return_value = {"results": [{"title": "Test", "snippet": "Snippet"}]}
+                with patch("src.servers.proxy_server.os.getenv") as m_getenv:
+                    m_getenv.side_effect = lambda k, d=None: (
+                        "test-key" if k in ("OPENAI_API_KEY", "MCP_LLM_OPENAI_API_KEY") else os.environ.get(k, d)
+                    )
+                    with patch("src.servers.proxy_server.httpx.AsyncClient") as mock_aclient:
+                        mock_client_instance = MagicMock()
+                        mock_client_instance.post = AsyncMock(side_effect=next_response)
+                        mock_client_instance.__aenter__ = AsyncMock(return_value=mock_client_instance)
+                        mock_client_instance.__aexit__ = AsyncMock(return_value=None)
+                        mock_aclient.return_value = mock_client_instance
+
+                        resp = client.post(
+                            "/v1/telegram/chat",
+                            json={"message": "Search for test", "conversation_id": "tools-test"},
+                        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        # Final reply should be the second LLM response (natural language)
+        assert data.get("reply") == final_response
+        assert data.get("conversation_id") == "tools-test"

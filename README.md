@@ -333,13 +333,33 @@ Key environment variables (see `config/mcp_config.env.example` for complete list
 - `NEWS_API_KEY`: News API key
 
 #### Telegram Bot Configuration
+
+**Required (bot process):**
 - `TELEGRAM_BOT_TOKEN`: Telegram bot token from BotFather (required for the bot)
-- `TELEGRAM_ADMIN_IDS`: Comma-separated list of allowed Telegram user IDs (numeric only; invalid entries are skipped)
-- `TELEGRAM_ALLOW_ALL`: Set to "true" to allow all users (default: false)
+- `TELEGRAM_ADMIN_IDS`: Comma-separated list of allowed Telegram user IDs (numeric only), or use `TELEGRAM_ALLOW_ALL=true` to allow all users
+
+**Required (proxy process, for chat):**
+- `OPENAI_API_KEY` or `MCP_LLM_OPENAI_API_KEY`: One of these must be set on the proxy so Telegram chat can call the LLM (same keys as web UI)
+
+**Optional (bot):**
+- `TELEGRAM_ALLOW_ALL`: Set to `"true"` to allow all users (default: false)
 - `TELEGRAM_BACKEND_URL`: Base URL of the CATBot proxy server (default: http://localhost:8002)
-- `OPENAI_API_KEY` or `MCP_LLM_OPENAI_API_KEY`: Proxy uses one of these for Telegram chat (same as web LLM)
-- `TELEGRAM_SECRET`: Optional shared secret for bot-to-proxy auth when the proxy is reachable beyond localhost (set on both bot and proxy)
-- **System prompt / rules**: To use the same system context and rules as the web UI, put your prompt in `config/catbot_system_prompt.txt`. The proxy uses this file for Telegram when it exists (overrides `TELEGRAM_SYSTEM_PROMPT` env). A default file is included that aligns Telegram with the web UI identity and rules.
+- `TELEGRAM_CHAT_ENDPOINT`: Chat endpoint path (default: /v1/telegram/chat)
+- `TELEGRAM_CHAT_MODEL`: Model override for Telegram (default from OPENAI_MODEL or gpt-4o-mini)
+- `TELEGRAM_BACKEND_VERIFY_SSL`: Set to `"false"` to skip SSL verification for backend (e.g. self-signed certs)
+
+**Optional (proxy):**
+- `TELEGRAM_SECRET`: Shared secret for bot-to-proxy auth when the proxy is reachable beyond localhost (set the same value on both bot and proxy)
+- `TELEGRAM_SYSTEM_PROMPT`: System prompt override; overridden by `config/catbot_system_prompt.txt` when that file exists
+- `TELEGRAM_HISTORY_LIMIT`, `TELEGRAM_CHAT_TIMEOUT`: Conversation tuning (defaults 12, 30)
+- `TELEGRAM_OPENAI_BASE_URL`, `TELEGRAM_OPENAI_CHAT_PATH`: Override LLM endpoint (e.g. Azure/Groq)
+
+**Telegram tools (optional, proxy only):**
+- `TELEGRAM_TOOLS_ENABLED`: Set to `"true"` to enable tools in Telegram (search, files, todo, memory, workflows, etc.). When enabled, the proxy uses `config/catbot_system_prompt_with_tools.txt` and runs a tool loop.
+- `TELEGRAM_TOOLS_MAX_ITERATIONS`: Max tool-loop iterations per message (default: 5)
+- When tools are enabled, the following are used by specific tools if set (same as web UI): `BRAVE_API_KEY` (webSearch; else DuckDuckGo), `NEWS_API_KEY` (fetchNews), `GOOGLE_DRIVE_*` (uploadToGoogleDrive), memory/vector-store settings for store/search/list/delete memories. File tools use the proxy scratch directory; runWorkflow uses AutoGen/team-config.
+
+**System prompt / rules:** To use the same system context and rules as the web UI, put your prompt in `config/catbot_system_prompt.txt`. The proxy uses this file for Telegram when it exists (overrides `TELEGRAM_SYSTEM_PROMPT` env). A default file is included. See "Telegram tools" below for available tools and limitations when `TELEGRAM_TOOLS_ENABLED=true`.
 
 See `config/telegram_env_example.txt` for the full list and examples.
 
@@ -544,6 +564,13 @@ Telegram users talk to the CATBot assistant via a polling bot. The bot forwards 
 - `/status` - Report backend status and message counts
 - `/clear` - Clear the conversation history on the backend
 
+**Telegram tools (optional):**  
+Set `TELEGRAM_TOOLS_ENABLED=true` in the proxy environment to enable the same tool set as the web client. When enabled, the model can use tools (e.g. web search, read/write files in scratch, todo list, memory cache, workflows, news, calculate, store/search memories). The proxy parses `<tool>...</tool><parameters>...</parameters>` from the model reply, executes the tool server-side, and sends the result back to the model for a natural-language reply.
+
+- **Available in Telegram:** manageTodoList, manageMemoryCache, navigateToUrl (returns link text), openChatToUser, calculate, runWorkflow (AutoGen), scrapeWebsite, webSearch, fetchNews, readFile, writeFile, listFiles, saveToFile, storeMemory, searchMemories, listMemories, deleteMemory, runBrowserAgent, runDeepResearch, uploadToGoogleDrive, llmQuery (or web-only message).
+- **Web-only in Telegram:** PDF to PowerPoint (`pdfToPowerPoint`) — the proxy returns a message directing the user to the CATBot web interface for this feature.
+- **Config:** `config/catbot_system_prompt_with_tools.txt` (included) defines the tool list and format; placeholders `{{MEMORY_CACHE}}` and `{{TODO_LIST}}` are filled per conversation. Max tool-loop iterations per message: `TELEGRAM_TOOLS_MAX_ITERATIONS` (default 5).
+
 ## Project Structure
 
 ```
@@ -685,11 +712,13 @@ Install all Python dependencies with: `pip install -r requirements.txt`
    - Verify file format is supported (txt, docx, xlsx, pdf, png, jpg)
 
 7. **Telegram Bot Not Responding**
+   - See "Telegram Bot Configuration" above and `config/telegram_env_example.txt` for required vs optional variables.
    - Verify `TELEGRAM_BOT_TOKEN` is set correctly
    - Check that `TELEGRAM_ADMIN_IDS` is configured (numeric IDs only) or `TELEGRAM_ALLOW_ALL=true`
    - Ensure the proxy server is running on port 8002
    - Set `OPENAI_API_KEY` or `MCP_LLM_OPENAI_API_KEY` on the proxy so Telegram chat can call the LLM
    - If using `TELEGRAM_SECRET`, set the same value on both the bot and the proxy
+   - For **Telegram tools**: set `TELEGRAM_TOOLS_ENABLED=true` on the proxy; ensure `config/catbot_system_prompt_with_tools.txt` exists. Tools need the same backend config as the web UI (e.g. `BRAVE_API_KEY`, `NEWS_API_KEY`).
    - Check bot logs for connection errors
 
 8. **MCP Browser Server Connection Issues**
