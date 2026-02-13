@@ -13,8 +13,8 @@ python-dotenv>=1.0.0
 flask>=3.0.0
 flask-cors>=4.0.0
 
-# Telegram bot integration
-python-telegram-bot>=20.0
+# Telegram bot integration (bot uses httpx above for proxy requests; rate-limiter extra required for AIORateLimiter)
+python-telegram-bot[rate-limiter]>=20.0
 
 # Testing framework
 pytest>=7.4.0

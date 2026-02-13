@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Telegram bot integration for the Eva AI assistant.
+"""Telegram bot integration for the CATBot AI assistant.
 
-This bot connects Telegram users to the Eva backend by forwarding
+This bot connects Telegram users to the CATBot backend by forwarding
 messages to the FastAPI proxy server. The proxy server then resolves
 requests using OpenAI (or any compatible model endpoint configured on
 the server).
@@ -10,9 +10,10 @@ Environment variables:
     TELEGRAM_BOT_TOKEN: Telegram bot token obtained from @BotFather (required)
     TELEGRAM_ADMIN_IDS: Comma separated list of Telegram user IDs that are allowed to chat
     TELEGRAM_ALLOW_ALL: Set to "true" to allow all Telegram users (optional)
-    TELEGRAM_BACKEND_URL: Base URL of the Eva proxy server (default: http://localhost:8002)
+    TELEGRAM_BACKEND_URL: Base URL of the CATBot proxy server (default: http://localhost:8002)
     TELEGRAM_CHAT_ENDPOINT: Relative or absolute URL to the chat endpoint (default: /v1/telegram/chat)
     TELEGRAM_CHAT_TIMEOUT: Timeout for chat requests to backend in seconds (default: 30)
+    TELEGRAM_BACKEND_VERIFY_SSL: Set to "false" to skip SSL verification for backend (e.g. self-signed cert)
     TELEGRAM_BOT_SYSTEM_PROMPT: Optional system prompt override passed to backend
     TELEGRAM_CHAT_MODEL: Optional model override passed to backend
 
@@ -56,20 +57,55 @@ logging.basicConfig(
 )
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-ADMIN_IDS = {
-    int(user_id.strip())
-    for user_id in os.getenv("TELEGRAM_ADMIN_IDS", "").split(",")
-    if user_id.strip()
-}
+
+
+def _parse_admin_ids() -> set:
+    """Parse TELEGRAM_ADMIN_IDS defensively; skip non-numeric values and log warnings."""
+    admin_ids: set = set()
+    raw = os.getenv("TELEGRAM_ADMIN_IDS", "")
+    for part in raw.split(","):
+        s = part.strip()
+        if not s:
+            continue
+        try:
+            admin_ids.add(int(s))
+        except ValueError:
+            logger.warning("Skipping invalid TELEGRAM_ADMIN_IDS entry (not numeric): %r", s)
+    return admin_ids
+
+
+ADMIN_IDS = _parse_admin_ids()
 ALLOW_ALL_USERS = os.getenv("TELEGRAM_ALLOW_ALL", "false").lower() == "true"
 BACKEND_BASE_URL = os.getenv("TELEGRAM_BACKEND_URL", os.getenv("BACKEND_URL", "http://localhost:8002"))
 CHAT_ENDPOINT = os.getenv("TELEGRAM_CHAT_ENDPOINT", "/v1/telegram/chat")
-CHAT_TIMEOUT = float(os.getenv("TELEGRAM_CHAT_TIMEOUT", "30"))
+
+
+def _parse_chat_timeout() -> float:
+    """Parse TELEGRAM_CHAT_TIMEOUT with default 30 on invalid value."""
+    try:
+        return float(os.getenv("TELEGRAM_CHAT_TIMEOUT", "30"))
+    except ValueError:
+        logger.warning("Invalid TELEGRAM_CHAT_TIMEOUT; using default 30")
+        return 30.0
+
+
+CHAT_TIMEOUT = _parse_chat_timeout()
 SYSTEM_PROMPT_OVERRIDE = os.getenv("TELEGRAM_BOT_SYSTEM_PROMPT")
 MODEL_OVERRIDE = os.getenv("TELEGRAM_CHAT_MODEL")
+# Optional shared secret for bot-to-proxy auth when proxy is reachable beyond localhost
+TELEGRAM_SECRET = os.getenv("TELEGRAM_SECRET")
+# Set to "false" to disable SSL verification for backend requests (e.g. self-signed cert at https://anton.local:8002)
+BACKEND_VERIFY_SSL = os.getenv("TELEGRAM_BACKEND_VERIFY_SSL", "true").lower() != "false"
 
 # Track message counts for /status reporting
 message_counts: Dict[int, int] = {}
+
+
+def _backend_headers() -> Dict[str, str]:
+    """Return optional auth headers for backend requests when TELEGRAM_SECRET is set."""
+    if not TELEGRAM_SECRET:
+        return {}
+    return {"X-Telegram-Secret": TELEGRAM_SECRET}
 
 
 def is_authorized(user_id: int) -> bool:
@@ -111,13 +147,14 @@ async def call_backend_chat(user_id: int, message: str) -> str:
 
     url = build_chat_url()
     logger.debug("Sending chat payload to %s", url)
+    headers = _backend_headers()
 
     try:
-        async with httpx.AsyncClient(timeout=CHAT_TIMEOUT) as client:
-            response = await client.post(url, json=payload)
+        async with httpx.AsyncClient(timeout=CHAT_TIMEOUT, verify=BACKEND_VERIFY_SSL) as client:
+            response = await client.post(url, json=payload, headers=headers)
     except httpx.RequestError as exc:
         logger.error("Backend request error: %s", exc)
-        raise RuntimeError("Failed to reach Eva backend. Please check the server logs.") from exc
+        raise RuntimeError("Failed to reach CATBot backend. Please check the server logs.") from exc
 
     if response.status_code != 200:
         logger.error("Backend returned %s: %s", response.status_code, response.text)
@@ -126,12 +163,12 @@ async def call_backend_chat(user_id: int, message: str) -> str:
             message_text = error_payload.get("detail") or error_payload.get("message")
         except ValueError:
             message_text = response.text
-        raise RuntimeError(message_text or "Eva backend returned an unexpected error.")
+        raise RuntimeError(message_text or "CATBot backend returned an unexpected error.")
 
     data = response.json()
     reply = data.get("reply") or data.get("response") or data.get("text")
     if not reply:
-        raise RuntimeError("Eva backend did not return a response message.")
+        raise RuntimeError("CATBot backend did not return a response message.")
 
     # Update message counts for status command
     message_counts[user_id] = message_counts.get(user_id, 0) + 1
@@ -144,13 +181,14 @@ async def clear_backend_history(user_id: int) -> bool:
 
     url = build_chat_url()
     delete_url = url.rstrip("/") + f"/{user_id}"
+    headers = _backend_headers()
 
     try:
-        async with httpx.AsyncClient(timeout=CHAT_TIMEOUT) as client:
-            response = await client.delete(delete_url)
+        async with httpx.AsyncClient(timeout=CHAT_TIMEOUT, verify=BACKEND_VERIFY_SSL) as client:
+            response = await client.delete(delete_url, headers=headers)
     except httpx.RequestError as exc:
         logger.error("Failed clearing backend conversation: %s", exc)
-        raise RuntimeError("Unable to reach Eva backend to clear the conversation.") from exc
+        raise RuntimeError("Unable to reach CATBot backend to clear the conversation.") from exc
 
     if response.status_code not in (200, 204):
         logger.error("Backend clear failed (%s): %s", response.status_code, response.text)
@@ -164,13 +202,14 @@ async def check_backend_health() -> tuple[str, Optional[float]]:
     """Return backend health status string and latency in seconds."""
 
     health_url = f"{BACKEND_BASE_URL.rstrip('/')}/health"
+    headers = _backend_headers()
     loop = asyncio.get_running_loop()
     start = loop.time()
     try:
-        async with httpx.AsyncClient(timeout=CHAT_TIMEOUT) as client:
-            response = await client.get(health_url)
+        async with httpx.AsyncClient(timeout=CHAT_TIMEOUT, verify=BACKEND_VERIFY_SSL) as client:
+            response = await client.get(health_url, headers=headers)
     except httpx.RequestError:
-        logger.warning("Eva backend health check failed", exc_info=True)
+        logger.warning("CATBot backend health check failed", exc_info=True)
         return "❌ Offline", None
 
     latency = loop.time() - start
@@ -199,8 +238,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     message_counts.setdefault(user_id, 0)
 
     greeting = (
-        f"👋 Hi {user_name}! I'm Eva, your AI assistant.\n\n"
-        "Send me a message and I'll reply using the full Eva stack.\n"
+        f"👋 Hi {user_name}! I'm CATBot, your AI assistant.\n\n"
+        "Send me a message and I'll reply using the full CATBot stack.\n"
         "Use /help to see everything I can do."
     )
     await update.message.reply_text(greeting)
@@ -214,12 +253,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     help_text = (
-        "📚 *Eva Telegram Bot Commands*\n\n"
+        "📚 *CATBot Telegram Bot Commands*\n\n"
         "*/start* – initialize the chat\n"
         "*/help* – display this help message\n"
         "*/status* – check backend connectivity and usage\n"
         "*/clear* – reset our conversation history\n\n"
-        "Simply send any text message to talk with Eva."
+        "Simply send any text message to talk with CATBot."
     )
     await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
 
@@ -241,7 +280,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     latency_ms = f"{latency * 1000:.0f} ms" if latency is not None else "n/a"
 
     status_text = (
-        "🤖 *Eva Telegram Bot Status*\n\n"
+        "🤖 *CATBot Telegram Bot Status*\n\n"
         f"Backend: {backend_status}\n"
         f"Latency: {latency_ms}\n"
         f"Your messages: {message_total}\n"
@@ -295,7 +334,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         reply = await call_backend_chat(user_id, text)
     except RuntimeError as exc:
         await update.message.reply_text(
-            "😔 Sorry, something went wrong talking to Eva. Please try again later."
+            "😔 Sorry, something went wrong talking to CATBot. Please try again later."
         )
         logger.error("Error while chatting with backend: %s", exc)
         return
@@ -330,11 +369,15 @@ def main() -> None:
         logger.error(str(exc))
         raise SystemExit(1) from exc
 
+    async def _post_init(app: Application) -> None:
+        """Log when the application has finished initializing (post_init must be async)."""
+        logger.info("CATBot Telegram bot started")
+
     application: Application = (
         ApplicationBuilder()
         .token(TELEGRAM_BOT_TOKEN)
         .rate_limiter(AIORateLimiter())
-        .post_init(lambda app: logger.info("Eva Telegram bot started"))
+        .post_init(_post_init)
         .build()
     )
 
@@ -345,7 +388,7 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     application.add_error_handler(error_handler)
 
-    logger.info("🤖 Starting Eva Telegram bot...")
+    logger.info("🤖 Starting CATBot Telegram bot...")
     if not ALLOW_ALL_USERS:
         logger.info("Authorized user IDs: %s", sorted(ADMIN_IDS))
     else:

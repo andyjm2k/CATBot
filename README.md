@@ -43,7 +43,7 @@ pip install python-docx openpyxl PyPDF2 Pillow reportlab
 pip install autogen-agentchat autogen-core autogen-ext
 pip install "mcp>=1.6.0" "browser-use==0.1.41" playwright pyperclip
 pip install langchain-community langchain-mistralai==0.2.4 langchain-ibm==0.3.10 langchain_mcp_adapters==0.0.9 langgraph==0.3.34
-pip install json-repair MainContentExtractor==0.0.4 pydantic-settings typer python-telegram-bot flask flask-cors
+pip install json-repair MainContentExtractor==0.0.4 pydantic-settings typer "python-telegram-bot[rate-limiter]" flask flask-cors
 
 # Install Playwright browsers
 playwright install
@@ -133,6 +133,9 @@ npm install
 #### Option A: Using pip (Recommended)
 
 ```bash
+# Option: install everything from requirements.txt (includes Telegram bot)
+# pip install -r requirements.txt
+
 # Create a virtual environment (recommended)
 python -m venv venv
 
@@ -158,7 +161,7 @@ pip install "mcp>=1.6.0" "browser-use==0.1.41" playwright pyperclip
 pip install langchain-community langchain-mistralai==0.2.4 langchain-ibm==0.3.10 langchain_mcp_adapters==0.0.9 langgraph==0.3.34
 
 # Install additional utilities
-pip install json-repair MainContentExtractor==0.0.4 pydantic-settings typer python-telegram-bot flask flask-cors
+pip install json-repair MainContentExtractor==0.0.4 pydantic-settings typer "python-telegram-bot[rate-limiter]" flask flask-cors
 
 # Install Playwright browsers
 playwright install
@@ -330,9 +333,15 @@ Key environment variables (see `config/mcp_config.env.example` for complete list
 - `NEWS_API_KEY`: News API key
 
 #### Telegram Bot Configuration
-- `TELEGRAM_BOT_TOKEN`: Telegram bot token from BotFather (required)
-- `TELEGRAM_ADMIN_IDS`: Comma-separated list of allowed Telegram user IDs
+- `TELEGRAM_BOT_TOKEN`: Telegram bot token from BotFather (required for the bot)
+- `TELEGRAM_ADMIN_IDS`: Comma-separated list of allowed Telegram user IDs (numeric only; invalid entries are skipped)
 - `TELEGRAM_ALLOW_ALL`: Set to "true" to allow all users (default: false)
+- `TELEGRAM_BACKEND_URL`: Base URL of the CATBot proxy server (default: http://localhost:8002)
+- `OPENAI_API_KEY` or `MCP_LLM_OPENAI_API_KEY`: Proxy uses one of these for Telegram chat (same as web LLM)
+- `TELEGRAM_SECRET`: Optional shared secret for bot-to-proxy auth when the proxy is reachable beyond localhost (set on both bot and proxy)
+- **System prompt / rules**: To use the same system context and rules as the web UI, put your prompt in `config/catbot_system_prompt.txt`. The proxy uses this file for Telegram when it exists (overrides `TELEGRAM_SYSTEM_PROMPT` env). A default file is included that aligns Telegram with the web UI identity and rules.
+
+See `config/telegram_env_example.txt` for the full list and examples.
 
 ### Team Configuration (AutoGen)
 
@@ -363,16 +372,17 @@ Edit `config/team-config.json` to configure your AutoGen team:
 #### Option 1: Start All Services (Windows)
 
 ```bash
-python start_all.py
+python scripts/start_all.py
 ```
 
-This will start:
+This will start (each in a separate command window):
 - HTTP server (port 8000)
 - Whisper API server (port 8001)
 - Proxy server (port 8002)
 - AutoGen Studio (port 8084)
 - MCP Browser-Use HTTP server (port 8383; run `uv run mcp-server-browser-use server` in mcp-browser-use directory)
 - MCP Browser HTTP server (port 5001; Flask bridge; connects to browser-use via `MCP_BROWSER_USE_HTTP_URL`, default http://127.0.0.1:8383/mcp)
+- **Telegram bot** (polling; requires `python-telegram-bot` and `TELEGRAM_BOT_TOKEN` in `.env`)
 
 #### Option 1b: Stop All Services (Windows)
 
@@ -519,11 +529,14 @@ Supported file formats:
 
 ### Using Telegram Bot
 
+Telegram users talk to the CATBot assistant via a polling bot. The bot forwards messages to the CATBot proxy server, which keeps per-user conversation history and calls the same OpenAI-compatible LLM used elsewhere (configurable via `OPENAI_API_KEY` or `MCP_LLM_OPENAI_API_KEY`). Memory and assistant context (timezone, knowledge cutoff) apply to Telegram chats as well. To use the same system prompt and rules as the web UI, place your prompt in `config/catbot_system_prompt.txt`; the proxy uses it for Telegram when the file exists.
+
 **Setup:**
 1. Create a bot with [@BotFather](https://core.telegram.org/bots#botfather)
 2. Set `TELEGRAM_BOT_TOKEN` in your `.env` file
 3. Configure `TELEGRAM_ADMIN_IDS` or set `TELEGRAM_ALLOW_ALL=true`
-4. Start the bot: `python -m src.integrations.telegram_bot`
+4. Ensure the proxy server is running (e.g. port 8002). For Telegram-only use, only the proxy and the bot need to run.
+5. Start the bot: run `python scripts/start_all.py` (the Telegram bot is started automatically), or start it only with `python -m src.integrations.telegram_bot` from the project root. Install the dependency first: `pip install -r requirements.txt` or `pip install "python-telegram-bot[rate-limiter]"`.
 
 **Bot Commands:**
 - `/start` - Greet the user and register the conversation
@@ -578,7 +591,18 @@ AI_assistant/
 
 ### Python Packages
 
-See [Installation Guide](#step-3-install-python-dependencies) for complete list of Python dependencies.
+Key packages include (see [Installation Guide](#step-3-install-python-dependencies) and `requirements.txt` for the full list):
+
+| Package | Purpose |
+|---------|---------|
+| `fastapi`, `uvicorn` | Proxy server and API |
+| `httpx` | HTTP client (proxy, Telegram bot backend requests) |
+| `python-telegram-bot[rate-limiter]` | Telegram bot integration (polling) |
+| `python-dotenv` | Load `.env` configuration |
+| `flask`, `flask-cors` | MCP browser HTTP server |
+| `python-docx`, `openpyxl`, `PyPDF2`, `Pillow`, `reportlab` | File operations |
+
+Install all Python dependencies with: `pip install -r requirements.txt`
 
 ## Additional Resources
 
@@ -662,8 +686,10 @@ See [Installation Guide](#step-3-install-python-dependencies) for complete list 
 
 7. **Telegram Bot Not Responding**
    - Verify `TELEGRAM_BOT_TOKEN` is set correctly
-   - Check that `TELEGRAM_ADMIN_IDS` is configured or `TELEGRAM_ALLOW_ALL=true`
-   - Ensure proxy server is running on port 8002
+   - Check that `TELEGRAM_ADMIN_IDS` is configured (numeric IDs only) or `TELEGRAM_ALLOW_ALL=true`
+   - Ensure the proxy server is running on port 8002
+   - Set `OPENAI_API_KEY` or `MCP_LLM_OPENAI_API_KEY` on the proxy so Telegram chat can call the LLM
+   - If using `TELEGRAM_SECRET`, set the same value on both the bot and the proxy
    - Check bot logs for connection errors
 
 8. **MCP Browser Server Connection Issues**

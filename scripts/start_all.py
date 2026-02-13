@@ -22,6 +22,7 @@ commands = [
     f'start cmd /k "cd /d {PROJECT_ROOT} && %venv% && autogenstudio serve --team config/team-config.json --host 0.0.0.0 --port 8084"',
     f'start cmd /k "cd /d {PROJECT_ROOT} && {VENV_PYTHON} scripts/start_mcp_browser_use_http_server.py"',
     f'start cmd /k "cd /d {PROJECT_ROOT} && {VENV_PYTHON} scripts/start_mcp_browser_server.py"',
+    f'start cmd /k "cd /d {PROJECT_ROOT} && {VENV_PYTHON} -m src.integrations.telegram_bot"',
 ]
 
 # Start all processes in separate command windows

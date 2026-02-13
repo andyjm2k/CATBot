@@ -276,6 +276,8 @@ MCP_PRESETS = {
     # Future: "stdio": {"type": "stdio", "command": sys.executable, "allowed_args": [["-m", "mcp_server_browser_use"], ...]},
 }
 TEAM_CONFIG_FILE = _PROJECT_ROOT / "config" / "team-config.json"
+# Optional: same system prompt / rules as web UI; when present, used for Telegram (overrides TELEGRAM_SYSTEM_PROMPT env)
+CATBOT_SYSTEM_PROMPT_FILE = _PROJECT_ROOT / "config" / "catbot_system_prompt.txt"
 SCRATCH_DIR = _PROJECT_ROOT / "scratch"
 
 # Allowed file extensions for scratch file operations (path traversal mitigation)
@@ -306,19 +308,52 @@ def _get_assistant_context_block() -> str:
 
 
 # Telegram/OpenAI configuration
-TELEGRAM_DEFAULT_MODEL = os.getenv("TELEGRAM_MODEL", os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
-TELEGRAM_SYSTEM_PROMPT = os.getenv(
+def _parse_telegram_history_limit() -> int:
+    """Parse TELEGRAM_HISTORY_LIMIT with default 12 on invalid value."""
+    try:
+        return max(1, int(os.getenv("TELEGRAM_HISTORY_LIMIT", "12")))
+    except ValueError:
+        return 12
+
+
+def _parse_telegram_chat_timeout() -> float:
+    """Parse TELEGRAM_CHAT_TIMEOUT with default 30 on invalid value."""
+    try:
+        return max(1.0, float(os.getenv("TELEGRAM_CHAT_TIMEOUT", "30")))
+    except ValueError:
+        return 30.0
+
+
+TELEGRAM_DEFAULT_MODEL = os.getenv("TELEGRAM_MODEL") or os.getenv("OPENAI_MODEL") or os.getenv("MCP_LLM_MODEL_NAME", "gpt-4o-mini")
+TELEGRAM_SYSTEM_PROMPT_ENV = os.getenv(
     "TELEGRAM_SYSTEM_PROMPT",
-    "You are Eva, a helpful AI assistant that responds concisely for Telegram users.",
+    "You are CATBot, a helpful AI assistant that responds concisely for Telegram users.",
 )
-TELEGRAM_HISTORY_LIMIT = int(os.getenv("TELEGRAM_HISTORY_LIMIT", "12"))
-TELEGRAM_CHAT_TIMEOUT = float(os.getenv("TELEGRAM_CHAT_TIMEOUT", "30"))
-TELEGRAM_OPENAI_BASE_URL = os.getenv("TELEGRAM_OPENAI_BASE_URL") or os.getenv(
-    "OPENAI_API_BASE", "https://api.openai.com/v1"
+
+
+def _get_telegram_system_prompt_base() -> str:
+    """Return the base system prompt for Telegram: config file if present, else TELEGRAM_SYSTEM_PROMPT env."""
+    if CATBOT_SYSTEM_PROMPT_FILE.exists():
+        try:
+            content = CATBOT_SYSTEM_PROMPT_FILE.read_text(encoding="utf-8").strip()
+            if content:
+                return content
+        except Exception as e:
+            print(f"Warning: Could not read {CATBOT_SYSTEM_PROMPT_FILE}: {e}")
+    return TELEGRAM_SYSTEM_PROMPT_ENV
+TELEGRAM_HISTORY_LIMIT = _parse_telegram_history_limit()
+TELEGRAM_CHAT_TIMEOUT = _parse_telegram_chat_timeout()
+TELEGRAM_OPENAI_BASE_URL = (
+    os.getenv("TELEGRAM_OPENAI_BASE_URL")
+    or os.getenv("OPENAI_API_BASE")
+    or os.getenv("MCP_LLM_OPENAI_ENDPOINT")
+    or "https://api.openai.com/v1"
 )
 TELEGRAM_OPENAI_CHAT_PATH = os.getenv("TELEGRAM_OPENAI_CHAT_PATH", "/chat/completions")
 OPENAI_ORG_ID = os.getenv("OPENAI_ORG_ID") or os.getenv("OPENAI_ORGANIZATION")
 OPENAI_PROJECT_ID = os.getenv("OPENAI_PROJECT_ID")
+# Optional shared secret for bot-to-proxy auth; when set, requests must include X-Telegram-Secret or Authorization: Bearer <secret>
+TELEGRAM_SECRET = os.getenv("TELEGRAM_SECRET")
 
 # Auth configuration
 AUTH_USERS_FILE = _PROJECT_ROOT / "config" / "auth_users.json"
@@ -491,6 +526,21 @@ def trim_telegram_history(history: List[Dict[str, str]]) -> None:
     max_messages = max(TELEGRAM_HISTORY_LIMIT, 1) * 2
     if len(history) > max_messages:
         del history[: len(history) - max_messages]
+
+
+def _validate_telegram_secret(request: Request) -> None:
+    """If TELEGRAM_SECRET is set, require X-Telegram-Secret or Authorization Bearer to match; else raise 401."""
+    if not TELEGRAM_SECRET:
+        return
+    secret_header = request.headers.get("X-Telegram-Secret")
+    auth_header = request.headers.get("Authorization")
+    token = None
+    if secret_header is not None and secret_header.strip() == TELEGRAM_SECRET:
+        token = TELEGRAM_SECRET
+    if auth_header and auth_header.strip().startswith("Bearer "):
+        token = auth_header.strip()[7:].strip()
+    if token != TELEGRAM_SECRET:
+        raise HTTPException(status_code=401, detail="Telegram secret required or invalid")
 
 
 # Create scratch directory if it doesn't exist
@@ -720,8 +770,13 @@ async def require_auth_for_v1_routes(request: Request, call_next):
         "/v1/proxy/news",  # News proxy - public
         "/v1/proxy/fetch",  # Web fetch proxy - public
     }
-    
-    if path.startswith("/v1/") and path not in exempt_paths:
+    # Telegram bot endpoints are unauthenticated (bot uses TELEGRAM_SECRET when set)
+    require_auth = (
+        path.startswith("/v1/")
+        and path not in exempt_paths
+        and not path.startswith("/v1/telegram/chat")
+    )
+    if require_auth:
         try:
             # Get authorization header - FastAPI headers are case-insensitive, but check both for robustness
             # Use get() with case-insensitive lookup
@@ -1931,16 +1986,21 @@ async def auth_me(current_user: Dict[str, Any] = Depends(get_current_user)):
 
 
 @app.post("/v1/telegram/chat", response_model=TelegramChatResponse)
-async def telegram_chat_endpoint(request: TelegramChatRequest):
+async def telegram_chat_endpoint(raw_request: Request, request: TelegramChatRequest):
     """Process a Telegram chat message via OpenAI-compatible API."""
+    _validate_telegram_secret(raw_request)
 
     message_text = (request.message or "").strip()
     if not message_text:
         raise HTTPException(status_code=400, detail="message is required")
 
-    api_key = os.getenv("OPENAI_API_KEY")
+    # Prefer OPENAI_API_KEY; fall back to MCP_LLM_OPENAI_API_KEY for single .env setups
+    api_key = os.getenv("OPENAI_API_KEY") or os.getenv("MCP_LLM_OPENAI_API_KEY")
     if not api_key:
-        raise HTTPException(status_code=503, detail="OPENAI_API_KEY is not configured on the server")
+        raise HTTPException(
+            status_code=503,
+            detail="OPENAI_API_KEY or MCP_LLM_OPENAI_API_KEY is not configured on the server",
+        )
 
     conversation_id = request.conversation_id or request.user_id or "default"
     history = telegram_conversations.setdefault(conversation_id, [])
@@ -1959,7 +2019,7 @@ async def telegram_chat_endpoint(request: TelegramChatRequest):
 
     system_prompt = request.system_prompt
     if system_prompt is None:
-        system_prompt = TELEGRAM_SYSTEM_PROMPT
+        system_prompt = _get_telegram_system_prompt_base()
 
     # Prepend assistant context (timezone + knowledge awareness)
     system_prompt = _get_assistant_context_block() + system_prompt
@@ -2091,8 +2151,9 @@ async def telegram_chat_endpoint(request: TelegramChatRequest):
 
 
 @app.delete("/v1/telegram/chat/{conversation_id}")
-async def telegram_clear_conversation(conversation_id: str):
+async def telegram_clear_conversation(request: Request, conversation_id: str):
     """Clear cached Telegram conversation history for a user."""
+    _validate_telegram_secret(request)
 
     removed = telegram_conversations.pop(conversation_id, None) is not None
     return {"conversation_id": conversation_id, "cleared": removed}
