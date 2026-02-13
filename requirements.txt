@@ -39,3 +39,7 @@ mcp>=0.1.0
 
 # FastMCP HTTP client for mcp-server-browser-use (HTTP transport; same ref as mcp-browser-use)
 fastmcp @ git+https://github.com/jlowin/fastmcp.git@3d6fd4650c4c59465fbd6983693952946259d354
+
+# AutoGen team chat and code execution (actor-critic workflow; Docker executor for code)
+autogen-agentchat>=0.4.0
+autogen-ext[docker]>=0.4.0

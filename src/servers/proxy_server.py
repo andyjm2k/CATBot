@@ -65,6 +65,21 @@ except ImportError as e:
     Component = None
     ComponentLoader = None
 
+# Optional: code execution tool and Docker executor for actor workbench (requires autogen-ext[docker])
+AUTOGEN_CODE_EXEC_AVAILABLE = False
+PythonCodeExecutionTool = None
+DockerCommandLineCodeExecutor = None
+if AUTOGEN_AVAILABLE:
+    try:
+        from autogen_ext.tools.code_execution import PythonCodeExecutionTool as _PythonCodeExecutionTool
+        from autogen_ext.code_executors.docker import DockerCommandLineCodeExecutor as _DockerCommandLineCodeExecutor
+        PythonCodeExecutionTool = _PythonCodeExecutionTool
+        DockerCommandLineCodeExecutor = _DockerCommandLineCodeExecutor
+        AUTOGEN_CODE_EXEC_AVAILABLE = True
+        print("[OK] AutoGen code execution (Docker) available")
+    except ImportError as e:
+        print(f"[WARN] AutoGen code execution not available (install autogen-ext[docker]): {e}")
+
 # Import MCP SDK (with error handling)
 try:
     from mcp import ClientSession, stdio_client, StdioServerParameters
@@ -715,6 +730,15 @@ async def startup_event():
             print(f"   Route: {list(route.methods)} {route.path}", flush=True)
             sys.stdout.flush()
 
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Stop AutoGen code executors (e.g. Docker containers) on app shutdown."""
+    global autogen_team
+    if autogen_team is not None:
+        await _stop_code_executors(autogen_team)
+        autogen_team = None
+
 # Request logging middleware to debug CORS issues
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
     """Middleware to log all incoming requests for debugging."""
@@ -1078,7 +1102,34 @@ def load_autogen_team():
         # Load the team from the configuration using ComponentLoader
         loader = ComponentLoader()
         team = loader.load_component(team_config)
-        
+
+        # Inject PythonCodeExecutionTool (Docker) into first participant's workbench if available
+        if AUTOGEN_CODE_EXEC_AVAILABLE and PythonCodeExecutionTool and DockerCommandLineCodeExecutor:
+            coding_dir = _PROJECT_ROOT / "coding"
+            try:
+                coding_dir.mkdir(exist_ok=True)
+            except OSError:
+                pass
+            work_dir = str(coding_dir)
+            executor = DockerCommandLineCodeExecutor(
+                work_dir=work_dir,
+                image="python:3.12-slim",
+                timeout=120,
+            )
+            code_tool = PythonCodeExecutionTool(executor)
+            participants = getattr(team, "participants", None) or getattr(team, "_participants", [])
+            if participants:
+                agent = participants[0]
+                wb = getattr(agent, "workbench", getattr(agent, "_workbench", None))
+                if wb is not None:
+                    wb_list = wb if isinstance(wb, list) else [wb]
+                    for wb_item in wb_list:
+                        tools = getattr(wb_item, "tools", getattr(wb_item, "_tools", None))
+                        if tools is not None and isinstance(tools, list):
+                            tools.insert(0, code_tool)
+                            print("✅ Injected PythonCodeExecutionTool (Docker) into assistant_agent workbench")
+                            break
+
         print(f"✅ AutoGen team loaded successfully: {team_config.get('label', 'Unknown')}")
         return team
         
@@ -1087,6 +1138,63 @@ def load_autogen_team():
         print(f"❌ Error loading AutoGen team: {e}")
         print(traceback.format_exc())
         return None
+
+
+async def _start_code_executors(team: Any) -> None:
+    """Start any code executors (Docker/local) attached to team participants or their tools."""
+    if not AUTOGEN_AVAILABLE or team is None:
+        return
+    participants = getattr(team, "participants", None) or getattr(team, "_participants", [])
+    for agent in participants or []:
+        # CodeExecutorAgent has _code_executor
+        executor = getattr(agent, "_code_executor", None)
+        if executor is not None and hasattr(executor, "start"):
+            try:
+                await executor.start()
+            except Exception as e:
+                print(f"⚠️ Code executor start warning: {e}")
+        # AssistantAgent workbench tools may have .executor (e.g. PythonCodeExecutionTool)
+        wb = getattr(agent, "workbench", getattr(agent, "_workbench", None))
+        if wb is not None:
+            wb_list = wb if isinstance(wb, list) else [wb]
+            for wb_item in wb_list:
+                tools = getattr(wb_item, "tools", getattr(wb_item, "_tools", None))
+                if tools is not None:
+                    for t in tools:
+                        ex = getattr(t, "executor", None) or getattr(t, "_executor", None)
+                        if ex is not None and hasattr(ex, "start"):
+                            try:
+                                await ex.start()
+                            except Exception as e:
+                                print(f"⚠️ Tool executor start warning: {e}")
+
+
+async def _stop_code_executors(team: Any) -> None:
+    """Stop any code executors attached to team participants or their tools."""
+    if not AUTOGEN_AVAILABLE or team is None:
+        return
+    participants = getattr(team, "participants", None) or getattr(team, "_participants", [])
+    for agent in participants or []:
+        executor = getattr(agent, "_code_executor", None)
+        if executor is not None and hasattr(executor, "stop"):
+            try:
+                await executor.stop()
+            except Exception as e:
+                print(f"⚠️ Code executor stop warning: {e}")
+        wb = getattr(agent, "workbench", getattr(agent, "_workbench", None))
+        if wb is not None:
+            wb_list = wb if isinstance(wb, list) else [wb]
+            for wb_item in wb_list:
+                tools = getattr(wb_item, "tools", getattr(wb_item, "_tools", None))
+                if tools is not None:
+                    for t in tools:
+                        ex = getattr(t, "executor", None) or getattr(t, "_executor", None)
+                        if ex is not None and hasattr(ex, "stop"):
+                            try:
+                                await ex.stop()
+                            except Exception as e:
+                                print(f"⚠️ Tool executor stop warning: {e}")
+
 
 # Load servers on startup (with error handling to prevent startup failures)
 try:
@@ -1425,12 +1533,21 @@ async def _do_autogen(input_text: str) -> Dict[str, Any]:
         config_mtime = TEAM_CONFIG_FILE.stat().st_mtime
         if not hasattr(autogen_team, '_config_mtime') or autogen_team._config_mtime != config_mtime:
             print("🔄 Team config file changed, reloading AutoGen team...")
+            await _stop_code_executors(autogen_team)
             new_team = load_autogen_team()
             if new_team is not None:
                 autogen_team = new_team
                 autogen_team._config_mtime = config_mtime
+                if hasattr(autogen_team, '_executors_started'):
+                    delattr(autogen_team, '_executors_started')
     except Exception as e:
         print(f"⚠️  Error checking team config modification time: {e}")
+    if not getattr(autogen_team, '_executors_started', False):
+        await _start_code_executors(autogen_team)
+        try:
+            autogen_team._executors_started = True
+        except Exception:
+            pass
     try:
         print(f"🚀 Running AutoGen team with input: {input_text[:100]}...")
         result = await autogen_team.run(task=input_text)
